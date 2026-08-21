@@ -1,5 +1,7 @@
 # GG AI Desktop
 
+![GG AI Desktop](docs/gg-ai-desktop.png)
+
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
 This directory **is** the program. GROK TUI (Grok 4.6) is the intended motor.
