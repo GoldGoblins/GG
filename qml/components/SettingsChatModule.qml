@@ -1,0 +1,127 @@
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Controls
+
+Item {
+    id: root
+
+    property bool showOpenTabInInput: false
+    property string engineTarget: "LOCAL_QWEN"
+    signal showOpenTabInInputChangedByUser(bool value)
+    signal engineTargetChangedByUser(string value)
+
+    implicitHeight: 168
+
+    GgFrame {
+        anchors.fill: parent
+        leftLegend: "CHAT"
+        rightLegend: "MOTOR"
+        backgroundColor: "#161616"
+        borderColor: "#6a6a6a"
+    }
+
+    Column {
+        anchors.fill: parent
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        anchors.topMargin: 22
+        anchors.bottomMargin: 12
+        spacing: 8
+
+        Text {
+            text: "Engine"
+            color: "#d8dee9"
+            font.family: "monospace"
+            font.pixelSize: 10
+        }
+
+        Row {
+            spacing: 0
+            height: 18
+
+            Text {
+                text: "QWEN"
+                color: root.engineTarget === "LOCAL_QWEN"
+                    ? "#d8dee9"
+                    : "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+                font.bold: root.engineTarget === "LOCAL_QWEN"
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked:
+                        root.engineTargetChangedByUser("LOCAL_QWEN")
+                }
+            }
+
+            Text {
+                text: " | "
+                color: "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+            }
+
+            Text {
+                text: "GROK"
+                color: root.engineTarget === "GROK_WORKER"
+                    ? "#d8dee9"
+                    : "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+                font.bold: root.engineTarget === "GROK_WORKER"
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked:
+                        root.engineTargetChangedByUser("GROK_WORKER")
+                }
+            }
+
+            Text {
+                text: " | "
+                color: "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+            }
+
+            Text {
+                text: "GROK TUI"
+                color: root.engineTarget === "GROK_TUI"
+                    ? "#d8dee9"
+                    : "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+                font.bold: root.engineTarget === "GROK_TUI"
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked:
+                        root.engineTargetChangedByUser("GROK_TUI")
+                }
+            }
+        }
+
+        CheckBox {
+            id: openTabBox
+            text: "Show the open tab name in the input frame"
+            checked: root.showOpenTabInInput
+            onToggled:
+                root.showOpenTabInInputChangedByUser(openTabBox.checked)
+        }
+
+        Text {
+            width: parent.width
+            text: "Same QWEN | GROK | GROK TUI switch as under INPUT. Motor only. "
+                + "The open tab name is optional chrome, not something "
+                + "you type."
+            color: "#8a8a8a"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 10
+        }
+    }
+}

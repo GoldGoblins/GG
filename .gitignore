@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+auth.json
+*.secret
+*.pem
+*.key
+.gg-ai-desktop-live
+*.log
+*.tmp

@@ -1,0 +1,99 @@
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Controls
+
+Item {
+    id: root
+
+    property bool showInnerEditorChrome: true
+    property string hostKind: "CODE"
+    signal showInnerEditorChromeChangedByUser(bool value)
+    signal hostKindChangedByUser(string value)
+    signal spawnInstanceRequested()
+
+    implicitHeight: 188
+
+    GgFrame {
+        anchors.fill: parent
+        leftLegend: "WORKSPACE"
+        rightLegend: "NAMED SURFACES"
+        backgroundColor: "#161616"
+        borderColor: "#6a6a6a"
+    }
+
+    Column {
+        anchors.fill: parent
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        anchors.topMargin: 22
+        anchors.bottomMargin: 12
+        spacing: 8
+
+        Text {
+            text: "Host"
+            color: "#d8dee9"
+            font.family: "monospace"
+            font.pixelSize: 10
+        }
+
+        Row {
+            spacing: 0
+            height: 18
+
+            Repeater {
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE"]
+
+                delegate: Text {
+                    required property string modelData
+                    required property int index
+                    text: (index === 0 ? "" : " | ") + modelData
+                    color: root.hostKind === modelData
+                        ? "#d8dee9"
+                        : "#5d6670"
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                    font.bold: root.hostKind === modelData
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.hostKindChangedByUser(modelData)
+                    }
+                }
+            }
+        }
+
+        Row {
+            spacing: 10
+
+            CheckBox {
+                id: innerChromeBox
+                text: "Show inner CODE frame"
+                checked: root.showInnerEditorChrome
+                onToggled:
+                    root.showInnerEditorChromeChangedByUser(
+                        innerChromeBox.checked
+                    )
+            }
+
+            Button {
+                text: "New tab +"
+                onClicked: root.spawnInstanceRequested()
+            }
+        }
+
+        Text {
+            width: parent.width
+            text: "Same as the workspace footer and top tabs. "
+                + "WEB is your browser in this box. SITE is the local "
+                + "WordPress copy (files + MariaDB 3307). PREVIEW runs "
+                + "PHP on 127.0.0.1 only. The AI does not log in or "
+                + "deploy to one.com. EXTERNAL stays honest until a "
+                + "window embed exists."
+            color: "#8a8a8a"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 10
+        }
+    }
+}
