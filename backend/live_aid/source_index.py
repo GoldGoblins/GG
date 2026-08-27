@@ -4,8 +4,19 @@ import ast
 from dataclasses import dataclass, asdict
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+_SKIP_DIR_NAMES = {
+    ".git",
+    "backups",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "models",
+}
+_MAX_INDEX_BYTES = 2 * 1024 * 1024
 
 @dataclass(frozen=True)
 class Symbol:
@@ -30,10 +41,26 @@ class SourceIndex:
         files: dict[str, dict[str, Any]] = {}
         symbols: dict[str, list[Symbol]] = {}
         modules: dict[str, str] = {}
-        for path in sorted(root.rglob("*")):
+        found: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in _SKIP_DIR_NAMES
+            ]
+            folder = Path(dirpath)
+            for name in filenames:
+                found.append(folder / name)
+        for path in sorted(found):
             if path.is_symlink() or not path.is_file():
                 continue
             rel = path.relative_to(root).as_posix()
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > _MAX_INDEX_BYTES:
+                continue
             raw = path.read_bytes()
             digest = hashlib.sha256(raw).hexdigest()
             entry: dict[str, Any] = {"sha256": digest, "bytes": len(raw), "suffix": path.suffix}

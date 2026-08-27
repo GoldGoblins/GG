@@ -26,10 +26,12 @@ def main() -> int:
     if len(again["sessions"]) != 2:
         raise AssertionError("duplicate remember")
     rows = list_for_ui(current_id="bbb-2", path=catalog)
-    if rows[0]["label"] != "session 1  ·  GROK TUI":
-        raise AssertionError("label " + rows[0]["label"])
-    if rows[1]["current"] is not True:
+    if rows[0]["label"] != "session 2  ·  GROK TUI":
+        raise AssertionError("newest first " + rows[0]["label"])
+    if rows[0]["current"] is not True:
         raise AssertionError("current flag")
+    if rows[1]["label"] != "session 1  ·  GROK TUI":
+        raise AssertionError("older below " + rows[1]["label"])
     payload = json.loads(catalog.read_text(encoding="utf-8"))
     if payload["memory"] != "GoldGoblins":
         raise AssertionError("shared memory missing")

@@ -99,6 +99,10 @@ def main() -> int:
         raise AssertionError("text lost while stripping ANSI")
     if "grokTuiChunk" not in src:
         raise AssertionError("xterm hole unused")
+    if "TerminalGrid" not in src:
+        raise AssertionError("native TUI grid unused")
+    if "_attach_native_tui" not in src:
+        raise AssertionError("native TUI attach missing")
     if "build_grok_tui_argv(" not in src:
         raise AssertionError("TUI argv builder unused")
     if "workspaceFileChanged" not in src:
@@ -111,6 +115,44 @@ def main() -> int:
         raise AssertionError("chat session list signal missing")
     if "resumeGrokTui" not in src:
         raise AssertionError("resume grok tui missing")
+    if "GIT_TERMINAL_PROMPT" not in src:
+        raise AssertionError("TUI must not wait on git credentials")
+    if "setInterval(2000)" not in src:
+        raise AssertionError("wallet timer still too hot")
+    if "cryptoTickTrader" not in src or "cryptoArmTrader" not in src:
+        raise AssertionError("swing trader slots missing")
+    if "cryptoFlashArb" not in src:
+        raise AssertionError("flash arb slot missing")
+    if "cryptoEvalSignals" not in src or "cryptoArmBot" not in src:
+        raise AssertionError("signal bot slots missing")
+    if "cryptoLabOn" not in src or "cryptoLabOff" not in src:
+        raise AssertionError("crypto lab start/stop missing")
+    if "tmogSnapshot" not in src or "startTmog" not in src:
+        raise AssertionError("tmog host slots missing")
+    if "shellLoadQueue" not in src:
+        raise AssertionError("shell load queue slot missing")
+    import json as _json
+    from backend.shell_load import queue as shell_queue
+    queued = _json.loads(host.shellLoadQueue())
+    if queued != shell_queue():
+        raise AssertionError("host queue drifted from walker")
+    if "qmlLiveReload" not in src:
+        raise AssertionError("QML live reload missing")
+    if "clearComponentCache" not in src:
+        raise AssertionError("QML cache clear missing")
+    if "restartDesktop" not in src:
+        raise AssertionError("manual desktop restart missing")
+    if "os.execv" in src or "_reexec_desktop" in src:
+        raise AssertionError("RELOAD must not re-exec the desktop")
+    listed = host.listShellSources()
+    if "qml/Main.qml" not in listed:
+        raise AssertionError("shell source list missing Main.qml")
+    if "qml/components/WorkspaceSurface.qml" not in listed:
+        raise AssertionError("shell source list missing WorkspaceSurface")
+    if "startDetached" in src:
+        raise AssertionError("desktop reload must stay in-process")
+    if "self.watchDesktopWorkspace()\n        self.watchQmlSources()" in src:
+        raise AssertionError("QML live reload still auto-starts")
     if host.watchLivePath("/etc/passwd") is not None:
         pass
     saved = host.saveScratchFile("live-watch.txt", "hello-live\n")

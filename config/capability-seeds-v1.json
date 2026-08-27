@@ -20,9 +20,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["foundation", "gate", "static", "verify", "source"],
+      "tags": [
+        "foundation",
+        "gate",
+        "static",
+        "verify",
+        "source"
+      ],
       "relations": [
-        {"type": "RELATED_TO", "target": "verify.qml.gate"}
+        {
+          "type": "RELATED_TO",
+          "target": "verify.qml.gate"
+        }
       ]
     },
     {
@@ -44,10 +53,22 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["qml", "gate", "syntax", "profile", "verify"],
+      "tags": [
+        "qml",
+        "gate",
+        "syntax",
+        "profile",
+        "verify"
+      ],
       "relations": [
-        {"type": "RELATED_TO", "target": "verify.source.foundation"},
-        {"type": "USED_WITH", "target": "analyze.source.qml"}
+        {
+          "type": "RELATED_TO",
+          "target": "verify.source.foundation"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "analyze.source.qml"
+        }
       ]
     },
     {
@@ -69,9 +90,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["python", "analyze", "diagnostic", "source", "fast"],
+      "tags": [
+        "python",
+        "analyze",
+        "diagnostic",
+        "source",
+        "fast"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "index.source.repository"}
+        {
+          "type": "USED_WITH",
+          "target": "index.source.repository"
+        }
       ]
     },
     {
@@ -93,11 +123,26 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["qml", "analyze", "diagnostic", "source", "fast"],
+      "tags": [
+        "qml",
+        "analyze",
+        "diagnostic",
+        "source",
+        "fast"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "verify.qml.gate"},
-        {"type": "USED_WITH", "target": "verify.qml.preflight"},
-        {"type": "USED_WITH", "target": "index.source.repository"}
+        {
+          "type": "USED_WITH",
+          "target": "verify.qml.gate"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "verify.qml.preflight"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "index.source.repository"
+        }
       ]
     },
     {
@@ -119,9 +164,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["shell", "bash", "analyze", "diagnostic", "fast"],
+      "tags": [
+        "shell",
+        "bash",
+        "analyze",
+        "diagnostic",
+        "fast"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "verify.source.foundation"}
+        {
+          "type": "USED_WITH",
+          "target": "verify.source.foundation"
+        }
       ]
     },
     {
@@ -143,9 +197,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["json", "schema", "analyze", "diagnostic", "fast"],
+      "tags": [
+        "json",
+        "schema",
+        "analyze",
+        "diagnostic",
+        "fast"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "verify.source.foundation"}
+        {
+          "type": "USED_WITH",
+          "target": "verify.source.foundation"
+        }
       ]
     },
     {
@@ -154,7 +217,7 @@
       "kind": "STATE_SERVICE",
       "source_path": "projects/gg-ai-desktop/backend/live_aid/source_index.py",
       "manifest_key": "backend/live_aid/source_index.py",
-      "content_sha256": "c719153987bf3a3c528ec2d184cc07acadea76418ab7020e96e0fa1cd9f60e4b",
+      "content_sha256": "2c25a95adc3d7c3de3099a6ac1ca155f1840df96fd8010f5d9e4e603ec977efd",
       "entrypoint_kind": "python_symbol",
       "entrypoint": "SourceIndex.build",
       "contract": {
@@ -167,11 +230,26 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["source", "index", "symbol", "repository", "locality"],
+      "tags": [
+        "source",
+        "index",
+        "symbol",
+        "repository",
+        "locality"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "resolve.unknown.forensic"},
-        {"type": "USED_WITH", "target": "analyze.source.python"},
-        {"type": "USED_WITH", "target": "analyze.source.qml"}
+        {
+          "type": "USED_WITH",
+          "target": "resolve.unknown.forensic"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "analyze.source.python"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "analyze.source.qml"
+        }
       ]
     },
     {
@@ -192,10 +270,21 @@
         "execution_authority": "NONE",
         "model_inference": false
       },
-      "depends_on": ["index.source.repository"],
-      "tags": ["forensic", "unknown", "probe", "source", "evidence"],
+      "depends_on": [
+        "index.source.repository"
+      ],
+      "tags": [
+        "forensic",
+        "unknown",
+        "probe",
+        "source",
+        "evidence"
+      ],
       "relations": [
-        {"type": "PRODUCES_FOR", "target": "tool.safe.dispatch"}
+        {
+          "type": "PRODUCES_FOR",
+          "target": "tool.safe.dispatch"
+        }
       ]
     },
     {
@@ -217,9 +306,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["fact", "store", "content", "provenance", "state"],
+      "tags": [
+        "fact",
+        "store",
+        "content",
+        "provenance",
+        "state"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "resolve.unknown.forensic"}
+        {
+          "type": "USED_WITH",
+          "target": "resolve.unknown.forensic"
+        }
       ]
     },
     {
@@ -240,12 +338,29 @@
         "execution_authority": "CONTROLLED_PROFILE",
         "model_inference": false
       },
-      "depends_on": ["verify.qml.gate"],
-      "tags": ["qml", "preflight", "verify", "diagnostic", "gate"],
+      "depends_on": [
+        "verify.qml.gate"
+      ],
+      "tags": [
+        "qml",
+        "preflight",
+        "verify",
+        "diagnostic",
+        "gate"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "analyze.source.qml"},
-        {"type": "VALIDATES", "target": "repair.qml.local_model"},
-        {"type": "USED_WITH", "target": "workflow.qml.post_draft_repair"}
+        {
+          "type": "USED_WITH",
+          "target": "analyze.source.qml"
+        },
+        {
+          "type": "VALIDATES",
+          "target": "repair.qml.local_model"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "workflow.qml.post_draft_repair"
+        }
       ]
     },
     {
@@ -267,10 +382,22 @@
         "model_inference": true
       },
       "depends_on": [],
-      "tags": ["model", "local", "semantic", "proposal", "autonomy"],
+      "tags": [
+        "model",
+        "local",
+        "semantic",
+        "proposal",
+        "autonomy"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "repair.qml.local_model"},
-        {"type": "USED_WITH", "target": "control.autonomy.task"}
+        {
+          "type": "USED_WITH",
+          "target": "repair.qml.local_model"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "control.autonomy.task"
+        }
       ]
     },
     {
@@ -292,9 +419,18 @@
         "model_inference": true
       },
       "depends_on": [],
-      "tags": ["model", "local", "inference", "gpu", "runtime"],
+      "tags": [
+        "model",
+        "local",
+        "inference",
+        "gpu",
+        "runtime"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "model.local.chat"}
+        {
+          "type": "USED_WITH",
+          "target": "model.local.chat"
+        }
       ]
     },
     {
@@ -315,10 +451,21 @@
         "execution_authority": "CONTROLLED_PROFILE",
         "model_inference": true
       },
-      "depends_on": ["model.local.infer"],
-      "tags": ["model", "local", "chat", "conversation", "runtime"],
+      "depends_on": [
+        "model.local.infer"
+      ],
+      "tags": [
+        "model",
+        "local",
+        "chat",
+        "conversation",
+        "runtime"
+      ],
       "relations": [
-        {"type": "RELATED_TO", "target": "model.autonomy.propose"}
+        {
+          "type": "RELATED_TO",
+          "target": "model.autonomy.propose"
+        }
       ]
     },
     {
@@ -339,12 +486,29 @@
         "execution_authority": "CONTROLLED_PROFILE",
         "model_inference": true
       },
-      "depends_on": ["model.autonomy.propose"],
-      "tags": ["qml", "repair", "model", "diagnostic", "candidate"],
+      "depends_on": [
+        "model.autonomy.propose"
+      ],
+      "tags": [
+        "qml",
+        "repair",
+        "model",
+        "diagnostic",
+        "candidate"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "verify.qml.preflight"},
-        {"type": "REPAIRS", "target": "analyze.source.qml"},
-        {"type": "USED_WITH", "target": "workflow.qml.post_draft_repair"}
+        {
+          "type": "USED_WITH",
+          "target": "verify.qml.preflight"
+        },
+        {
+          "type": "REPAIRS",
+          "target": "analyze.source.qml"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "workflow.qml.post_draft_repair"
+        }
       ]
     },
     {
@@ -366,10 +530,23 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["tool", "safe", "read", "search", "test", "git"],
+      "tags": [
+        "tool",
+        "safe",
+        "read",
+        "search",
+        "test",
+        "git"
+      ],
       "relations": [
-        {"type": "OBSERVES", "target": "index.source.repository"},
-        {"type": "USED_WITH", "target": "resolve.unknown.forensic"}
+        {
+          "type": "OBSERVES",
+          "target": "index.source.repository"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "resolve.unknown.forensic"
+        }
       ]
     },
     {
@@ -391,9 +568,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["write", "limited", "patch", "approval", "verify"],
+      "tags": [
+        "write",
+        "limited",
+        "patch",
+        "approval",
+        "verify"
+      ],
       "relations": [
-        {"type": "RELATED_TO", "target": "control.autonomy.task"}
+        {
+          "type": "RELATED_TO",
+          "target": "control.autonomy.task"
+        }
       ]
     },
     {
@@ -415,9 +601,18 @@
         "model_inference": false
       },
       "depends_on": [],
-      "tags": ["task", "ledger", "goal", "state", "control"],
+      "tags": [
+        "task",
+        "ledger",
+        "goal",
+        "state",
+        "control"
+      ],
       "relations": [
-        {"type": "USED_WITH", "target": "control.autonomy.task"}
+        {
+          "type": "USED_WITH",
+          "target": "control.autonomy.task"
+        }
       ]
     },
     {
@@ -443,10 +638,22 @@
         "tool.safe.dispatch",
         "model.autonomy.propose"
       ],
-      "tags": ["autonomy", "task", "goal", "why", "controller"],
+      "tags": [
+        "autonomy",
+        "task",
+        "goal",
+        "why",
+        "controller"
+      ],
       "relations": [
-        {"type": "PRODUCES_FOR", "target": "write.limited.apply"},
-        {"type": "RELATED_TO", "target": "state.fact.store"}
+        {
+          "type": "PRODUCES_FOR",
+          "target": "write.limited.apply"
+        },
+        {
+          "type": "RELATED_TO",
+          "target": "state.fact.store"
+        }
       ]
     },
     {
@@ -471,11 +678,27 @@
         "verify.qml.preflight",
         "repair.qml.local_model"
       ],
-      "tags": ["qml", "repair", "workflow", "post", "draft", "verify"],
+      "tags": [
+        "qml",
+        "repair",
+        "workflow",
+        "post",
+        "draft",
+        "verify"
+      ],
       "relations": [
-        {"type": "COMPOSES", "target": "verify.qml.preflight"},
-        {"type": "COMPOSES", "target": "repair.qml.local_model"},
-        {"type": "RELATED_TO", "target": "analyze.source.qml"}
+        {
+          "type": "COMPOSES",
+          "target": "verify.qml.preflight"
+        },
+        {
+          "type": "COMPOSES",
+          "target": "repair.qml.local_model"
+        },
+        {
+          "type": "RELATED_TO",
+          "target": "analyze.source.qml"
+        }
       ]
     },
     {
@@ -970,6 +1193,56 @@
         "source_change",
         "fail_closed",
         "bounded"
+      ]
+    },
+    {
+      "human_id": "focus.grok.knowledge_tree",
+      "description": "Grok TUI adapter over the existing SOURCE-MANIFEST head, LaserFocus handle cache and Merkle neighborhood compiler. Lookup is identity-in nearby-hashes-out; observations append to FactStore without promoting canonical policy.",
+      "kind": "STATE_SERVICE",
+      "source_path": "projects/gg-ai-desktop/backend/grok_knowledge_tree.py",
+      "manifest_key": "backend/grok_knowledge_tree.py",
+      "content_sha256": "5a19dddc81857fb93778797c8b92e109d89d37af298450ef3e281d020a8405a8",
+      "entrypoint_kind": "python_symbol",
+      "entrypoint": "lookup",
+      "contract": {
+        "effect_class": "RUNTIME_STATE_WRITE",
+        "risk_floor": "YELLOW",
+        "persistent_write": "LOCAL_STATE",
+        "network": "NONE",
+        "sudo": "NO",
+        "execution_authority": "NONE",
+        "model_inference": false
+      },
+      "depends_on": [
+        "focus.route.laser",
+        "compile.neighborhood.bounded",
+        "state.merkle.domain",
+        "state.fact.store"
+      ],
+      "relations": [
+        {
+          "type": "USED_WITH",
+          "target": "focus.route.laser"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "compile.neighborhood.bounded"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "state.fact.store"
+        }
+      ],
+      "tags": [
+        "grok",
+        "tui",
+        "laser",
+        "merkle",
+        "neighborhood",
+        "knowledge",
+        "head",
+        "content_addressed",
+        "fail_closed"
       ]
     }
   ]

@@ -23,6 +23,14 @@ _SITE = re.compile(
     r"\b(sajt(?:en)?|site|hemsida(?:n)?|wordpress|dreamweaver|webbplats(?:en)?)\b",
     re.IGNORECASE,
 )
+_TMOG = re.compile(
+    r"\b(tmog|task\s*manager)\b",
+    re.IGNORECASE,
+)
+_MEDIA = re.compile(
+    r"\b(media|musik(?:en)?|radio(?:n)?|tv(?:n)?|teve|emulator(?:n)?|spel(?:en)?|game|cliamp|torlink|fetch)\b",
+    re.IGNORECASE,
+)
 _BARE = {
     "terminal": "TERMINAL",
     "term": "TERMINAL",
@@ -34,6 +42,17 @@ _BARE = {
     "site": "SITE",
     "sajt": "SITE",
     "hemsida": "SITE",
+    "tmog": "TMOG",
+    "media": "MEDIA",
+    "musik": "MEDIA",
+    "radio": "MEDIA",
+    "tv": "MEDIA",
+    "spel": "MEDIA",
+    "game": "MEDIA",
+    "emulator": "MEDIA",
+    "cliamp": "MEDIA",
+    "torlink": "MEDIA",
+    "fetch": "MEDIA",
 }
 
 
@@ -50,6 +69,10 @@ def parse_surface_intent(text: str) -> str:
         return "TERMINAL"
     if _SITE.search(value):
         return "SITE"
+    if _TMOG.search(value):
+        return "TMOG"
+    if _MEDIA.search(value):
+        return "MEDIA"
     if _WEB.search(value):
         return "WEB"
     if _EXTERNAL.search(value):

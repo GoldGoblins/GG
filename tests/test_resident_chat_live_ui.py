@@ -149,7 +149,7 @@ def main() -> int:
         "Unexpected desktop window title.",
     )
 
-    workspace_surface = root.findChild(QObject, "workspaceSurface")
+    workspace_surface = desktop.wait_for_workspace_surface(root)
     require(workspace_surface is not None, "WorkspaceSurface missing.")
     live_aid_bridge = desktop.LiveAidQtBridge(desktop.REPO_ROOT, app)
     require(

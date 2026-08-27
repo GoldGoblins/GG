@@ -207,9 +207,11 @@ def url_allowed(raw: str) -> bool:
     if not text:
         return False
     parsed = urlparse(text)
+    if parsed.scheme == "about" and parsed.path in {"blank", ""}:
+        return True
     if parsed.scheme == "file":
         try:
-            local = Path(parsed.path).resolve()
+            local = Path(unquote(parsed.path)).resolve()
         except OSError:
             return False
         return local.is_relative_to(SITE_ROOT.resolve())

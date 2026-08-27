@@ -24,8 +24,9 @@ def main() -> int:
     overlay = parse_pty_wallet("footer 379K / 500K  weekly 42%")
     if overlay.get("context_used") != 379000:
         raise AssertionError("pty ctx used: " + repr(overlay))
-    if overlay.get("weekly_percent") != 42:
-        raise AssertionError("pty weekly: " + repr(overlay))
+    chat = parse_pty_wallet("du har bara 31% av din weekly kvar")
+    if chat.get("weekly_percent") is not None:
+        raise AssertionError("chat weekly must not override billing")
     home = Path(tempfile.mkdtemp(prefix="gg-wallet-"))
     project = home / "sessions" / "%2Fhome%2FGG%2FGoldGoblins"
     outer = project / "outer-session"
@@ -130,9 +131,6 @@ def main() -> int:
         raise AssertionError("live " + str(view["live_tokens"]))
     if view["weekly_percent"] != 53:
         raise AssertionError("weekly from log " + str(view["weekly_percent"]))
-    footer = parse_pty_wallet("Grok 4.6 (low) · always-approve  75% used")
-    if footer.get("weekly_percent") != 75:
-        raise AssertionError("footer weekly " + repr(footer))
     print("GROK_WALLET_TEST=PASS")
     return 0
 

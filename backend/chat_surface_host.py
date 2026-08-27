@@ -23,6 +23,9 @@ from PySide6.QtCore import (
 )
 
 from backend.chat_sessions import list_for_ui
+from backend import crypto_host
+from backend import media_host
+from backend import tmog_contract
 from backend.grok_wallet import parse_pty_wallet, snapshot as grok_wallet_snapshot
 from backend.grok_worker_contract import (
     DEV_GROK_HOME,
@@ -33,6 +36,7 @@ from backend.grok_worker_contract import (
 )
 from backend.mini_vt import MiniVt
 from backend.surface_intent import parse_surface_intent
+from backend import shell_load
 from backend import web_surface
 
 BASH = "/bin/bash"
@@ -57,6 +61,7 @@ class ChatSurfaceHost(QObject):
     grokTuiChunk = Signal(str)
     grokWalletChanged = Signal(str)
     chatSessionsChanged = Signal(str)
+    qmlLiveReload = Signal()
     workspaceFileChanged = Signal(str, str, str)
     siteImportProgress = Signal(str, int, int, str)
 
@@ -67,6 +72,9 @@ class ChatSurfaceHost(QObject):
         self._preview_origin = ""
         self._qml_root: QObject | None = None
         self._tui_embed: object | None = None
+        self._tui_grid: object | None = None
+        self._tmog_embed: object | None = None
+        self._media_embed: object | None = None
         self._pending_tui_size: tuple[int, int] | None = None
         self._fs: QFileSystemWatcher | None = None
         self._fs_suppress: set[str] = set()
@@ -77,13 +85,85 @@ class ChatSurfaceHost(QObject):
         self._sessions_json = ""
         self._pending_resume = ""
         self._wallet_timer = QTimer(self)
-        self._wallet_timer.setInterval(400)
+        self._wallet_timer.setInterval(2000)
         self._wallet_timer.timeout.connect(self._emit_wallet)
         self._wallet_timer.start()
+        self._qml_watch: QFileSystemWatcher | None = None
+        self._qml_reload = QTimer(self)
+        self._qml_reload.setSingleShot(True)
+        self._qml_reload.setInterval(250)
+        self._qml_reload.timeout.connect(self._emit_qml_reload)
 
     def set_qml_root(self, root: QObject | None) -> None:
         self._qml_root = root
         self.watchDesktopWorkspace()
+        self._attach_native_tui()
+
+    def _tui_hole(self):
+        root = self._qml_root
+        if root is None:
+            return None
+        from PySide6.QtQuick import QQuickItem
+
+        item = root.findChild(QQuickItem, "grokTuiHost")
+        return item
+
+    def _attach_native_tui(self) -> None:
+        hole = self._tui_hole()
+        if hole is None:
+            return
+        grid = self._tui_grid
+        if grid is not None and getattr(grid, "parentItem", lambda: None)() is hole:
+            return
+        if grid is not None:
+            grid.setParentItem(None)
+            grid.deleteLater()
+            self._tui_grid = None
+        from backend.terminal_grid import TerminalGrid
+
+        grid = TerminalGrid(hole)
+        grid.dataProduced.connect(self.grokTuiWrite)
+        grid.resized.connect(self.grokTuiResize)
+        grid.ready.connect(self._on_native_tui_ready)
+        hole.visibleChanged.connect(self._on_tui_hole_visible)
+        self._tui_grid = grid
+        if hole.isVisible():
+            grid.forceActiveFocus()
+
+    def _on_native_tui_ready(self) -> None:
+        hole = self._tui_hole()
+        if hole is not None and hole.isVisible():
+            self.startGrokTui("ws.tui.grok")
+
+    def _on_tui_hole_visible(self, *_args) -> None:
+        hole = self._tui_hole()
+        grid = self._tui_grid
+        if hole is None or grid is None:
+            return
+        if not hole.isVisible():
+            return
+        grid.forceActiveFocus()
+        self.startGrokTui("ws.tui.grok")
+
+    @Slot(result=str)
+    def listShellSources(self) -> str:
+        root = Path(__file__).resolve().parents[1]
+        qml_root = root / "qml"
+        rows: list[str] = []
+        if qml_root.is_dir():
+            for path in sorted(qml_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in {".qml", ".js", ".html", ".css"}:
+                    continue
+                if any(part.startswith(".") for part in path.relative_to(root).parts):
+                    continue
+                rows.append(path.relative_to(root).as_posix())
+        return json.dumps(rows)
+
+    @Slot(result=str)
+    def shellLoadQueue(self) -> str:
+        return json.dumps(shell_load.queue())
 
     @Slot(str, result=str)
     def parseSurfaceIntent(self, text: str) -> str:
@@ -108,6 +188,288 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def defaultBrowseUrl(self) -> str:
         return web_surface.default_browse_url()
+
+    @Slot(result=str)
+    def tmogSnapshot(self) -> str:
+        try:
+            return json.dumps(tmog_contract.snapshot(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
+
+    @Slot(result=bool)
+    def startTmog(self) -> bool:
+        root = self._qml_root
+        if root is None:
+            return False
+        embed = self._tmog_embed
+        if embed is None:
+            from backend.tmog_embed import TmogEmbed
+
+            embed = TmogEmbed(root)
+            self._tmog_embed = embed
+        return bool(embed.start())
+
+    @Slot()
+    def hideTmog(self) -> None:
+        embed = self._tmog_embed
+        if embed is not None:
+            embed.hide()
+
+    def _media_embedder(self):
+        root = self._qml_root
+        if root is None:
+            return None
+        embed = self._media_embed
+        if embed is None:
+            from backend.media_embed import MediaEmbed
+
+            embed = MediaEmbed(root)
+            self._media_embed = embed
+        return embed
+
+    def _media_follow(self, payload: dict[str, Any]) -> dict[str, Any]:
+        embed = self._media_embed
+        if payload.get("screen") != "EMBED":
+            if embed is not None:
+                embed.hide()
+            return payload
+        embed = self._media_embedder()
+        if embed is None:
+            return payload
+        kind = str(payload.get("kind") or "")
+        if kind in ("game", "fetch") or (
+            kind == "video" and not payload.get("drawable")
+        ):
+            embed.attach(media_host.player_pid(), media_host.embed_tokens())
+        embed.show()
+        return payload
+
+    @Slot(result=str)
+    def mediaStatus(self) -> str:
+        try:
+            return json.dumps(media_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
+
+    @Slot(str, result=str)
+    def mediaSetMode(self, mode: str) -> str:
+        try:
+            return json.dumps(media_host.set_mode(mode), separators=(",", ":"))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(str, result=str)
+    def mediaPlay(self, item_id: str) -> str:
+        try:
+            item = media_host.item_by_id(item_id)
+            xid = 0
+            kind = str((item or {}).get("kind") or "")
+            if kind in ("TV", "GAME"):
+                embed = self._media_embedder()
+                if embed is not None:
+                    xid = int(embed.holder_xid())
+            payload = self._media_follow(
+                media_host.play_item(item_id, drawable_xid=xid)
+            )
+            return json.dumps(payload, separators=(",", ":"))
+        except (ValueError, RuntimeError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def mediaPause(self) -> str:
+        return json.dumps(media_host.pause(), separators=(",", ":"))
+
+    @Slot(result=str)
+    def mediaStop(self) -> str:
+        embed = self._media_embed
+        if embed is not None:
+            embed.stop()
+        return json.dumps(media_host.stop(), separators=(",", ":"))
+
+    @Slot(int, result=str)
+    def mediaSkip(self, delta: int) -> str:
+        payload = media_host.status_payload()
+        if str(payload.get("backend") or "") == "cliamp":
+            return json.dumps(media_host.skip(int(delta)), separators=(",", ":"))
+        nxt = media_host.next_item_id(int(delta))
+        if not nxt:
+            return json.dumps(payload, separators=(",", ":"))
+        return self.mediaPlay(nxt)
+
+    @Slot(str, result=str)
+    def mediaSearch(self, query: str) -> str:
+        try:
+            return json.dumps(media_host.search(query), separators=(",", ":"))
+        except (ValueError, RuntimeError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(int, result=str)
+    def mediaSetVolume(self, volume: int) -> str:
+        try:
+            return json.dumps(media_host.set_volume(int(volume)), separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def mediaStartCliamp(self) -> str:
+        try:
+            payload = self._media_follow(media_host.start_cliamp())
+            return json.dumps(payload, separators=(",", ":"))
+        except RuntimeError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def mediaStartFetch(self) -> str:
+        try:
+            payload = self._media_follow(media_host.start_fetch())
+            return json.dumps(payload, separators=(",", ":"))
+        except RuntimeError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot()
+    def hideMedia(self) -> None:
+        embed = self._media_embed
+        if embed is not None:
+            embed.hide()
+
+    @Slot(result=str)
+    def cryptoStatus(self) -> str:
+        try:
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def cryptoConnectWatch(self, pubkey: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.connect_watch(pubkey),
+                separators=(",", ":"),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def cryptoCreateTestWallet(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.create_test_wallet(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, result=str)
+    def cryptoImportKeypair(self, path: str) -> str:
+        try:
+            raw = str(path or "").replace("file://", "")
+            return json.dumps(
+                crypto_host.import_keypair_file(raw),
+                separators=(",", ":"),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def cryptoAirdrop(self) -> str:
+        try:
+            return json.dumps(crypto_host.airdrop_testnet(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoDisconnect(self) -> str:
+        return json.dumps(crypto_host.disconnect(), separators=(",", ":"))
+
+    @Slot(str, result=str)
+    def cryptoSetNetwork(self, network: str) -> str:
+        try:
+            payload = crypto_host.set_network(network)
+            if "wallet" in payload:
+                return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+            return json.dumps(payload, separators=(",", ":"))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(result=str)
+    def cryptoLabOn(self) -> str:
+        try:
+            return json.dumps(crypto_host.lab_on(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoLabOff(self) -> str:
+        try:
+            return json.dumps(crypto_host.lab_off(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(bool, result=str)
+    def cryptoArmBot(self, armed: bool) -> str:
+        try:
+            return json.dumps(crypto_host.set_bot_armed(bool(armed)), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoEvalSignals(self) -> str:
+        try:
+            return json.dumps(crypto_host.evaluate_signals(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(bool, result=str)
+    def cryptoArmTrader(self, armed: bool) -> str:
+        try:
+            return json.dumps(crypto_host.set_trader_armed(bool(armed)), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoTickTrader(self) -> str:
+        try:
+            return json.dumps(crypto_host.tick_trader(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoResetTrader(self) -> str:
+        try:
+            return json.dumps(crypto_host.reset_trader(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoTickBot(self) -> str:
+        try:
+            return json.dumps(crypto_host.tick_bot(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoFlashArb(self) -> str:
+        try:
+            return json.dumps(crypto_host.run_flash_arb(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoFlashArbReset(self) -> str:
+        try:
+            return json.dumps(crypto_host.reset_flash_arb(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, result=str)
+    def cryptoIngestSignal(self, raw: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.ingest_paper_signal(raw),
+                separators=(",", ":"),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
 
     @Slot(result=str)
     def listSiteFiles(self) -> str:
@@ -348,6 +710,9 @@ class ChatSurfaceHost(QObject):
         env["GROK_HOME"] = str(DEV_GROK_HOME)
         env["LINES"] = str(rows)
         env["COLUMNS"] = str(cols)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env.pop("GIT_ASKPASS", None)
+        env.pop("SSH_ASKPASS", None)
         try:
             proc = subprocess.Popen(
                 argv,
@@ -464,6 +829,52 @@ class ChatSurfaceHost(QObject):
             return
 
     @Slot()
+    def watchQmlSources(self) -> None:
+        qml_root = Path(__file__).resolve().parents[1] / "qml"
+        if not qml_root.is_dir():
+            return
+        if self._qml_watch is None:
+            self._qml_watch = QFileSystemWatcher(self)
+            self._qml_watch.fileChanged.connect(self._on_qml_file)
+            self._qml_watch.directoryChanged.connect(self._on_qml_dir)
+        watcher = self._qml_watch
+        watcher.addPath(str(qml_root))
+        components = qml_root / "components"
+        if components.is_dir():
+            watcher.addPath(str(components))
+        for path in qml_root.rglob("*.qml"):
+            watcher.addPath(str(path))
+
+    def _on_qml_file(self, path: str) -> None:
+        if self._qml_watch is not None and Path(path).is_file():
+            self._qml_watch.addPath(path)
+        self._qml_reload.start()
+
+    def _on_qml_dir(self, directory: str) -> None:
+        if self._qml_watch is not None:
+            self._qml_watch.addPath(directory)
+        self.watchQmlSources()
+        self._qml_reload.start()
+
+    def _emit_qml_reload(self) -> None:
+        from PySide6.QtQml import QQmlEngine
+
+        root = self._qml_root
+        if root is not None:
+            ctx = QQmlEngine.contextForObject(root)
+            if ctx is not None:
+                ctx.engine().clearComponentCache()
+        self.qmlLiveReload.emit()
+
+    @Slot()
+    def reloadQml(self) -> None:
+        self._emit_qml_reload()
+
+    @Slot(result=bool)
+    def restartDesktop(self) -> bool:
+        self._emit_qml_reload()
+        return True
+
     def watchDesktopWorkspace(self) -> None:
         if self._fs is not None:
             return
@@ -611,24 +1022,19 @@ class ChatSurfaceHost(QObject):
             return None
 
     def _emit_wallet(self) -> None:
-        peek = grok_wallet_snapshot(
+        payload = grok_wallet_snapshot(
             pty_overlay=self._wallet_pty,
             live_base=self._wallet_live_base,
             tui_pid=self._tui_pid(),
         )
-        used = peek.get("context_used")
-        turn = peek.get("turn_tokens")
+        used = payload.get("context_used")
+        turn = payload.get("turn_tokens")
         if used is not None:
             if self._wallet_live_base is None or used < self._wallet_live_base:
                 self._wallet_live_base = int(used)
             if turn is not None and turn != self._wallet_last_turn:
                 self._wallet_last_turn = int(turn)
                 self._wallet_live_base = int(used)
-        payload = grok_wallet_snapshot(
-            pty_overlay=self._wallet_pty,
-            live_base=self._wallet_live_base,
-            tui_pid=self._tui_pid(),
-        )
         text = json.dumps(payload, separators=(",", ":"))
         if text == self._wallet_json:
             return
@@ -653,6 +1059,20 @@ class ChatSurfaceHost(QObject):
         self._tui_embed = None
         if embed is not None:
             embed.stop()
+        grid = self._tui_grid
+        self._tui_grid = None
+        if grid is not None:
+            grid.setParentItem(None)
+            grid.deleteLater()
+        tmog = self._tmog_embed
+        self._tmog_embed = None
+        if tmog is not None:
+            tmog.stop()
+        media = self._media_embed
+        self._media_embed = None
+        if media is not None:
+            media.stop()
+        media_host.stop()
         for key in list(self._sessions):
             self._close(key)
 
@@ -679,6 +1099,9 @@ class ChatSurfaceHost(QObject):
                 import base64
 
                 self.grokTuiChunk.emit(base64.b64encode(raw).decode("ascii"))
+                grid = self._tui_grid
+                if grid is not None:
+                    grid.feed_bytes(raw)
                 decoded = raw.decode("utf-8", errors="replace")
                 overlay = parse_pty_wallet(_strip_ansi(decoded))
                 if overlay:

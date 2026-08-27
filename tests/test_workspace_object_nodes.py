@@ -120,8 +120,7 @@ def main() -> int:
     roots = engine.rootObjects()
     require(bool(roots), "Real Main.qml failed to start.")
     root = roots[0]
-
-    workspace = root.findChild(QObject, "workspaceSurface")
+    workspace = desktop.wait_for_workspace_surface(root)
     require(workspace is not None, "WorkspaceSurface missing.")
     rail = root.findChild(QObject, "workspaceObjectNodeRail")
     require(rail is not None, "workspaceObjectNodeRail missing.")
@@ -345,6 +344,18 @@ def main() -> int:
         str(workspace.property("hostKind") or "") == "SITE",
         "Host kind footer did not select SITE.",
     )
+    set_kind("TMOG")
+    app.processEvents()
+    require(
+        str(workspace.property("hostKind") or "") == "TMOG",
+        "Host kind footer did not select TMOG.",
+    )
+    set_kind("MEDIA")
+    app.processEvents()
+    require(
+        str(workspace.property("hostKind") or "") == "MEDIA",
+        "Host kind footer did not select MEDIA.",
+    )
     require(
         str(workspace.property("currentObjectId") or "") == "ws.site.current",
         "SITE host kind did not focus the site project.",
@@ -385,6 +396,23 @@ def main() -> int:
         "Seed terminal must not close.",
     )
     set_kind("WEB")
+    app.processEvents()
+    web_seed = int(workspace.property("currentIndex"))
+    close_instance(web_seed)
+    app.processEvents()
+    require(
+        str(workspace.property("currentObjectId") or "") == "ws.web.stub",
+        "First WEB tab must remain as the blank stub.",
+    )
+    require(
+        bool(
+            evaluate(
+                workspace,
+                'workspaceObjects.get(currentIndex).sourcePath === "about:blank"',
+            )
+        ),
+        "Closed first WEB tab must return to empty https:// bar.",
+    )
     spawn()
     app.processEvents()
     require(

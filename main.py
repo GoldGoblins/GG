@@ -11,13 +11,15 @@ import stat
 import subprocess
 import shutil
 import sys
+import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, QUrl, Signal, Slot
 from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from backend.web_surface import ensure_webengine
+from backend import shell_load
 
 ensure_webengine()
 
@@ -2223,6 +2225,7 @@ def qml_initial_properties(config: dict[str, object]) -> dict[str, object]:
         ],
         "liveAidDraftBlocking": live_aid["draft_blocking"],
         "shadowVerificationMode": live_aid["real_checker"],
+        "shellLoadQueueJson": json.dumps(shell_load.queue()),
     }
 
 def discover_nvidia_render() -> Path:
@@ -10346,6 +10349,19 @@ class ChatBridge(QObject):
             self._state = None
             self._set_bridge_activity(False, "")
 
+def wait_for_workspace_surface(root: QObject, timeout_ms: int = 4000) -> QObject | None:
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    app = QCoreApplication.instance()
+    found = root.findChild(QObject, "workspaceSurface")
+    while time.monotonic() < deadline:
+        if app is not None:
+            app.processEvents()
+        found = root.findChild(QObject, "workspaceSurface")
+        if found is not None and root.property("shellLoading") is False:
+            return found
+    return found
+
+
 def main() -> int:
     config = load_config()
     integrations = config["integrations"]
@@ -10539,10 +10555,14 @@ def main() -> int:
     root = roots[0]
 
     live_aid_bridge = LiveAidQtBridge(REPO_ROOT, app)
-    workspace_surface = root.findChild(
-        QObject,
-        "workspaceSurface",
-    )
+    if not root.setProperty(
+        "liveAidBackend",
+        live_aid_bridge,
+    ):
+        raise RuntimeError(
+            "Main window rejected Live Aid bridge property."
+        )
+    workspace_surface = wait_for_workspace_surface(root)
 
     if workspace_surface is None:
         raise RuntimeError(

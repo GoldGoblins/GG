@@ -167,5 +167,5 @@ def list_for_ui(
                 "memory": MEMORY,
             }
         )
-    rows.sort(key=lambda item: int(item["n"]))
+    rows.sort(key=lambda item: int(item["n"]), reverse=True)
     return rows

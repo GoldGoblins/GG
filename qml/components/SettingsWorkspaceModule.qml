@@ -42,7 +42,7 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA"]
 
                 delegate: Text {
                     required property string modelData
@@ -90,7 +90,8 @@ Item {
                 + "WordPress copy (files + MariaDB 3307). PREVIEW runs "
                 + "PHP on 127.0.0.1 only. The AI does not log in or "
                 + "deploy to one.com. EXTERNAL stays honest until a "
-                + "window embed exists."
+                + "window embed exists. MEDIA is playlists, radio, TV "
+                + "and older-console games; the bottom strip is the player."
             color: "#8a8a8a"
             wrapMode: Text.WordWrap
             font.pixelSize: 10

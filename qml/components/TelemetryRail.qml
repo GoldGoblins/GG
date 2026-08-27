@@ -17,6 +17,7 @@ Item {
     property string activeSnippet: ""
     property string chatSessionsJson: "[]"
     property string activeChatSession: ""
+    property string cryptoStatusJson: "{}"
     signal snippetChosen(string path)
     signal chatSessionChosen(string sessionId, string engine)
 
@@ -73,6 +74,27 @@ Item {
         } catch (err) {
         }
         return []
+    }
+
+    readonly property var crypto: {
+        var empty = {
+            "legend": "TESTNET",
+            "signer": false,
+            "holdings": [],
+            "wallet": {}
+        }
+        try {
+            var parsed = JSON.parse(root.cryptoStatusJson || "{}")
+            if (!parsed || typeof parsed !== "object")
+                return empty
+            if (!parsed.holdings)
+                parsed.holdings = []
+            if (!parsed.wallet)
+                parsed.wallet = {}
+            return parsed
+        } catch (err) {
+            return empty
+        }
     }
 
     implicitWidth: root.compactMode ? 168 : 220
@@ -366,6 +388,116 @@ Item {
                                 String(modelData.session_id),
                                 String(modelData.engine || "GROK_TUI")
                             )
+                        }
+                    }
+                }
+            }
+
+            ScrollBar.vertical: ScrollBar {
+                policy: ScrollBar.AsNeeded
+            }
+        }
+    }
+
+    GgFrame {
+        id: cryptoFrame
+        objectName: "telemetryCryptoWallet"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: chatFrame.bottom
+        anchors.topMargin: 10
+        anchors.bottom: parent.bottom
+        leftLegend: "CRYPTO"
+        rightLegend: String(root.crypto.legend || "TESTNET")
+        backgroundColor: "#161616"
+        borderColor: root.frameBorder
+        radius: root.frameRadius
+
+        Flickable {
+            id: cryptoFlick
+            width: parent.width
+            height: Math.max(48, cryptoFrame.height - 28)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            contentWidth: width
+            contentHeight: cryptoColumn.height
+            interactive: contentHeight > height
+
+            Column {
+                id: cryptoColumn
+                width: cryptoFlick.width
+                spacing: 4
+
+                Text {
+                    width: parent.width
+                    text: {
+                        var w = root.crypto.wallet || {}
+                        if (!w.pubkey)
+                            return "DISCONNECTED"
+                        var key = String(w.pubkey)
+                        if (key.length > 12)
+                            return key.slice(0, 4) + "…" + key.slice(-4)
+                        return key
+                    }
+                    color: (root.crypto.wallet && root.crypto.wallet.pubkey)
+                        ? "#d8dee9"
+                        : "#6a6a6a"
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                    wrapMode: Text.NoWrap
+                    elide: Text.ElideMiddle
+                }
+
+                Text {
+                    width: parent.width
+                    text: root.crypto.signer ? "SIGNER  YES" : "SIGNER  NO"
+                    color: root.crypto.signer ? "#8db89a" : "#8b949e"
+                    font.family: "monospace"
+                    font.pixelSize: 8
+                }
+
+                Text {
+                    width: parent.width
+                    text: String((root.crypto.lab && root.crypto.lab.label) || "LAB OFF")
+                    color: (root.crypto.lab && root.crypto.lab.running)
+                        ? "#8db89a"
+                        : "#8b949e"
+                    font.family: "monospace"
+                    font.pixelSize: 8
+                }
+
+                Text {
+                    width: parent.width
+                    visible: root.crypto.holdings.length === 0
+                    text: "NO TOKENS"
+                    color: "#6a6a6a"
+                    font.family: "monospace"
+                    font.pixelSize: 9
+                }
+
+                Repeater {
+                    model: root.crypto.holdings
+
+                    delegate: Column {
+                        required property var modelData
+                        width: cryptoColumn.width
+                        spacing: 0
+
+                        Text {
+                            width: parent.width
+                            text: String(modelData.symbol || "")
+                            color: "#8b949e"
+                            font.family: "monospace"
+                            font.pixelSize: 8
+                        }
+                        Text {
+                            width: parent.width
+                            text: String(modelData.display || "")
+                            color: "#d8dee9"
+                            font.family: "monospace"
+                            font.pixelSize: 9
+                            wrapMode: Text.WrapAnywhere
                         }
                     }
                 }

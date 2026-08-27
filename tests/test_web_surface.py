@@ -32,6 +32,10 @@ def _run(web_surface) -> int:
         raise AssertionError("preferred site file missing")
     if not web_surface.url_allowed(web_surface.default_web_url()):
         raise AssertionError("local site url rejected")
+    if not web_surface.url_allowed("about:blank"):
+        raise AssertionError("SITE webengine blank document rejected")
+    if not web_surface.url_allowed("http://127.0.0.1:8765/"):
+        raise AssertionError("SITE localhost preview rejected")
     if web_surface.url_allowed("https://example.com/"):
         raise AssertionError("open internet url accepted")
     if web_surface.url_allowed("javascript:alert(1)"):

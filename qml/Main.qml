@@ -22,6 +22,12 @@ ApplicationWindow {
     property bool followChatTail: true
     property string activeTaskId: ""
     property string engineTarget: "LOCAL_QWEN"
+    readonly property string networkAuthority: (
+        root.engineTarget === "GROK_TUI"
+        || root.engineTarget === "GROK_WORKER"
+    )
+        ? "CONNECTED"
+        : "NONE"
     property string lastSelectedObjectId: ""
     property real alphaChatWidthRatio: 0.31
     property int alphaTelemetryWidth: 168
@@ -29,10 +35,253 @@ ApplicationWindow {
     property bool alphaShowDemoFixtures: false
     property bool showProductSourceTabs: false
     property var surfaceHost: null
+    property var liveAidBackend: null
+    readonly property var workspace: workspaceLoader.item
     property string grokWalletJson: "{}"
+    property string cryptoStatusJson: "{}"
+    onSurfaceHostChanged: {
+        root.pullCryptoStatus()
+    }
     property string chatSessionsJson: "[]"
     property string activeChatSession: ""
+    property bool shellLoading: true
+    property string shellLoadLabel: "LOADING..."
+    property int shellLoadPercent: 0
+    property string shellLoadCurrent: ""
+    property string shellLoadLog: ""
+    property string shellLoadQueueJson: "[]"
+    property var _shellQueue: []
+    property int _shellQueueIndex: 0
+    property var _shellComp: null
     readonly property int alphaBottomStripMargin: 8
+
+    function workspaceUrl() {
+        return Qt.resolvedUrl("components/WorkspaceSurface.qml")
+    }
+
+    function unloadDesktopShell() {
+        root.shellLoadPercent = 0
+        root.shellLoadCurrent = ""
+        root.shellLoadLog = ""
+        root._shellQueue = []
+        root._shellQueueIndex = 0
+        root._shellComp = null
+        workspaceLoader.source = ""
+    }
+
+    function parseShellQueue() {
+        var raw = root.shellLoadQueueJson
+        if (root.surfaceHost && root.surfaceHost.shellLoadQueue)
+            raw = root.surfaceHost.shellLoadQueue()
+        var rows = []
+        try {
+            rows = JSON.parse(raw || "[]")
+        } catch (err) {
+            rows = []
+        }
+        if (!rows || !rows.length)
+            return ["qml/components/WorkspaceSurface.qml"]
+        return rows
+    }
+
+    function shellUrl(rel) {
+        var path = String(rel || "")
+        if (path.indexOf("qml/") === 0)
+            path = path.slice(4)
+        return Qt.resolvedUrl(path)
+    }
+
+    function appendShellLog(name) {
+        var lines = root.shellLoadLog.length > 0
+            ? root.shellLoadLog.split("\n")
+            : []
+        lines.push(name)
+        if (lines.length > 12)
+            lines = lines.slice(lines.length - 12)
+        root.shellLoadLog = lines.join("\n")
+    }
+
+    function loadNextShellFile() {
+        if (root._shellQueueIndex >= root._shellQueue.length) {
+            root.shellLoadPercent = 100
+            root.loadDesktopShell()
+            return
+        }
+        var rel = String(root._shellQueue[root._shellQueueIndex] || "")
+        root.shellLoadCurrent = rel
+        root.appendShellLog(rel)
+        var total = root._shellQueue.length
+        root.shellLoadPercent = Math.round(
+            root._shellQueueIndex * 100 / Math.max(1, total)
+        )
+        var comp = Qt.createComponent(
+            root.shellUrl(rel),
+            Component.Asynchronous
+        )
+        root._shellComp = comp
+        if (!comp) {
+            root.onShellCompFinished()
+            return
+        }
+        if (comp.status === Component.Ready
+            || comp.status === Component.Error)
+            root.onShellCompFinished()
+        else
+            comp.statusChanged.connect(root.onShellCompFinished)
+    }
+
+    function onShellCompFinished() {
+        var comp = root._shellComp
+        if (comp && comp.status === Component.Loading)
+            return
+        if (comp) {
+            try {
+                comp.statusChanged.disconnect(root.onShellCompFinished)
+            } catch (err) {
+            }
+        }
+        root._shellComp = null
+        root._shellQueueIndex += 1
+        var total = Math.max(1, root._shellQueue.length)
+        root.shellLoadPercent = Math.round(
+            root._shellQueueIndex * 100 / total
+        )
+        Qt.callLater(root.loadNextShellFile)
+    }
+
+    function loadDesktopShell() {
+        var rel = "qml/components/WorkspaceSurface.qml"
+        root.shellLoadCurrent = rel
+        root.appendShellLog(rel)
+        workspaceLoader.setSource(root.workspaceUrl())
+    }
+
+    function bindWorkspace(item) {
+        if (!item)
+            return
+        item.showDemoFixtures = Qt.binding(function() {
+            return root.alphaShowDemoFixtures
+        })
+        item.showProductSourceTabs = Qt.binding(function() {
+            return root.showProductSourceTabs
+        })
+        item.chatWidthRatio = Qt.binding(function() {
+            return root.alphaChatWidthRatio
+        })
+        item.telemetryWidth = Qt.binding(function() {
+            return root.alphaTelemetryWidth
+        })
+        item.accentColor = Qt.binding(function() {
+            return root.cyan
+        })
+        item.frameBorder = Qt.binding(function() {
+            return root.frameBorder
+        })
+        item.frameRadius = Qt.binding(function() {
+            return root.frameRadius
+        })
+        item.showOpenTabInInput = Qt.binding(function() {
+            return root.showOpenTabInInput
+        })
+        item.showInnerEditorChrome = Qt.binding(function() {
+            return root.showInnerEditorChrome
+        })
+        item.chatBusy = Qt.binding(function() {
+            return root.bridgeBusy
+        })
+        item.engineTarget = Qt.binding(function() {
+            return root.engineTarget
+        })
+        item.utilityHeight = Qt.binding(function() {
+            return root.alphaUtilityHeight
+        })
+        item.liveAidBackend = Qt.binding(function() {
+            return root.liveAidBackend
+        })
+        item.chatWidthRatioRequested.connect(function(value) {
+            root.alphaChatWidthRatio = value
+            root.persistDesktopSettings()
+        })
+        item.telemetryWidthRequested.connect(function(value) {
+            root.alphaTelemetryWidth = value
+            root.persistDesktopSettings()
+        })
+        item.accentColorRequested.connect(function(value) {
+            root.cyan = value
+            root.persistDesktopSettings()
+        })
+        item.frameBorderRequested.connect(function(value) {
+            root.frameBorder = value
+            root.persistDesktopSettings()
+        })
+        item.frameRadiusRequested.connect(function(value) {
+            root.frameRadius = value
+            root.persistDesktopSettings()
+        })
+        item.demoVisibilityRequested.connect(function(value) {
+            root.alphaShowDemoFixtures = value
+            root.persistDesktopSettings()
+        })
+        item.productSourceTabsRequested.connect(function(value) {
+            root.showProductSourceTabs = value
+            root.persistDesktopSettings()
+        })
+        item.showOpenTabInInputRequested.connect(function(value) {
+            root.showOpenTabInInput = value
+            root.persistDesktopSettings()
+        })
+        item.showInnerEditorChromeRequested.connect(function(value) {
+            root.showInnerEditorChrome = value
+            root.persistDesktopSettings()
+        })
+        item.engineTargetRequested.connect(function(value) {
+            root.engineTarget = value
+            root.persistDesktopSettings()
+        })
+        item.utilityHeightRequested.connect(function(value) {
+            root.alphaUtilityHeight = value
+            root.persistDesktopSettings()
+        })
+        item.activeObjectChanged.connect(function(objectId, title) {
+            if (objectId === root.lastSelectedObjectId)
+                return
+            root.lastSelectedObjectId = objectId
+            root.appendRealNode(
+                "GG SYSTEM",
+                "CONTEXT",
+                "Active Workspace object changed to "
+                    + title
+                    + ". @current now resolves to "
+                    + objectId
+                    + ".",
+                "@current",
+                "SELECTED",
+                20,
+                ""
+            )
+        })
+    }
+
+    function beginShellLoad(label) {
+        root.shellLoadLabel = label
+        root.shellLoading = true
+        root.unloadDesktopShell()
+        root._shellQueue = root.parseShellQueue()
+        root._shellQueueIndex = 0
+        if (String(label) !== "RELOAD")
+            Qt.callLater(root.loadNextShellFile)
+    }
+
+    function finishShellLoad() {
+        if (workspaceLoader.status === Loader.Ready && workspaceLoader.item) {
+            root.bindWorkspace(workspaceLoader.item)
+            root.shellLoading = false
+        }
+    }
+
+    Component.onCompleted: Qt.callLater(function() {
+        root.beginShellLoad("LOADING...")
+    })
 
     readonly property bool narrowLayout: width < 1050
     readonly property bool compactTelemetry: width < 1450
@@ -69,6 +318,11 @@ ApplicationWindow {
         function onGrokWalletChanged(payload) {
             root.grokWalletJson = payload
         }
+        function onQmlLiveReload() {
+            if (!root._shellQueue.length)
+                root._shellQueue = root.parseShellQueue()
+            root.loadNextShellFile()
+        }
         function onChatSessionsChanged(payload) {
             root.chatSessionsJson = payload
             try {
@@ -94,6 +348,19 @@ ApplicationWindow {
         if (text.length >= 7 && text.charAt(0) === "#")
             return text.slice(0, 7)
         return text
+    }
+
+    function pullCryptoStatus() {
+        if (!root.surfaceHost || !root.surfaceHost.cryptoStatus)
+            return
+        root.cryptoStatusJson = root.surfaceHost.cryptoStatus()
+    }
+
+    Timer {
+        interval: 10000
+        running: true
+        repeat: true
+        onTriggered: root.pullCryptoStatus()
     }
 
     function persistDesktopSettings() {
@@ -202,7 +469,9 @@ ApplicationWindow {
     }
 
     function buildContextSnapshotJson() {
-        var workspaceSnapshot = workspace.contextSnapshot(32)
+        var workspaceSnapshot = workspace
+            ? workspace.contextSnapshot(32)
+            : {}
         var recentChat = []
         var start = Math.max(
             0,
@@ -269,7 +538,7 @@ ApplicationWindow {
         }
 
         var streamContext = contextReference
-        if (workspace.currentObjectTitle.length > 0)
+        if (workspace && workspace.currentObjectTitle.length > 0)
             streamContext = contextReference
                 + " · "
                 + workspace.currentObjectTitle
@@ -501,7 +770,7 @@ ApplicationWindow {
         }
 
         var streamContext = contextReference
-        if (workspace.currentObjectTitle.length > 0)
+        if (workspace && workspace.currentObjectTitle.length > 0)
             streamContext = contextReference
                 + " · "
                 + workspace.currentObjectTitle
@@ -681,6 +950,8 @@ ApplicationWindow {
     }
 
     function liveAidWorkVisible() {
+        if (!workspace)
+            return false
         if (
             !workspace.editorLoaded
             || workspace.editorLanguage !== "qml"
@@ -772,17 +1043,49 @@ ApplicationWindow {
                 id: settingsButton
                 objectName: "topBarSettingsButton"
                 text: "SETTINGS"
-                color: workspace.settingsOpen ? "#d8dee9" : "#5d6670"
+                color: workspace && workspace.settingsOpen ? "#d8dee9" : "#5d6670"
                 font.family: "monospace"
                 font.pixelSize: 10
-                font.bold: workspace.settingsOpen
+                font.bold: workspace && workspace.settingsOpen
 
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: workspace.settingsOpen
-                        ? workspace.closeSettings()
-                        : workspace.openSettings()
+                    onClicked: {
+                        if (!workspace)
+                            return
+                        workspace.settingsOpen
+                            ? workspace.closeSettings()
+                            : workspace.openSettings()
+                    }
+                }
+            }
+
+            Text {
+                text: "."
+                color: "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+            }
+
+            Text {
+                id: reloadButton
+                objectName: "topBarReloadButton"
+                text: "RELOAD"
+                color: "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 10
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (root.shellLoading)
+                            return
+                        root.beginShellLoad("RELOAD")
+                        if (root.surfaceHost && root.surfaceHost.restartDesktop)
+                            root.surfaceHost.restartDesktop()
+                    }
                 }
             }
         }
@@ -818,6 +1121,27 @@ ApplicationWindow {
                 color: root.cyan
                 font.family: "monospace"
                 font.pixelSize: 9
+            }
+
+            Text {
+                objectName: "topBarWalletChip"
+                text: workspace
+                    ? workspace.cryptoWalletLabel
+                    : "WALLET · DISCONNECTED"
+                color: !workspace
+                    || workspace.cryptoWalletLabel.indexOf("DISCONNECTED") >= 0
+                    ? "#8b949e"
+                    : root.green
+                font.family: "monospace"
+                font.pixelSize: 9
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (workspace)
+                            workspace.setHostKind("CRYPTO")
+                    }
+                }
             }
 
             Text {
@@ -1107,11 +1431,12 @@ ApplicationWindow {
                                     height: parent.height
                                     leftLegend: "CODEBLOCK · "
                                         + (
-                                            workspace.currentObjectTitle.length > 0
+                                            workspace
+                                            && workspace.currentObjectTitle.length > 0
                                                 ? workspace.currentObjectTitle
                                                 : "FILE"
                                         )
-                                    rightLegend: workspace.editorDirty
+                                    rightLegend: workspace && workspace.editorDirty
                                         ? "BUFFER · UNSAVED"
                                         : "BUFFER · DISK BASE"
                                     backgroundColor: "#070a0e"
@@ -1140,7 +1465,7 @@ ApplicationWindow {
 
                                         TextEdit {
                                             id: codeblockView
-                                            text: workspace.editorLoaded
+                                            text: workspace && workspace.editorLoaded
                                                 ? workspace.editorText
                                                 : ""
                                             color: "#d8dee9"
@@ -1175,33 +1500,56 @@ ApplicationWindow {
                                         id: chatLiveAidWork
                                         width: parent.width
                                         height: parent.height
-                                        objectTitle:
-                                            workspace.currentObjectTitle
-                                        editorLoaded: workspace.editorLoaded
-                                        editorLanguage:
-                                            workspace.editorLanguage
-                                        liveAidState: workspace.liveAidState
-                                        diagnostics:
-                                            workspace.liveAidDiagnostics
-                                        evidenceSummary:
-                                            workspace.liveAidEvidenceSummary
-                                        preflightState:
-                                            workspace.preflightState
-                                        repairState: workspace.repairState
-                                        repairProposalId:
-                                            workspace.repairProposalId
-                                        postDraftBusy: workspace.postDraftBusy
-                                        postDraftState:
-                                            workspace.postDraftState
+                                        objectTitle: workspace
+                                            ? workspace.currentObjectTitle
+                                            : ""
+                                        editorLoaded: workspace
+                                            ? workspace.editorLoaded
+                                            : false
+                                        editorLanguage: workspace
+                                            ? workspace.editorLanguage
+                                            : ""
+                                        liveAidState: workspace
+                                            ? workspace.liveAidState
+                                            : "IDLE"
+                                        diagnostics: workspace
+                                            ? workspace.liveAidDiagnostics
+                                            : []
+                                        evidenceSummary: workspace
+                                            ? workspace.liveAidEvidenceSummary
+                                            : ""
+                                        preflightState: workspace
+                                            ? workspace.preflightState
+                                            : "NOT RUN"
+                                        repairState: workspace
+                                            ? workspace.repairState
+                                            : ""
+                                        repairProposalId: workspace
+                                            ? workspace.repairProposalId
+                                            : ""
+                                        postDraftBusy: workspace
+                                            ? workspace.postDraftBusy
+                                            : false
+                                        postDraftState: workspace
+                                            ? workspace.postDraftState
+                                            : ""
 
-                                        onPostDraftRequested:
-                                            workspace.requestPostDraftAutomaticRepair()
-                                        onPreflightRequested:
-                                            workspace.requestLiveAidPreflight()
-                                        onRepairRequested:
-                                            workspace.requestLiveAidRepair()
-                                        onApplyRequested:
-                                            workspace.requestApplyRepair()
+                                        onPostDraftRequested: {
+                                            if (workspace)
+                                                workspace.requestPostDraftAutomaticRepair()
+                                        }
+                                        onPreflightRequested: {
+                                            if (workspace)
+                                                workspace.requestLiveAidPreflight()
+                                        }
+                                        onRepairRequested: {
+                                            if (workspace)
+                                                workspace.requestLiveAidRepair()
+                                        }
+                                        onApplyRequested: {
+                                            if (workspace)
+                                                workspace.requestApplyRepair()
+                                        }
                                     }
                                 }
                             }
@@ -1269,16 +1617,21 @@ ApplicationWindow {
                     anchors.rightMargin: 8
                     anchors.bottomMargin: 0
                     height: composer.implicitHeight
-                    contextReference: workspace.currentContextReference
+                    contextReference: workspace
+                        ? workspace.currentContextReference
+                        : "@current"
                     workspaceObjectId: (
-                        workspace.currentObjectType === "SITE_PROJECT"
+                        workspace
+                        && workspace.currentObjectType === "SITE_PROJECT"
                         && workspace.siteRelativePath.length > 0
                     )
                         ? workspace.siteFileObjectId(
                             workspace.siteRelativePath
                         )
-                        : workspace.currentObjectId
-                    workspaceObjectTitle: workspace.currentObjectTitle
+                        : (workspace ? workspace.currentObjectId : "")
+                    workspaceObjectTitle: workspace
+                        ? workspace.currentObjectTitle
+                        : ""
                     bridgeState: "CONNECTED"
                     busy: root.bridgeBusy
                     activeTaskId: root.activeTaskId
@@ -1312,7 +1665,8 @@ ApplicationWindow {
                         if (root.surfaceHost) {
                             var kind = root.surfaceHost.parseSurfaceIntent(text)
                             if (kind && kind.length > 0) {
-                                workspace.setHostKind(kind)
+                                if (workspace)
+                                    workspace.setHostKind(kind)
                                 return
                             }
                         }
@@ -1330,7 +1684,8 @@ ApplicationWindow {
                                 contextReference
                                     + " · "
                                     + (
-                                        workspace.currentObjectTitle.length > 0
+                                        workspace
+                                        && workspace.currentObjectTitle.length > 0
                                             ? workspace.currentObjectTitle
                                             : workspaceObjectId
                                     ),
@@ -1366,99 +1721,22 @@ ApplicationWindow {
                     )
                 height: body.height
 
-                WorkspaceSurface {
-                    id: workspace
+                Loader {
+                    id: workspaceLoader
+                    objectName: "workspaceLoader"
+                    asynchronous: true
                     visible: !root.narrowLayout || root.narrowPane === "WORKSPACE"
-                    showDemoFixtures: root.alphaShowDemoFixtures
-                    showProductSourceTabs: root.showProductSourceTabs
-                    chatWidthRatio: root.alphaChatWidthRatio
-                    telemetryWidth: root.alphaTelemetryWidth
-                    accentColor: root.cyan
-                    frameBorder: root.frameBorder
-                    frameRadius: root.frameRadius
-                    showOpenTabInInput: root.showOpenTabInInput
-                    showInnerEditorChrome: root.showInnerEditorChrome
-                    chatBusy: root.bridgeBusy
-                    engineTarget: root.engineTarget
-                    utilityHeight: root.alphaUtilityHeight
-
-                    onChatWidthRatioRequested: function(value) {
-                        root.alphaChatWidthRatio = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onTelemetryWidthRequested: function(value) {
-                        root.alphaTelemetryWidth = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onAccentColorRequested: function(value) {
-                        root.cyan = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onFrameBorderRequested: function(value) {
-                        root.frameBorder = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onFrameRadiusRequested: function(value) {
-                        root.frameRadius = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onDemoVisibilityRequested: function(value) {
-                        root.alphaShowDemoFixtures = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onProductSourceTabsRequested: function(value) {
-                        root.showProductSourceTabs = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onShowOpenTabInInputRequested: function(value) {
-                        root.showOpenTabInInput = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onShowInnerEditorChromeRequested: function(value) {
-                        root.showInnerEditorChrome = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onEngineTargetRequested: function(value) {
-                        root.engineTarget = value
-                        root.persistDesktopSettings()
-                    }
-
-                    onUtilityHeightRequested: function(value) {
-                        root.alphaUtilityHeight = value
-                        root.persistDesktopSettings()
-                    }
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.bottom: utilitySurface.top
                     anchors.bottomMargin: 8
-
-                    onActiveObjectChanged: function(objectId, title) {
-                        if (objectId === root.lastSelectedObjectId)
-                            return
-                        root.lastSelectedObjectId = objectId
-                        root.appendRealNode(
-                            "GG SYSTEM",
-                            "CONTEXT",
-                            "Active Workspace object changed to "
-                                + title
-                                + ". @current now resolves to "
-                                + objectId
-                                + ".",
-                            "@current",
-                            "SELECTED",
-                            20,
-                            ""
-                        )
+                    onLoaded: root.finishShellLoad()
+                    onStatusChanged: {
+                        if (status === Loader.Ready)
+                            root.finishShellLoad()
+                        if (status === Loader.Error)
+                            root.shellLoadCurrent = "LOAD FAILED"
                     }
                 }
 
@@ -1473,6 +1751,11 @@ ApplicationWindow {
                     accentColor: root.cyan
                     frameBorder: root.frameBorder
                     frameRadius: root.frameRadius
+                    surfaceHost: root.surfaceHost
+                    onSurfaceRequested: function(kind) {
+                        if (workspace)
+                            workspace.setHostKind(kind)
+                    }
                 }
             }
 
@@ -1483,19 +1766,21 @@ ApplicationWindow {
                 height: body.height
                 compactMode: true
                 actionAuthority: "NONE"
-                networkAuthority: "NONE"
+                networkAuthority: root.networkAuthority
                 modelState: root.bridgeBusy ? "BUSY" : "READY"
                 engineTarget: root.engineTarget
                 grokWalletJson: root.grokWalletJson
                 bridgeState: root.bridgeBusy ? "BUSY" : "CONNECTED"
                 frameBorder: root.frameBorder
                 frameRadius: root.frameRadius
-                snippetModel: workspace.snippetModel
-                activeSnippet: workspace.siteRelativePath
+                snippetModel: workspace ? workspace.snippetModel : null
+                activeSnippet: workspace ? workspace.siteRelativePath : ""
                 chatSessionsJson: root.chatSessionsJson
                 activeChatSession: root.activeChatSession
+                cryptoStatusJson: root.cryptoStatusJson
                 onSnippetChosen: function(path) {
-                    workspace.chooseSnippet(path)
+                    if (workspace)
+                        workspace.chooseSnippet(path)
                 }
                 onChatSessionChosen: function(sessionId, engine) {
                     root.activeChatSession = sessionId
@@ -1508,5 +1793,86 @@ ApplicationWindow {
         }
     }
 
+    Rectangle {
+        id: shellLoadOverlay
+        objectName: "shellLoadOverlay"
+        z: 10000
+        anchors.fill: parent
+        visible: root.shellLoading
+        color: root.canvas
 
+        Column {
+            objectName: "shellLoadFileLog"
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.margins: 18
+            width: Math.min(parent.width - 36, 640)
+            spacing: 4
+
+            Text {
+                width: parent.width
+                text: root.shellLoadLog
+                color: "#6a6a6a"
+                font.family: "monospace"
+                font.pixelSize: 10
+                wrapMode: Text.NoWrap
+            }
+
+            Text {
+                width: parent.width
+                visible: root.shellLoadCurrent.length > 0
+                text: root.shellLoadCurrent
+                color: "#c8a97e"
+                font.family: "monospace"
+                font.pixelSize: 11
+                wrapMode: Text.NoWrap
+                elide: Text.ElideMiddle
+            }
+        }
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 14
+            width: 280
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.shellLoadLabel
+                color: "#c8a97e"
+                font.family: "monospace"
+                font.pixelSize: 14
+                font.bold: true
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 8
+                color: "#161616"
+                border.color: root.line
+                border.width: 1
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 1
+                    width: Math.max(
+                        0,
+                        (parent.width - 2) * root.shellLoadPercent / 100
+                    )
+                    color: "#c8a97e"
+                }
+            }
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: String(Math.round(root.shellLoadPercent)) + "%"
+                color: root.textMuted
+                font.family: "monospace"
+                font.pixelSize: 11
+            }
+        }
+    }
 }

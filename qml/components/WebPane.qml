@@ -12,18 +12,58 @@ Item {
     property string loadState: "IDLE"
     property bool siteOnly: false
     property int reloadNonce: 0
+    property bool wantEngine: false
+    property bool engineArmed: false
     signal navigated(string href)
 
-    function reload() {
-        view.reload()
+    readonly property bool engineActive: true
+
+    onWantEngineChanged: {
+        if (root.wantEngine)
+            root.engineArmed = true
+    }
+    Component.onCompleted: {
+        if (root.wantEngine)
+            root.engineArmed = true
     }
 
-    onReloadNonceChanged: view.reload()
+    function hrefAllowed(target) {
+        var href = String(target || "")
+        if (href === "about:blank" || href.indexOf("about:blank") === 0)
+            return true
+        if (root.siteOnly)
+            return false
+        if (
+            href.indexOf("https://") === 0
+            || href.indexOf("http://") === 0
+        )
+            return true
+        return false
+    }
 
-    WebEngineView {
+    function reload() {
+        if (engineLoader.item)
+            engineLoader.item.reload()
+    }
+
+    onReloadNonceChanged: root.reload()
+
+    Loader {
+        id: engineLoader
+        anchors.fill: parent
+        active: root.engineArmed
+        sourceComponent: webEngineComp
+    }
+
+    Component {
+        id: webEngineComp
+        WebEngineView {
         id: view
         anchors.fill: parent
         url: root.pageUrl
+        backgroundColor: "#161616"
+        settings.javascriptEnabled: true
+        settings.localContentCanAccessFileUrls: true
 
         onUrlChanged: {
             var href = String(view.url)
@@ -42,9 +82,13 @@ Item {
         }
 
         onNavigationRequested: function(request) {
+            var target = String(request.url)
+            if (root.hrefAllowed(target)) {
+                request.accept()
+                return
+            }
             var win = Window.window
             var host = win && win.surfaceHost ? win.surfaceHost : null
-            var target = String(request.url)
             var allowed = false
             if (host !== null)
                 allowed = root.siteOnly
@@ -56,6 +100,7 @@ Item {
                 return
             }
             request.accept()
+        }
         }
     }
 

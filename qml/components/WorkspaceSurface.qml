@@ -306,6 +306,12 @@ Item {
     property bool chatBusy: false
     property string engineTarget: "LOCAL_QWEN"
     property string hostKind: "CODE"
+    property string cryptoWalletLabel: "WALLET · DISCONNECTED"
+    property int liveEpoch: 0
+
+    function applyLiveReload() {
+        root.liveEpoch = root.liveEpoch + 1
+    }
     property int utilityHeight: 112
     property int nextInstanceSerial: 2
     property string siteRelativePath: "index.html"
@@ -550,6 +556,10 @@ Item {
             return "WEB"
         if (objectType === "SITE_PROJECT")
             return "SITE"
+        if (objectType === "CRYPTO_DESK")
+            return "CRYPTO"
+        if (objectType === "TMOG_DESK")
+            return "TMOG"
         if (objectType === "PDF" || objectType === "IMAGE")
             return "WEB"
         return "CODE"
@@ -573,6 +583,8 @@ Item {
 
     function setHostKind(kind) {
         root.hostKind = kind
+        if (kind === "CRYPTO" || kind === "TMOG" || kind === "MEDIA")
+            return
         if (
             kind === "CODE"
             && root.currentObjectType === "SITE_PROJECT"
@@ -744,11 +756,48 @@ Item {
         return root.saveScratchAs(root.scratchNameFromUrl(url))
     }
 
+    function webTabCount() {
+        var n = 0
+        var i
+        for (i = 0; i < workspaceObjects.count; ++i) {
+            var item = workspaceObjects.get(i)
+            if (
+                item.objectType === "WEBSITE"
+                && item.provenanceClass === "REAL_UI_STATE"
+            )
+                n += 1
+        }
+        return n
+    }
+
+    function resetWebTab(index) {
+        if (index < 0 || index >= workspaceObjects.count)
+            return
+        workspaceObjects.setProperty(index, "sourcePath", "about:blank")
+        workspaceObjects.setProperty(index, "title", "Web")
+        if (index === root.currentIndex) {
+            root.browseUrl = "about:blank"
+            root.browseBarText = ""
+        }
+        root.activate(index)
+    }
+
     function closeHostInstance(index) {
         if (index < 0 || index >= workspaceObjects.count)
             return
         var item = workspaceObjects.get(index)
-        if (!root.isSpawnedObject(item.objectId))
+        if (
+            item.objectType === "WEBSITE"
+            && item.provenanceClass === "REAL_UI_STATE"
+        ) {
+            if (
+                item.objectId === "ws.web.stub"
+                || root.webTabCount() <= 1
+            ) {
+                root.resetWebTab(index)
+                return
+            }
+        } else if (!root.isSpawnedObject(item.objectId))
             return
         if (
             index === root.currentIndex
@@ -892,6 +941,44 @@ Item {
         root.sitePreviewNonce = root.sitePreviewNonce + 1
     }
 
+    function ensureSitePreview() {
+        var host = root.scratchHost()
+        if (host === null)
+            return false
+        if (root.sitePreviewRunning && root.sitePreviewOrigin.length > 0) {
+            root.applySitePreviewUrl()
+            return true
+        }
+        var existing = host.sitePreviewOrigin
+            ? String(host.sitePreviewOrigin())
+            : ""
+        if (existing.length > 0) {
+            root.sitePreviewOrigin = existing
+            root.sitePreviewRunning = true
+            root.siteImportStatus = "PREVIEW · localhost"
+            root.applySitePreviewUrl()
+            return true
+        }
+        root.siteImportStatus = "PREVIEW · starting"
+        var raw = host.startSitePreview()
+        var lines = String(raw).split("\n")
+        var origin = lines[0] || ""
+        var kind = lines.length > 1 ? lines[1] : "STATIC"
+        if (origin.length === 0) {
+            root.siteImportStatus = "FAIL: local preview did not start"
+            return false
+        }
+        root.sitePreviewOrigin = origin
+        root.sitePreviewRunning = true
+        root.siteImportStatus = (
+            kind === "PHP"
+                ? "PREVIEW · localhost PHP"
+                : "PREVIEW · localhost static · PHP not installed · WP will not execute"
+        )
+        root.applySitePreviewUrl()
+        return true
+    }
+
     function toggleSitePreview() {
         var host = root.scratchHost()
         if (host === null)
@@ -904,22 +991,7 @@ Item {
             root.applySitePreviewUrl()
             return
         }
-        var raw = host.startSitePreview()
-        var lines = String(raw).split("\n")
-        var origin = lines[0] || ""
-        var kind = lines.length > 1 ? lines[1] : "STATIC"
-        if (origin.length === 0) {
-            root.siteImportStatus = "FAIL: local preview did not start"
-            return
-        }
-        root.sitePreviewOrigin = origin
-        root.sitePreviewRunning = true
-        root.siteImportStatus = (
-            kind === "PHP"
-                ? "PREVIEW · localhost PHP"
-                : "PREVIEW · localhost static · PHP not installed · WP will not execute"
-        )
-        root.applySitePreviewUrl()
+        root.ensureSitePreview()
     }
 
     function importSiteSqlFromDialog(urlString) {
@@ -1113,6 +1185,7 @@ Item {
                 var rel = preferred.length > 0
                     ? preferred
                     : (item.sourcePath.length > 0 ? item.sourcePath : "index.php")
+                root.ensureSitePreview()
                 root.openSiteFile(rel)
             })
             return
@@ -1629,6 +1702,10 @@ Item {
                     font.family: "monospace"
                     font.pixelSize: 10
                     visible: root.isSpawnedObject(tabButton.objectId)
+                        || (
+                            tabButton.objectType === "WEBSITE"
+                            && tabButton.provenanceClass === "REAL_UI_STATE"
+                        )
 
                     MouseArea {
                         anchors.fill: parent
@@ -1815,6 +1892,9 @@ Item {
                 spacing: 10
                 visible:
                     !root.settingsOpen
+                    && root.hostKind !== "CRYPTO"
+                    && root.hostKind !== "TMOG"
+                    && root.hostKind !== "MEDIA"
                     && (
                         root.currentObjectProvenance === "REAL_LOCAL_FILE"
                         || (
@@ -2079,6 +2159,7 @@ Item {
                 anchors.margins: 10
                 visible:
                     !root.settingsOpen
+                    && root.hostKind === "SITE"
                     && root.currentObjectType === "SITE_PROJECT"
 
                 FileDialog {
@@ -2216,7 +2297,53 @@ Item {
                     pageUrl: root.webPageUrl
                     siteOnly: true
                     reloadNonce: root.sitePreviewNonce
+                    wantEngine: siteHost.visible
                 }
+            }
+
+            CryptoSurface {
+                id: cryptoPane
+                objectName: "workspaceCryptoPane"
+                z: 20
+                anchors.fill: parent
+                visible:
+                    !root.settingsOpen
+                    && root.hostKind === "CRYPTO"
+                surfaceHost: root.scratchHost()
+                frameBorder: root.frameBorder
+                frameRadius: root.frameRadius
+                onWalletLabelChanged: function(label) {
+                    root.cryptoWalletLabel = label
+                    var win = Window.window
+                    if (win)
+                        win.cryptoStatusJson = cryptoPane.statusJson
+                }
+            }
+
+            TmogSurface {
+                id: tmogPane
+                objectName: "workspaceTmogPane"
+                z: 20
+                anchors.fill: parent
+                visible:
+                    !root.settingsOpen
+                    && root.hostKind === "TMOG"
+                surfaceHost: root.scratchHost()
+                frameBorder: root.frameBorder
+                frameRadius: root.frameRadius
+            }
+
+            MediaSurface {
+                id: mediaPane
+                objectName: "workspaceMediaPane"
+                z: 20
+                anchors.fill: parent
+                visible:
+                    !root.settingsOpen
+                    && root.hostKind === "MEDIA"
+                surfaceHost: root.scratchHost()
+                frameBorder: root.frameBorder
+                frameRadius: root.frameRadius
             }
 
             Item {
@@ -2226,6 +2353,7 @@ Item {
                 anchors.margins: 10
                 visible:
                     !root.settingsOpen
+                    && root.hostKind === "WEB"
                     && root.currentObjectType === "WEBSITE"
                     && root.currentObjectProvenance === "REAL_UI_STATE"
 
@@ -2276,15 +2404,22 @@ Item {
                                 onAccepted: root.goBrowse(tabBrowseBar.text)
                             }
 
-                            WebPane {
+                            Loader {
                                 width: parent.width
                                 height: parent.height - tabBrowseBar.height - 6
-                                pageUrl: webTab.sourcePath.length > 0
-                                    ? webTab.sourcePath
-                                    : "about:blank"
-                                siteOnly: false
-                                onNavigated: function(href) {
-                                    root.rememberBrowse(webTab.index, href)
+                                active: webTab.isWebTab
+                                sourceComponent: Component {
+                                    WebPane {
+                                        anchors.fill: parent
+                                        pageUrl: webTab.sourcePath.length > 0
+                                            ? webTab.sourcePath
+                                            : "about:blank"
+                                        siteOnly: false
+                                        wantEngine: webHost.visible && webTab.isCurrent
+                                        onNavigated: function(href) {
+                                            root.rememberBrowse(webTab.index, href)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2298,6 +2433,7 @@ Item {
                 anchors.margins: 10
                 visible:
                     !root.settingsOpen
+                    && root.hostKind === "TERMINAL"
                     && root.currentObjectType === "USER_TERMINAL"
 
                 WorkObject {
@@ -2319,6 +2455,7 @@ Item {
                 spacing: 12
                 visible:
                     !root.settingsOpen
+                    && root.hostKind === "EXTERNAL"
                     && root.currentObjectType === "EXTERNAL_APP"
 
                 Text {
@@ -2359,6 +2496,9 @@ Item {
                 spacing: 12
                 visible:
                     !root.settingsOpen
+                    && root.hostKind !== "CRYPTO"
+                    && root.hostKind !== "TMOG"
+                    && root.hostKind !== "MEDIA"
                     && root.currentObjectProvenance === "SYNTHETIC_UI_FIXTURE"
 
                 Text {
@@ -2515,6 +2655,69 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("SITE")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+        }
+
+        Text {
+            text: "CRYPTO"
+            color: root.hostKind === "CRYPTO" ? "#d8dee9" : "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+            font.bold: root.hostKind === "CRYPTO"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("CRYPTO")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+        }
+
+        Text {
+            text: "TMOG"
+            color: root.hostKind === "TMOG" ? "#d8dee9" : "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+            font.bold: root.hostKind === "TMOG"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("TMOG")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+        }
+
+        Text {
+            text: "MEDIA"
+            color: root.hostKind === "MEDIA" ? "#d8dee9" : "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 10
+            font.bold: root.hostKind === "MEDIA"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("MEDIA")
             }
         }
     }

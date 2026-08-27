@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,30 @@ _WEEK_RE3 = re.compile(
     re.IGNORECASE,
 )
 _LOG_PERCENT = re.compile(r'"creditUsagePercent"\s*:\s*(\d+(?:\.\d+)?)')
+_TAIL_CACHE: dict[str, tuple[int, int, Any]] = {}
+_DISCOVER_CACHE: tuple[float, tuple[Any, ...], Any] | None = None
+
+
+def _tail_cached(path: Path, max_bytes: int) -> str:
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        _TAIL_CACHE.pop(key, None)
+        return ""
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _TAIL_CACHE.get(key)
+    if hit is not None and hit[0] == stamp[0] and hit[1] == stamp[1]:
+        return hit[2]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if len(data) > max_bytes:
+        data = data[-max_bytes:]
+    text = data.decode("utf-8", errors="replace")
+    _TAIL_CACHE[key] = (stamp[0], stamp[1], text)
+    return text
 
 
 def format_tokens(count: int | None) -> str:
@@ -60,15 +85,6 @@ def parse_pty_wallet(text: str) -> dict[str, Any]:
         window = _unit_to_tokens(float(match.group(3)), match.group(4))
         found["context_used"] = used
         found["context_window"] = window
-    week = (
-        _WEEK_RE.search(text)
-        or _WEEK_RE2.search(text)
-        or _WEEK_RE3.search(text)
-    )
-    if week:
-        percent = int(week.group(1))
-        if 0 <= percent <= 100:
-            found["weekly_percent"] = percent
     return found
 
 
@@ -163,6 +179,17 @@ def discover_program_sessions(
     tui_pid: int | None = None,
     index_path: Path | None = None,
 ) -> tuple[Path | None, list[Path], set[str]]:
+    global _DISCOVER_CACHE
+    now = time.monotonic()
+    cache_key = (str(home or ""), tui_pid, str(index_path or ""))
+    packed = _DISCOVER_CACHE
+    if (
+        home is None
+        and packed is not None
+        and packed[1] == cache_key
+        and now - packed[0] < 2.0
+    ):
+        return packed[2]
     root = (home or DEV_GROK_HOME) / "sessions"
     index = load_wallet_index(index_path)
     tui_pids: set[int] = set()
@@ -216,7 +243,10 @@ def discover_program_sessions(
         from backend.chat_sessions import sync_owned
 
         sync_owned(index, engine="GROK_TUI")
-    return current, collected, index
+    result = (current, collected, index)
+    if home is None:
+        _DISCOVER_CACHE = (now, cache_key, result)
+    return result
 
 
 def latest_session_dir(
@@ -243,13 +273,9 @@ def read_signals(session: Path) -> dict[str, Any]:
 
 def read_weekly_from_logs(home: Path | None = None) -> int | None:
     path = (home or DEV_GROK_HOME) / "logs" / "unified.jsonl"
-    try:
-        data = path.read_bytes()
-    except OSError:
+    text = _tail_cached(path, 393216)
+    if not text:
         return None
-    if len(data) > 393216:
-        data = data[-393216:]
-    text = data.decode("utf-8", errors="replace")
     last: int | None = None
     for line in text.splitlines():
         if "creditUsagePercent" not in line:
@@ -281,13 +307,9 @@ def read_weekly_from_logs(home: Path | None = None) -> int | None:
 
 def last_turn_usage(session: Path) -> dict[str, Any]:
     path = session / "updates.jsonl"
-    try:
-        data = path.read_bytes()
-    except OSError:
+    text = _tail_cached(path, 262144)
+    if not text:
         return {}
-    if len(data) > 262144:
-        data = data[-262144:]
-    text = data.decode("utf-8", errors="replace")
     last: dict[str, Any] = {}
     for line in text.splitlines():
         if "turn_completed" not in line or "usage" not in line:
@@ -350,9 +372,7 @@ def snapshot(
     live_n = 0
     if used_n is not None and live_base is not None:
         live_n = max(0, used_n - int(live_base))
-    weekly = overlay.get("weekly_percent")
-    if weekly is None:
-        weekly = read_weekly_from_logs(home)
+    weekly = read_weekly_from_logs(home)
     try:
         weekly_n = int(weekly) if weekly is not None else None
     except (TypeError, ValueError):

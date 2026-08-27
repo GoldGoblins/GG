@@ -245,13 +245,30 @@ def main() -> int:
         'property int alphaTelemetryWidth: 168',
         'property int alphaUtilityHeight: 112',
         'objectName: "topBarSettingsButton"',
+        'objectName: "topBarReloadButton"',
+        'text: "RELOAD"',
+        'objectName: "shellLoadOverlay"',
+        'objectName: "shellLoadFileLog"',
+        'shellLoadLabel: "LOADING..."',
+        "function beginShellLoad(",
+        "function unloadDesktopShell(",
+        "function loadDesktopShell(",
+        "function finishShellLoad(",
+        "function loadNextShellFile(",
+        "Qt.createComponent(",
+        'objectName: "workspaceLoader"',
+        "asynchronous: true",
+        "shellLoadQueueJson",
         'text: "LOCAL · ALPHA"',
+        'objectName: "topBarWalletChip"',
         "body.width * root.alphaChatWidthRatio",
         "width: root.alphaTelemetryWidth",
         'property string engineTarget: "LOCAL_QWEN"',
+        '? "CONNECTED"',
         "parseSurfaceIntent(text)",
         "function beginGrokWorkerStream(",
         'objectName: "grokTuiHost"',
+        "GrokTuiHole {",
         "GrokWorkStream {",
         'rightLegend: "BRIDGE · CONNECTED"',
     ):
@@ -259,6 +276,19 @@ def main() -> int:
             marker in main_qml,
             "Alpha A1 Main marker missing: " + marker,
         )
+
+    require(
+        "function pullShellSources(" not in main_qml,
+        "Fake shell source list still drives loading.",
+    )
+    require(
+        "id: shellLoadTimer" not in main_qml,
+        "Fake loading timer still present.",
+    )
+    require(
+        "function advanceShellLoad(" not in main_qml,
+        "Fake loading ticker still present.",
+    )
 
     for marker in (
         'objectName: "telemetrySnippetList"',
@@ -270,7 +300,10 @@ def main() -> int:
         "snippetFrame.height - 10) / 2",
         'leftLegend: "CHATS"',
         'rightLegend: "MEMORY"',
+        'objectName: "telemetryCryptoWallet"',
+        'leftLegend: "CRYPTO"',
         "signal chatSessionChosen(string sessionId, string engine)",
+        "cryptoStatusJson",
         "CTX  ",
         "ALL  ",
         "TURN ",
@@ -393,9 +426,22 @@ def main() -> int:
         'text: "WEB"',
         'text: "EXTERNAL"',
         'text: "SITE"',
+        'text: "CRYPTO"',
+        'text: "TMOG"',
+        'text: "MEDIA"',
+        'hostKind === "CRYPTO"',
+        'hostKind === "TMOG"',
+        'hostKind === "MEDIA"',
+        'objectName: "workspaceTmogPane"',
+        'objectName: "workspaceMediaPane"',
+        "MediaSurface {",
+        "function applyLiveReload()",
+        "liveEpoch",
         'objectName: "workspaceWebHost"',
         'objectName: "workspaceWebAddress"',
         "function goBrowse(",
+        "function resetWebTab(",
+        "function webTabCount(",
         "function rememberBrowse(",
         "siteFileObjectId(",
         'objectName: "workspaceSiteHost"',
@@ -404,6 +450,7 @@ def main() -> int:
         "function importSiteSqlFromDialog(",
         "IMPORT SQL",
         "function toggleSitePreview()",
+        "function ensureSitePreview()",
         "STOP PREVIEW",
         "EDIT IN CODE",
         "function saveSiteBuffer()",
@@ -418,6 +465,44 @@ def main() -> int:
             marker in workspace_surface,
             "Workspace host MVP marker missing: " + marker,
         )
+    web_pane = text("qml/components/WebPane.qml")
+    require(
+        "function hrefAllowed(" in web_pane,
+        "WEB pane missing local href allow check.",
+    )
+    require(
+        "engineActive: true" in web_pane,
+        "WEB engine still tears down on opacity.",
+    )
+    require(
+        "wantEngine" in web_pane and "engineArmed" in web_pane,
+        "WEB engine is not lazily armed.",
+    )
+    require(
+        "active: root.engineArmed" in web_pane,
+        "WEB engine still constructs Chromium before first use.",
+    )
+    require(
+        "active: root.visible" not in web_pane,
+        "WEB engine still tears down on visibility.",
+    )
+    grok_tui_hole = text("qml/components/GrokTuiHole.qml")
+    require(
+        "QtWebEngine" not in grok_tui_hole,
+        "GROK TUI still boots Chromium for a cell grid.",
+    )
+    require(
+        'objectName: "grokTuiHost"' in grok_tui_hole,
+        "GROK TUI hole lost its host id.",
+    )
+    require(
+        "wantEngine: webHost.visible && webTab.isCurrent" in workspace_surface,
+        "WEB Chromium still starts before the WEB tab is shown.",
+    )
+    require(
+        "wantEngine: siteHost.visible" in workspace_surface,
+        "SITE Chromium still starts before the SITE tab is shown.",
+    )
 
     for marker in (
         'objectName: "workspaceSettingsSurface"',
@@ -471,7 +556,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA"]',
     ):
         require(
             marker in settings_workspace,
@@ -1132,6 +1217,28 @@ def main() -> int:
         "Button {" not in a1_2_utility,
         "UtilitySurface gained fake controls.",
     )
+    require(
+        'objectName: "utilityTransport"' in a1_2_utility,
+        "UtilitySurface transport missing.",
+    )
+    require(
+        "workspaceMediaHole" not in a1_2_utility,
+        "Media display hole leaked into the utility strip.",
+    )
+    a1_2_media = text("qml/components/MediaSurface.qml")
+    require(
+        'objectName: "workspaceMediaHole"' in a1_2_media,
+        "Workspace media display hole missing.",
+    )
+    require(
+        'objectName: "workspaceMediaStage"' in a1_2_media,
+        "Workspace media stage missing.",
+    )
+    for marker in ("MUSIC", "RADIO", "TV", "GAME", "FETCH"):
+        require(
+            marker in a1_2_utility,
+            "UtilitySurface mode missing: " + marker,
+        )
 
     require(
         "readonly property int alphaBottomStripMargin: 8"
