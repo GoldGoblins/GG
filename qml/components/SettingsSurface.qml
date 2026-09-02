@@ -12,7 +12,7 @@ Item {
     property int telemetryWidth: 168
     property color accentColor: "#8a8a8a"
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     property bool showDemoFixtures: false
     property bool showProductSourceTabs: false
     property bool showOpenTabInInput: false
@@ -20,6 +20,7 @@ Item {
     property string hostKind: "CODE"
     property string engineTarget: "LOCAL_QWEN"
     property int utilityHeight: 112
+    property bool desktopShell: false
     readonly property string themeId: "obsidian-ledger-standard"
 
     signal chatWidthRatioChangedByUser(real value)
@@ -35,6 +36,7 @@ Item {
     signal spawnInstanceRequested()
     signal engineTargetChangedByUser(string value)
     signal utilityHeightChangedByUser(int value)
+    signal desktopShellChangedByUser(bool value)
     signal closeRequested()
 
     implicitWidth: 620
@@ -43,8 +45,8 @@ Item {
     GgFrame {
         id: settingsChrome
         anchors.fill: parent
-        leftLegend: "SETTINGS"
-        rightLegend: "OBSIDIAN / LEDGER STANDARD"
+        leftLegend: ""
+        rightLegend: ""
         backgroundColor: "#161616"
         borderColor: root.frameBorder
         radius: root.frameRadius
@@ -55,7 +57,7 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: 14
         anchors.rightMargin: 14
-        anchors.topMargin: 22
+        anchors.topMargin: 8
         anchors.bottomMargin: 14
         clip: true
         contentWidth: width
@@ -63,7 +65,7 @@ Item {
         flickableDirection: Flickable.VerticalFlick
         boundsBehavior: Flickable.StopAtBounds
 
-        ScrollBar.vertical: ScrollBar {}
+        ScrollBar.vertical: GgScrollBar {}
 
         Column {
             id: modulesColumn
@@ -74,9 +76,9 @@ Item {
                 width: parent.width
                 text: "Settings modules are separated by concern. "
                     + "Only controls with real alpha wiring are interactive."
-                color: "#8b949e"
+                color: "#c8cdd4"
                 wrapMode: Text.WordWrap
-                font.pixelSize: 11
+                font.pixelSize: 12
             }
 
             SettingsAppearanceModule {
@@ -103,6 +105,7 @@ Item {
                 chatWidthRatio: root.chatWidthRatio
                 telemetryWidth: root.telemetryWidth
                 utilityHeight: root.utilityHeight
+                desktopShell: root.desktopShell
 
                 onChatWidthRatioChangedByUser: function(value) {
                     root.chatWidthRatioChangedByUser(value)
@@ -114,6 +117,10 @@ Item {
 
                 onUtilityHeightChangedByUser: function(value) {
                     root.utilityHeightChangedByUser(value)
+                }
+
+                onDesktopShellChangedByUser: function(value) {
+                    root.desktopShellChangedByUser(value)
                 }
             }
 
@@ -174,14 +181,14 @@ Item {
                 height: 44
                 spacing: 8
 
-                Button {
+                GgButton {
                     text: "Reset standard layout"
                     onClicked: {
                         root.chatWidthRatioChangedByUser(0.31)
                         root.telemetryWidthChangedByUser(168)
                         root.accentColorChangedByUser("#8a8a8a")
                         root.frameBorderChangedByUser("#6a6a6a")
-                        root.frameRadiusChangedByUser(2)
+                        root.frameRadiusChangedByUser(4)
                         root.demoVisibilityChangedByUser(false)
                         root.productSourceTabsChangedByUser(false)
                         root.showOpenTabInInputChangedByUser(false)
@@ -189,10 +196,11 @@ Item {
                         root.hostKindChangedByUser("CODE")
                         root.engineTargetChangedByUser("LOCAL_QWEN")
                         root.utilityHeightChangedByUser(112)
+                        root.desktopShellChangedByUser(false)
                     }
                 }
 
-                Button {
+                GgButton {
                     text: "Close settings"
                     onClicked: root.closeRequested()
                 }
@@ -200,9 +208,9 @@ Item {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "theme-id · " + root.themeId
-                    color: "#6e7681"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 9
+                    font.pixelSize: 12
                 }
             }
 

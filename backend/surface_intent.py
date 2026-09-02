@@ -31,6 +31,10 @@ _MEDIA = re.compile(
     r"\b(media|musik(?:en)?|radio(?:n)?|tv(?:n)?|teve|emulator(?:n)?|spel(?:en)?|game|cliamp|torlink|fetch)\b",
     re.IGNORECASE,
 )
+_DRAW = re.compile(
+    r"\b(draw|rita|rit(?:a)?|gimp|photoshop|illustrator|photopea|pixel|canvas|2d|bildrediger(?:are)?)\b",
+    re.IGNORECASE,
+)
 _BARE = {
     "terminal": "TERMINAL",
     "term": "TERMINAL",
@@ -53,6 +57,11 @@ _BARE = {
     "cliamp": "MEDIA",
     "torlink": "MEDIA",
     "fetch": "MEDIA",
+    "draw": "DRAW",
+    "rita": "DRAW",
+    "gimp": "DRAW",
+    "photoshop": "DRAW",
+    "canvas": "DRAW",
 }
 
 
@@ -73,6 +82,8 @@ def parse_surface_intent(text: str) -> str:
         return "TMOG"
     if _MEDIA.search(value):
         return "MEDIA"
+    if _DRAW.search(value):
+        return "DRAW"
     if _WEB.search(value):
         return "WEB"
     if _EXTERNAL.search(value):

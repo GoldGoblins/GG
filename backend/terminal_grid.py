@@ -3,7 +3,16 @@ from __future__ import annotations
 import base64
 import codecs
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QObject,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -33,10 +42,93 @@ def _color(rgb: tuple[int, int, int]) -> QColor:
     return QColor(rgb[0], rgb[1], rgb[2])
 
 
+_VT_SNAP_MS = 33
+
+
+class _VtHost(QObject):
+    snapshotReady = Signal(object)
+    repliesReady = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._vt = MiniVt(24, 80)
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pulse: QTimer | None = None
+        self._dirty = False
+
+    @Slot()
+    def start(self) -> None:
+        pulse = QTimer(self)
+        pulse.setInterval(_VT_SNAP_MS)
+        pulse.timeout.connect(self._emit_snapshot)
+        self._pulse = pulse
+
+    @Slot(object)
+    def feed(self, raw: object) -> None:
+        blob = raw if isinstance(raw, (bytes, bytearray)) else b""
+        if blob:
+            text = self._decoder.decode(bytes(blob))
+            if text:
+                self._vt.feed(text)
+            if self._vt.out:
+                reply = "".join(self._vt.out)
+                self._vt.out.clear()
+                if reply:
+                    self.repliesReady.emit(reply)
+        self._dirty = True
+        pulse = self._pulse
+        if pulse is not None and not pulse.isActive():
+            pulse.start()
+
+    @Slot(int, int)
+    def resize(self, rows: int, cols: int) -> None:
+        self._vt.resize(int(rows), int(cols))
+        self._dirty = True
+        pulse = self._pulse
+        if pulse is not None and not pulse.isActive():
+            pulse.start()
+
+    @Slot()
+    def _emit_snapshot(self) -> None:
+        if not self._dirty:
+            pulse = self._pulse
+            if pulse is not None:
+                pulse.stop()
+            return
+        self._dirty = False
+        vt = self._vt
+        self.snapshotReady.emit(
+            {
+                "buf": [row[:] for row in vt.buf],
+                "r": vt.r,
+                "c": vt.c,
+                "rows": vt.rows,
+                "cols": vt.cols,
+                "cursor_visible": vt.cursor_visible,
+                "app_cursor": vt.app_cursor,
+                "mouse_mode": vt.mouse_mode,
+                "mouse_sgr": vt.mouse_sgr,
+                "bracket_paste": vt.bracket_paste,
+            }
+        )
+
+    @Slot()
+    def shutdown(self) -> None:
+        pulse = self._pulse
+        self._pulse = None
+        if pulse is not None:
+            pulse.stop()
+        thread = self.thread()
+        if thread is not None:
+            thread.quit()
+
+
 class TerminalGrid(QQuickPaintedItem):
     dataProduced = Signal(str)
     resized = Signal(int, int)
     ready = Signal()
+    _bytesIn = Signal(object)
+    _resizeTo = Signal(int, int)
 
     def __init__(self, parent: QQuickItem | None = None) -> None:
         super().__init__(parent)
@@ -53,6 +145,7 @@ class TerminalGrid(QQuickPaintedItem):
         self._last_cols = 0
         self._last_rows = 0
         self._ready_emitted = False
+        self._snap: dict | None = None
         self.setFillColor(_color(DEFAULT_BG_RGB))
         self.setAntialiasing(False)
         self.setOpaquePainting(True)
@@ -73,10 +166,23 @@ class TerminalGrid(QQuickPaintedItem):
         self._blink.start()
         self._coalesce = QTimer(self)
         self._coalesce.setSingleShot(True)
-        self._coalesce.setInterval(16)
+        self._coalesce.setInterval(_VT_SNAP_MS)
         self._coalesce.timeout.connect(self.update)
         self.widthChanged.connect(self._refit)
         self.heightChanged.connect(self._refit)
+        self._host = _VtHost()
+        self._thread = QThread()
+        self._thread.setObjectName("gg-vt-host")
+        self._host.moveToThread(self._thread)
+        self._bytesIn.connect(self._host.feed, Qt.ConnectionType.QueuedConnection)
+        self._resizeTo.connect(self._host.resize, Qt.ConnectionType.QueuedConnection)
+        self._host.snapshotReady.connect(self._apply_snapshot)
+        self._host.repliesReady.connect(self.dataProduced.emit)
+        self._thread.started.connect(self._host.start)
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._stop_worker)
+        self._thread.start()
         if parent is not None:
             self.setParentItem(parent)
             parent.widthChanged.connect(self._fill_parent)
@@ -87,6 +193,25 @@ class TerminalGrid(QQuickPaintedItem):
 
     def vt(self) -> MiniVt:
         return self._vt
+
+    def _stop_worker(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._thread = None
+        if thread.isRunning():
+            thread.quit()
+            if not thread.wait(1500):
+                thread.terminate()
+                thread.wait(400)
+        self._host = None
+
+    def itemChange(self, change, value):  # type: ignore[no-untyped-def]
+        if change == QQuickItem.ItemChange.ItemSceneChange:
+            window = getattr(value, "window", None)
+            if window is None:
+                self._stop_worker()
+        return super().itemChange(change, value)
 
     def _fill_parent(self) -> None:
         parent = self.parentItem()
@@ -141,6 +266,7 @@ class TerminalGrid(QQuickPaintedItem):
             self._vt.resize(rows, cols)
             self._last_cols = cols
             self._last_rows = rows
+            self._resizeTo.emit(rows, cols)
             self.resized.emit(cols, rows)
             self.update()
 
@@ -155,11 +281,26 @@ class TerminalGrid(QQuickPaintedItem):
     def feed_bytes(self, raw: bytes) -> None:
         if not raw:
             return
+        if self._thread is not None and self._thread.isRunning():
+            self._bytesIn.emit(bytes(raw))
+            return
         text = self._decoder.decode(raw)
         if not text:
             return
         self._vt.feed(text)
         self._flush_replies()
+        self._schedule()
+
+    @Slot(object)
+    def _apply_snapshot(self, snap: object) -> None:
+        if not isinstance(snap, dict):
+            return
+        self._snap = snap
+        vt = self._vt
+        vt.app_cursor = bool(snap.get("app_cursor"))
+        vt.mouse_mode = int(snap.get("mouse_mode") or 0)
+        vt.mouse_sgr = bool(snap.get("mouse_sgr"))
+        vt.bracket_paste = bool(snap.get("bracket_paste"))
         self._schedule()
 
     def feed_text(self, text: str) -> None:
@@ -174,8 +315,18 @@ class TerminalGrid(QQuickPaintedItem):
         painter.fillRect(self.contentsBoundingRect(), _color(DEFAULT_BG_RGB))
         cell_w = self._cell_w
         cell_h = self._cell_h
-        vt = self._vt
-        for y, row in enumerate(vt.buf):
+        snap = self._snap
+        if snap is not None:
+            buf = snap.get("buf") or []
+            cursor_r = int(snap.get("r") or 0)
+            cursor_c = int(snap.get("c") or 0)
+            cursor_visible = bool(snap.get("cursor_visible"))
+        else:
+            buf = self._vt.buf
+            cursor_r = self._vt.r
+            cursor_c = self._vt.c
+            cursor_visible = self._vt.cursor_visible
+        for y, row in enumerate(buf):
             x = 0
             while x < len(row):
                 ch, fg, bg, flags = row[x]
@@ -228,16 +379,18 @@ class TerminalGrid(QQuickPaintedItem):
                             int((y + 1) * cell_h - 2),
                         )
                 x = nx
+        rows = len(buf)
+        cols = len(buf[0]) if buf else 0
         if (
-            vt.cursor_visible
+            cursor_visible
             and self._cursor_on
-            and 0 <= vt.r < vt.rows
-            and 0 <= vt.c < vt.cols
+            and 0 <= cursor_r < rows
+            and 0 <= cursor_c < cols
         ):
-            cx = vt.c * cell_w
-            cy = vt.r * cell_h
+            cx = cursor_c * cell_w
+            cy = cursor_r * cell_h
             painter.fillRect(QRectF(cx, cy, cell_w, cell_h), _color(DEFAULT_FG_RGB))
-            ch = vt.buf[vt.r][vt.c][0]
+            ch = buf[cursor_r][cursor_c][0]
             if ch:
                 painter.setPen(_color(DEFAULT_BG_RGB))
                 painter.setFont(self._font)
@@ -311,8 +464,10 @@ class TerminalGrid(QQuickPaintedItem):
         event.accept()
 
     def _cell_at(self, px: float, py: float) -> tuple[int, int]:
-        col = max(0, min(self._vt.cols - 1, int(px // self._cell_w)))
-        row = max(0, min(self._vt.rows - 1, int(py // self._cell_h)))
+        cols = int((self._snap or {}).get("cols") or self._vt.cols)
+        rows = int((self._snap or {}).get("rows") or self._vt.rows)
+        col = max(0, min(cols - 1, int(px // self._cell_w)))
+        row = max(0, min(rows - 1, int(py // self._cell_h)))
         return col, row
 
     def _mouse(self, event, pressed: bool, motion: bool = False) -> str:

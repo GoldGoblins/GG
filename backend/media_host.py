@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from backend import libretro_host
 from backend.media_contract import (
     MODES,
     SCHEMA,
@@ -18,9 +20,18 @@ from backend.media_contract import (
     catalog_for,
     confined,
     ensure_state_dir,
+    fetch_download_dir,
+    fetch_terminal,
+    FETCH_TUI_TITLE,
+    format_clock,
     library_roots,
     load_prefs,
     looks_like_url,
+    materialize_homebrew,
+    EQ_PRESETS,
+    SPECTRUM_BARS,
+    normalize_eq,
+    normalize_spectrum,
     player_bin,
     probe_tools,
     save_prefs,
@@ -33,6 +44,7 @@ from backend.media_contract import (
 _proc: subprocess.Popen[bytes] | None = None
 _cliamp_proc: subprocess.Popen[bytes] | None = None
 _files_proc: subprocess.Popen[bytes] | None = None
+_fetch_proc: subprocess.Popen[bytes] | None = None
 _kind = "audio"
 _item: dict[str, Any] | None = None
 _paused = False
@@ -40,6 +52,21 @@ _embed_tokens: tuple[str, ...] = ()
 _rc_sock: Path | None = None
 _extra_items: list[dict[str, Any]] = []
 _backend = ""
+_catalog_memo: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CATALOG_MEMO_TTL = 45.0
+_CLIAMP_POLL_TIMEOUT = 0.04
+_CLIAMP_BANDS_TIMEOUT = 0.03
+_CLIAMP_BUFFER_MS = 3000
+_CLIAMP_RESUME_GAP = 6.0
+_LIVE_TTL = 0.12
+_want_source = ""
+_resume_at = 0.0
+_last_bands: list[float] = []
+_last_bands_at = 0.0
+_last_live_state: dict[str, Any] = {}
+_last_live_at = 0.0
+_qml_position = 0.0
+_qml_duration = 0.0
 
 
 def _rc_path() -> Path:
@@ -58,15 +85,27 @@ def _clear_socket() -> None:
         pass
 
 
+def _fetch_alive() -> bool:
+    return _fetch_proc is not None and _fetch_proc.poll() is None
+
+
 def _running() -> bool:
     if _backend == "cliamp":
         return _cliamp_alive()
+    if _backend == "qml":
+        return _item is not None
+    if _backend == "libretro":
+        return libretro_host.loaded()
+    if _backend == "torlink":
+        return _fetch_alive()
     return _proc is not None and _proc.poll() is None
 
 
 def player_pid() -> int:
     if _backend == "cliamp" and _cliamp_proc is not None and _cliamp_proc.poll() is None:
         return int(_cliamp_proc.pid)
+    if _backend == "torlink" and _fetch_alive() and _fetch_proc is not None:
+        return int(_fetch_proc.pid)
     if not _running() or _proc is None:
         return 0
     return int(_proc.pid)
@@ -99,12 +138,17 @@ def _spawn_env() -> dict[str, str]:
     extra = [
         "/home/GG/.local/bin",
         str(Path.home() / ".local/bin"),
+        "/home/GG/.local/share/goldgoblins/tools/emu/usr/bin",
         "/home/GG/.local/share/goldgoblins/tools/node/bin",
         "/home/GG/.local/share/pnpm",
         "/home/GG/.local/share/pnpm/bin",
     ]
     path = str(env.get("PATH") or "")
     env["PATH"] = os.pathsep.join(extra + ([path] if path else []))
+    lib = Path("/home/GG/.local/share/goldgoblins/tools/emu/usr/lib64")
+    if lib.is_dir():
+        current = str(env.get("LD_LIBRARY_PATH") or "")
+        env["LD_LIBRARY_PATH"] = str(lib) + ((os.pathsep + current) if current else "")
     env["QT_QPA_PLATFORM"] = env.get("QT_QPA_PLATFORM") or "xcb"
     return env
 
@@ -144,24 +188,28 @@ def _volume_db(volume: int) -> float:
 
 
 def _cliamp_alive() -> bool:
-    path = _cliamp_sock()
-    if not path.exists():
+    if not _cliamp_sock().exists():
         return False
-    try:
-        payload = _cliamp_call({"cmd": "status"}, timeout=0.6)
-    except OSError:
+    if _cliamp_proc is not None and _cliamp_proc.poll() is not None:
         return False
-    return bool(payload.get("ok"))
+    return bool(_cliamp_call({"cmd": "status"}, timeout=_CLIAMP_POLL_TIMEOUT).get("ok"))
 
 
 def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any]:
+    global _last_live_state, _last_live_at
+    cmd = str(payload.get("cmd") or "")
+    if cmd not in ("status", "bands"):
+        _last_live_state = {}
+        _last_live_at = 0.0
     path = _cliamp_sock()
+    if not path.exists():
+        return {}
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.connect(str(path))
-    sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
     chunks = b""
     try:
+        sock.settimeout(timeout)
+        sock.connect(str(path))
+        sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         while True:
             data = sock.recv(16384)
             if not data:
@@ -169,9 +217,10 @@ def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any
             chunks += data
             if b"\n" in chunks:
                 break
-    except socket.timeout:
-        pass
-    sock.close()
+    except (OSError, TimeoutError):
+        return {}
+    finally:
+        sock.close()
     text = chunks.decode("utf-8", errors="replace").splitlines()
     if not text:
         return {}
@@ -182,20 +231,145 @@ def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _cliamp_live(want_bands: bool) -> dict[str, Any]:
+    global _last_bands, _last_bands_at, _last_live_state, _last_live_at
+    now = time.monotonic()
+    if _last_live_state and now - _last_live_at < _LIVE_TTL:
+        live = dict(_last_live_state)
+        if _last_bands:
+            live["_bands"] = _last_bands
+        return live
+    live = _cliamp_call({"cmd": "status"}, timeout=_CLIAMP_POLL_TIMEOUT)
+    _last_live_state = dict(live) if live else {}
+    _last_live_at = now
+    if not live.get("ok"):
+        return live
+    state = str(live.get("state") or "")
+    if want_bands and state == "playing" and now - _last_bands_at >= 0.2:
+        spec = _cliamp_call({"cmd": "bands"}, timeout=_CLIAMP_BANDS_TIMEOUT)
+        bands = spec.get("bands")
+        if isinstance(bands, list):
+            _last_bands = bands
+            _last_bands_at = now
+    if _last_bands:
+        live = dict(live)
+        live["_bands"] = _last_bands
+    _maybe_resume_stream(state)
+    return live
+
+
+def _maybe_resume_stream(state: str) -> None:
+    global _resume_at
+    if not _want_source or _paused:
+        return
+    if state == "playing":
+        return
+    now = time.monotonic()
+    if now < _resume_at:
+        return
+    _resume_at = now + _CLIAMP_RESUME_GAP
+    track = {
+        "path": _want_source,
+        "stream": True,
+        "title": Path(_want_source).name,
+    }
+    _cliamp_call({"cmd": "track.play", "track": track}, timeout=0.35)
+
+
+def _catalog_rows(mode: str) -> list[dict[str, Any]]:
+    if _extra_items:
+        return _extra_items
+    kind = str(mode or "").strip().upper()
+    now = time.monotonic()
+    hit = _catalog_memo.get(kind)
+    if hit is not None and now - hit[0] < _CATALOG_MEMO_TTL:
+        return hit[1]
+    rows = catalog_for(kind)
+    _catalog_memo[kind] = (now, rows)
+    return rows
+
+
+def _cliamp_pid_file() -> Path:
+    return _cliamp_sock().parent / "cliamp.sock.pid"
+
+
+def _cliamp_pid() -> int:
+    if _cliamp_proc is not None and _cliamp_proc.poll() is None:
+        return int(_cliamp_proc.pid)
+    try:
+        return int(_cliamp_pid_file().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _cliamp_buffered() -> bool:
+    pid = _cliamp_pid()
+    if pid <= 0:
+        return False
+    try:
+        raw = Path("/proc/" + str(pid) + "/cmdline").read_bytes()
+    except OSError:
+        return False
+    marker = b"--buffer-ms\x00" + str(_CLIAMP_BUFFER_MS).encode()
+    return marker in raw
+
+
+def _stop_cliamp_daemon() -> None:
+    global _cliamp_proc
+    _cliamp_call({"cmd": "stop"}, timeout=0.4)
+    proc = _cliamp_proc
+    _cliamp_proc = None
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.2)
+            return
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=0.4)
+            except subprocess.TimeoutExpired:
+                pass
+            return
+    pid = _cliamp_pid()
+    if pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(12):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
 def _ensure_cliamp() -> str:
     global _cliamp_proc
     binary = which_first(("cliamp",))
     if not binary:
         raise RuntimeError("MEDIA_CLIAMP_MISSING")
-    if _cliamp_alive():
+    if _cliamp_alive() and _cliamp_buffered():
         return binary
-    if _cliamp_proc is not None and _cliamp_proc.poll() is None:
-        time.sleep(0.3)
-        if _cliamp_alive():
-            return binary
+    if _cliamp_alive() or (_cliamp_proc is not None and _cliamp_proc.poll() is None):
+        _stop_cliamp_daemon()
+        time.sleep(0.15)
     _cliamp_sock().parent.mkdir(parents=True, exist_ok=True)
     _cliamp_proc = subprocess.Popen(
-        [binary, "--daemon", "--provider", "radio"],
+        [
+            binary,
+            "--daemon",
+            "--provider",
+            "radio",
+            "--buffer-ms",
+            str(_CLIAMP_BUFFER_MS),
+        ],
         cwd=str(Path.home()),
         env=_spawn_env(),
         start_new_session=True,
@@ -209,20 +383,91 @@ def _ensure_cliamp() -> str:
     raise RuntimeError("MEDIA_CLIAMP_DAEMON")
 
 
+def _halt_audio() -> None:
+    global _want_source
+    _want_source = ""
+    if libretro_host.loaded():
+        libretro_host.unload()
+    if _cliamp_alive():
+        _cliamp_call({"cmd": "stop"})
+    _stop_proc()
+
+
+def _is_video_item(item: dict[str, Any]) -> bool:
+    kind = str(item.get("kind") or "")
+    source = str(item.get("source") or "")
+    if kind == "TV":
+        return True
+    return Path(source).suffix.lower() in VIDEO_EXT
+
+
+def _play_libretro(item: dict[str, Any]) -> dict[str, Any]:
+    global _item, _kind, _backend, _paused
+    _halt_audio()
+    libretro_host.load(
+        str(item.get("system") or ""),
+        Path(str(item["source"])),
+        ensure_state_dir(),
+    )
+    _paused = False
+    _kind = "game"
+    _backend = "libretro"
+    _item = item
+    save_prefs({"mode": "GAME", "last_id": item["id"]})
+    payload = status_payload()
+    payload["screen"] = "EMBED"
+    return payload
+
+
+def _play_qml(item: dict[str, Any]) -> dict[str, Any]:
+    global _item, _kind, _backend, _paused, _qml_position, _qml_duration
+    _halt_audio()
+    _qml_position = 0.0
+    _qml_duration = 0.0
+    _paused = False
+    _kind = "video"
+    _backend = "qml"
+    _item = item
+    save_prefs({"mode": str(item["kind"]), "last_id": item["id"]})
+    payload = status_payload()
+    payload["screen"] = "EMBED"
+    payload["drawable"] = False
+    return payload
+
+
 def _play_cliamp(source: str) -> None:
-    global _backend, _paused, _kind
+    global _backend, _paused, _kind, _want_source, _resume_at
     _ensure_cliamp()
+    _want_source = str(source or "")
+    _resume_at = 0.0
     loaded = _cliamp_call({"cmd": "url.load", "path": source}, timeout=20.0)
-    if not loaded.get("ok"):
-        queued = _cliamp_call({"cmd": "queue", "path": source})
-        if not queued.get("ok"):
-            raise RuntimeError("MEDIA_CLIAMP_LOAD")
-    status = _cliamp_call({"cmd": "status"})
-    total = int(status.get("total") or 0)
-    index = max(0, total - 1)
-    played = _cliamp_call({"cmd": "queue.play", "index": index})
+    track: dict[str, Any] = {}
+    if loaded.get("ok"):
+        rows = loaded.get("tracks") or []
+        if rows and isinstance(rows[0], dict):
+            track = dict(rows[0])
+    if not str(track.get("path") or ""):
+        track = {"path": source, "stream": True, "title": Path(source).name}
+    played = _cliamp_call({"cmd": "track.play", "track": track})
     if not played.get("ok"):
-        _cliamp_call({"cmd": "play"})
+        queued = _cliamp_call({"cmd": "queue", "path": source})
+        if not queued.get("ok") and not loaded.get("ok"):
+            raise RuntimeError("MEDIA_CLIAMP_LOAD")
+        status = _cliamp_call({"cmd": "status"})
+        total = int(status.get("total") or 0)
+        _cliamp_call({"cmd": "queue.play", "index": max(0, total - 1)})
+    deadline = time.monotonic() + 5.0
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = _cliamp_call({"cmd": "status"}, timeout=0.8)
+        state = str(last.get("state") or "")
+        path = str((last.get("track") or {}).get("path") or "")
+        if state == "playing" and (path == source or source in path or path in source):
+            break
+        time.sleep(0.2)
+    else:
+        detail = str(last.get("error") or last.get("state") or "silent")
+        raise RuntimeError("MEDIA_CLIAMP_PLAY:" + detail)
     _backend = "cliamp"
     _paused = False
     _kind = "audio"
@@ -359,6 +604,39 @@ def set_volume(volume: int) -> dict[str, Any]:
     return status_payload()
 
 
+def set_eq_preset(name: str) -> dict[str, Any]:
+    preset = str(name or "").strip()
+    if preset.lower() == "cycle":
+        current = str(status_payload().get("eq_preset") or "Flat")
+        names = [item.lower() for item in EQ_PRESETS]
+        try:
+            index = names.index(current.lower())
+        except ValueError:
+            index = 0
+        preset = EQ_PRESETS[(index + 1) % len(EQ_PRESETS)]
+    allowed = {item.lower(): item for item in EQ_PRESETS}
+    chosen = allowed.get(preset.lower())
+    if chosen is None:
+        raise ValueError("MEDIA_EQ_PRESET")
+    _ensure_cliamp()
+    sent = _cliamp_call({"cmd": "eq", "name": chosen})
+    if sent.get("ok") is False:
+        raise RuntimeError("MEDIA_EQ_PRESET:" + str(sent.get("error") or "fail"))
+    return status_payload()
+
+
+def set_eq_band(band: int, db: float) -> dict[str, Any]:
+    index = int(band)
+    if index < 0 or index > 9:
+        raise ValueError("MEDIA_EQ_BAND")
+    gain = max(-12.0, min(12.0, float(db)))
+    _ensure_cliamp()
+    sent = _cliamp_call({"cmd": "eq", "band": index, "value": gain})
+    if sent.get("ok") is False:
+        raise RuntimeError("MEDIA_EQ_BAND:" + str(sent.get("error") or "fail"))
+    return status_payload()
+
+
 def item_by_id(item_id_value: str) -> dict[str, Any] | None:
     wanted = str(item_id_value or "").strip()
     if not wanted:
@@ -383,6 +661,9 @@ def _resolve_item(item: dict[str, Any]) -> dict[str, Any]:
             item["source"] = stream_allowed(source)
         return item
     item = dict(item)
+    if str(item.get("kind") or "") == "FETCH":
+        item["source"] = str(confined(Path(source), roots=[fetch_download_dir()]))
+        return item
     item["source"] = str(confined(Path(source)))
     return item
 
@@ -394,7 +675,25 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
         raise ValueError("MEDIA_ITEM_UNKNOWN")
     item = _resolve_item(item)
     kind = str(item["kind"])
+    if kind == "FETCH":
+        source = str(item["source"])
+        video = Path(source).suffix.lower() in VIDEO_EXT or str(item.get("play") or "") == "video"
+        if video:
+            item = dict(item)
+            item["kind"] = "TV"
+            return _play_qml(item)
+        if which_first(("cliamp",)):
+            _play_cliamp(source)
+            _item = item
+            save_prefs({"mode": "FETCH", "last_id": item["id"]})
+            return status_payload()
+        raise RuntimeError("MEDIA_CLIAMP_MISSING")
     if kind == "GAME":
+        _halt_audio()
+        if str(item.get("media") or "") == "homebrew":
+            item = materialize_homebrew(item)
+        if libretro_host.core_path(str(item.get("system") or "")):
+            return _play_libretro(item)
         argv, tokens = _emulator_argv(item)
         _spawn(argv, tokens)
         _kind = "game"
@@ -413,6 +712,8 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
     ):
         source = ytdlp_resolve(source)
         item["source"] = source
+    if _is_video_item(item):
+        return _play_qml(item)
     use_cliamp = kind in ("MUSIC", "RADIO") and bool(which_first(("cliamp",)))
     if use_cliamp:
         _stop_proc()
@@ -420,7 +721,7 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
         _item = item
         save_prefs({"mode": kind, "last_id": item["id"]})
         return status_payload()
-    video = kind == "TV" or Path(source).suffix.lower() in VIDEO_EXT
+    video = Path(source).suffix.lower() in VIDEO_EXT
     _clear_socket()
     argv = _player_argv(source, video=video, drawable_xid=drawable_xid)
     tokens = ("vlc", "VLC", "ffplay") if video else ()
@@ -445,6 +746,12 @@ def pause() -> dict[str, Any]:
         status = _cliamp_call({"cmd": "status"})
         _paused = str(status.get("state") or "") == "paused"
         return status_payload()
+    if _backend == "qml":
+        _paused = not _paused
+        return status_payload()
+    if _backend == "libretro":
+        _paused = not _paused
+        return status_payload()
     if not _running():
         return status_payload()
     if _rc_sock is not None:
@@ -460,10 +767,52 @@ def pause() -> dict[str, Any]:
     return status_payload()
 
 
+def report_clock(position: float, duration: float) -> None:
+    global _qml_position, _qml_duration
+    try:
+        _qml_position = max(0.0, float(position))
+    except (TypeError, ValueError):
+        _qml_position = 0.0
+    try:
+        _qml_duration = max(0.0, float(duration))
+    except (TypeError, ValueError):
+        _qml_duration = 0.0
+
+
+def seek(seconds: float) -> dict[str, Any]:
+    global _qml_position
+    try:
+        stamp = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        stamp = 0.0
+    if _qml_duration > 0:
+        stamp = min(stamp, _qml_duration)
+    if _backend == "qml":
+        _qml_position = stamp
+        return status_payload(live=True)
+    if _backend == "cliamp" and _cliamp_alive():
+        sent = _cliamp_call({"cmd": "seek", "position": stamp}, timeout=0.4)
+        if sent.get("ok") is False:
+            _cliamp_call({"cmd": "seek", "value": stamp}, timeout=0.4)
+        return status_payload(live=True)
+    if _running() and _rc_sock is not None:
+        _rc_send("seek " + str(int(stamp)))
+        return status_payload(live=True)
+    return status_payload(live=True)
+
+
 def stop() -> dict[str, Any]:
-    global _item, _kind, _backend, _paused
+    global _item, _kind, _backend, _paused, _want_source
+    global _qml_position, _qml_duration
+    _want_source = ""
+    _qml_position = 0.0
+    _qml_duration = 0.0
     if _backend == "cliamp" and _cliamp_alive():
         _cliamp_call({"cmd": "stop"})
+    if _backend == "libretro" or libretro_host.loaded():
+        libretro_host.unload()
+    if _backend == "torlink":
+        _stop_fetch()
     _stop_proc()
     _item = None
     _kind = "audio"
@@ -489,7 +838,7 @@ def search(query: str) -> dict[str, Any]:
 
 def next_item_id(delta: int) -> str:
     prefs = load_prefs()
-    rows = _extra_items or catalog_for(prefs["mode"])
+    rows = _extra_items or _catalog_rows(prefs["mode"])
     if not rows:
         return ""
     current = str((_item or {}).get("id") or prefs.get("last_id") or "")
@@ -502,9 +851,6 @@ def next_item_id(delta: int) -> str:
 
 
 def skip(delta: int) -> dict[str, Any]:
-    if _backend == "cliamp" and _cliamp_alive() and int(delta) in (-1, 1):
-        _cliamp_call({"cmd": "next" if int(delta) > 0 else "prev"})
-        return status_payload()
     nxt = next_item_id(delta)
     if not nxt:
         return status_payload()
@@ -514,20 +860,36 @@ def skip(delta: int) -> dict[str, Any]:
 def fetch_status() -> dict[str, Any]:
     tools = probe_tools()
     path = tools["torlink"]["path"]
+    terminal = fetch_terminal()
+    files = "http://127.0.0.1:9160/"
     if not path:
         return {
             "present": False,
             "label": "TORLINK · MISSING",
             "detail": "torlnk is not on PATH.",
             "bin": "",
-            "files": "http://127.0.0.1:9160/",
+            "terminal": terminal,
+            "files": files,
+            "running": _fetch_alive(),
+        }
+    if not terminal:
+        return {
+            "present": False,
+            "label": "TORLINK · NO TERMINAL",
+            "detail": "konsole is missing. The search TUI needs it.",
+            "bin": path,
+            "terminal": "",
+            "files": files,
+            "running": _fetch_alive(),
         }
     return {
         "present": True,
-        "label": "TORLINK · READY",
-        "detail": "Workspace opens torlink. Finished files stream at 127.0.0.1:9160.",
+        "label": "TORLINK · READY" if not _fetch_alive() else "TORLINK · OPEN",
+        "detail": "Search torrents in the workspace. Type a query, Enter to search, d to download. Finished files land on the left.",
         "bin": path,
-        "files": "http://127.0.0.1:9160/",
+        "terminal": terminal,
+        "files": files,
+        "running": _fetch_alive(),
     }
 
 
@@ -536,7 +898,25 @@ def fetch_argv() -> list[str]:
     path = tools["torlink"]["path"]
     if not path:
         raise RuntimeError("MEDIA_TORLINK_MISSING")
-    return [path]
+    terminal = fetch_terminal()
+    if not terminal:
+        raise RuntimeError("MEDIA_KONSOLE_MISSING")
+    return [
+        terminal,
+        "--hide-menubar",
+        "--hide-tabbar",
+        "-p",
+        "LocalTabTitleFormat=" + FETCH_TUI_TITLE,
+        "-p",
+        "RemoteTabTitleFormat=" + FETCH_TUI_TITLE,
+        "-e",
+        path,
+    ]
+
+
+def bind_fetch_proc(proc: subprocess.Popen[bytes] | None) -> None:
+    global _fetch_proc
+    _fetch_proc = proc
 
 
 def start_cliamp() -> dict[str, Any]:
@@ -577,8 +957,19 @@ def _ensure_torlink_files() -> None:
     binary = which_first(("torlnk", "torlink"))
     if not binary:
         return
+    root = fetch_download_dir()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     _files_proc = subprocess.Popen(
-        [binary, "files", "--host", "127.0.0.1", "--port", "9160"],
+        [
+            binary,
+            "files",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9160",
+            "--dir",
+            str(root),
+        ],
         cwd=str(Path.home()),
         env=_spawn_env(),
         start_new_session=True,
@@ -587,18 +978,36 @@ def _ensure_torlink_files() -> None:
     )
 
 
+def _stop_fetch() -> None:
+    global _fetch_proc
+    proc = _fetch_proc
+    _fetch_proc = None
+    if proc is None:
+        return
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def start_fetch() -> dict[str, Any]:
-    global _item, _kind, _backend
+    global _item, _kind, _backend, _paused
     argv = fetch_argv()
-    _spawn(argv, ("torlnk", "torlink"))
+    if libretro_host.loaded():
+        libretro_host.unload()
+    _stop_proc()
+    fetch_download_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
     _ensure_torlink_files()
+    _paused = False
     _kind = "fetch"
     _backend = "torlink"
     _item = {
         "id": "fetch:torlink",
         "kind": "FETCH",
         "title": "torlink",
-        "source": argv[0],
+        "source": argv[-1],
         "media": "tool",
         "system": "",
     }
@@ -608,76 +1017,128 @@ def start_fetch() -> dict[str, Any]:
     return payload
 
 
-def status_payload() -> dict[str, Any]:
+def status_payload(live: bool = False) -> dict[str, Any]:
     prefs = load_prefs()
-    tools = probe_tools()
     mode = prefs["mode"]
-    rows = _extra_items if _extra_items else (
-        catalog_for(mode) if mode != "FETCH" else []
-    )
+    rows: list[dict[str, Any]] = [] if live else _catalog_rows(mode)
     now = dict(_item) if _item else {}
     playing = False
     paused = False
-    if _backend == "cliamp" and _cliamp_alive():
-        live = _cliamp_call({"cmd": "status"}, timeout=0.8)
-        state = str(live.get("state") or "")
+    position = 0.0
+    duration = 0.0
+    eq_preset = ""
+    shuffle = False
+    repeat = "off"
+    spectrum: list[float] = []
+    eq_bands: list[float] = []
+    live_state: dict[str, Any] = {}
+    if _backend == "cliamp":
+        live_state = _cliamp_live(want_bands=True)
+        state = str(live_state.get("state") or "")
         playing = state == "playing"
         paused = state == "paused"
-        track = live.get("track") if isinstance(live.get("track"), dict) else {}
+        try:
+            position = float(live_state.get("position") or 0)
+        except (TypeError, ValueError):
+            position = 0.0
+        try:
+            duration = float(live_state.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        eq_preset = str(live_state.get("eq_preset") or "")
+        shuffle = bool(live_state.get("shuffle"))
+        repeat = str(live_state.get("repeat") or "off")
+        eq_bands = normalize_eq(live_state.get("eq_bands"))
+        track = live_state.get("track") if isinstance(live_state.get("track"), dict) else {}
         if track:
             now = {
                 "id": now.get("id") or "",
                 "kind": now.get("kind") or mode,
                 "title": str(track.get("title") or now.get("title") or mode),
+                "artist": str(track.get("artist") or ""),
+                "album": str(track.get("album") or ""),
                 "source": str(track.get("path") or now.get("source") or ""),
                 "media": "stream" if track.get("stream") else now.get("media") or "file",
                 "system": "",
                 "player": "cliamp",
+                "stream": bool(track.get("stream")),
             }
+        if playing:
+            spectrum = normalize_spectrum(live_state.get("_bands"), SPECTRUM_BARS)
     else:
         playing = _running() and not _paused
         paused = _paused and _running()
-    player = "CLIAMP" if _backend == "cliamp" else (
-        Path(player_bin()).name.upper() if player_bin() else "NONE"
-    )
+        if _backend == "qml":
+            position = _qml_position
+            duration = _qml_duration
+    report_backend = _backend or ("cliamp" if live_state else "")
+    if report_backend == "cliamp":
+        player = "CLIAMP"
+    elif report_backend == "qml":
+        player = "QML"
+    elif report_backend == "libretro":
+        player = "LIBRETRO"
+    elif report_backend == "torlink":
+        player = "TORLINK"
+    else:
+        player = Path(player_bin()).name.upper() if player_bin() else "NONE"
     legend = mode
     if now:
         legend = str(now.get("title") or mode)
-    if mode == "FETCH":
+    fetch: dict[str, Any] = {}
+    if mode == "FETCH" or not live:
         fetch = fetch_status()
-        legend = str(fetch["label"])
+        if mode == "FETCH":
+            legend = str(fetch["label"])
     screen = ""
-    if _running() and _kind in ("video", "game", "fetch"):
+    if _backend in ("qml", "libretro"):
         screen = "EMBED"
-    return {
+    elif _kind in ("video", "game", "fetch") and _backend:
+        screen = "EMBED"
+    payload = {
         "schema": SCHEMA,
         "mode": mode,
         "modes": list(MODES),
         "volume": int(prefs["volume"]),
         "playing": playing,
         "paused": paused,
-        "running": playing or paused or _running(),
+        "running": playing or paused or bool(_backend),
         "player": player,
-        "backend": _backend or player.lower(),
-        "pid": player_pid(),
+        "backend": report_backend or player.lower(),
+        "pid": 0 if live else player_pid(),
         "screen": screen,
         "kind": _kind,
         "legend": legend[:80],
         "now": now,
-        "items": rows,
-        "tools": {
-            "cliamp": tools["cliamp"],
-            "vlc": tools["vlc"],
-            "ffplay": tools["ffplay"],
-            "torlink": tools["torlink"],
-            "yt-dlp": tools.get("yt-dlp") or {"present": False, "path": ""},
-            "retroarch": tools["retroarch"],
-        },
-        "cores": tools["cores"],
-        "fetch": fetch_status(),
-        "library_roots": [str(path) for path in library_roots()],
+        "position": position,
+        "duration": duration,
+        "clock": format_clock(position),
+        "length": "LIVE" if now.get("stream") and duration <= 0 else format_clock(duration),
+        "eq_preset": eq_preset or "Flat",
+        "eq_bands": eq_bands,
+        "spectrum": spectrum,
+        "shuffle": shuffle,
+        "repeat": repeat,
         "last_id": str(prefs.get("last_id") or ""),
     }
+    if live:
+        payload["live"] = True
+        return payload
+    tools = probe_tools()
+    payload["eq_presets"] = list(EQ_PRESETS)
+    payload["items"] = rows
+    payload["tools"] = {
+        "cliamp": tools["cliamp"],
+        "vlc": tools["vlc"],
+        "ffplay": tools["ffplay"],
+        "torlink": tools["torlink"],
+        "yt-dlp": tools.get("yt-dlp") or {"present": False, "path": ""},
+        "retroarch": tools["retroarch"],
+    }
+    payload["cores"] = tools["cores"]
+    payload["fetch"] = fetch
+    payload["library_roots"] = [str(path) for path in library_roots()]
+    return payload
 
 
 def tool_line(payload: dict[str, Any] | None = None) -> str:

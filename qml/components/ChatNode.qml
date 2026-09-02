@@ -125,7 +125,7 @@ Item {
     TextMetrics {
         id: contextMetrics
         font.family: "monospace"
-        font.pixelSize: 9
+        font.pixelSize: 12
         text: root.contextReference.length > 0
             ? "context " + root.contextReference
             : ""
@@ -134,7 +134,7 @@ Item {
     TextMetrics {
         id: leftLegendMetrics
         font.family: "monospace"
-        font.pixelSize: 10
+        font.pixelSize: 12
         font.bold: true
         text: root.authorLabel + " · " + root.nodeKind
     }
@@ -259,9 +259,9 @@ Item {
             visible: root.contextReference.length > 0
             width: parent.width
             text: "context " + root.contextReference
-            color: "#6e7681"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 9
+            font.pixelSize: 12
         }
 
         Text {
@@ -270,7 +270,7 @@ Item {
             text: "SYNTHETIC FIXTURE · NO EXECUTION · NO AUTHORITY CLAIM"
             color: "#c8a97e"
             font.family: "monospace"
-            font.pixelSize: 9
+            font.pixelSize: 12
             font.bold: true
         }
     }

@@ -10,7 +10,7 @@ from PySide6.QtGui import QGuiApplication, QWindow
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtWidgets import QApplication, QWidget
 
-from backend.grok_tui_embed import _descendants
+from backend.grok_tui_embed import cached_quick_item, _descendants, release_embed_windows
 
 XPROP = Path("/usr/bin/xprop")
 HOLE_NAME = "workspaceMediaHole"
@@ -56,13 +56,15 @@ class MediaEmbed(QObject):
         self._holder: QWidget | None = None
         self._foreign: QWindow | None = None
         self._timer = QTimer(self)
-        self._timer.setInterval(80)
+        self._timer.setInterval(250)
         self._timer.timeout.connect(self._sync_geometry)
         self._attach_tries = 0
         self._attached = False
         self._error = ""
         self._pid = 0
         self._tokens: tuple[str, ...] = ()
+        self._geo: tuple[int, int, int, int] | None = None
+        self._hole: QQuickItem | None = None
 
     def attached(self) -> bool:
         return self._attached
@@ -113,8 +115,12 @@ class MediaEmbed(QObject):
     def hide(self) -> None:
         self._timer.stop()
         holder = self._holder
-        if holder is not None:
+        if holder is None:
+            return
+        try:
             holder.hide()
+        except RuntimeError:
+            self._holder = None
 
     def show(self) -> None:
         if self._holder is not None:
@@ -132,13 +138,9 @@ class MediaEmbed(QObject):
         self._attached = False
         foreign = self._foreign
         self._foreign = None
-        if foreign is not None:
-            foreign.setParent(None)
         holder = self._holder
         self._holder = None
-        if holder is not None:
-            holder.hide()
-            holder.deleteLater()
+        release_embed_windows(foreign, holder)
 
     def _ensure_holder(self) -> QWidget | None:
         if self._holder is not None:
@@ -171,9 +173,13 @@ class MediaEmbed(QObject):
             return
         self._error = "MEDIA_EMBED_TIMEOUT"
 
+    def _hole_item(self) -> QQuickItem | None:
+        self._hole = cached_quick_item(self._root, HOLE_NAME, self._hole)
+        return self._hole
+
     def _main_xid(self) -> int:
         window = QGuiApplication.focusWindow()
-        item = self._root.findChild(QQuickItem, HOLE_NAME)
+        item = self._hole_item()
         if item is not None and item.window() is not None:
             window = item.window()
         if window is None:
@@ -214,7 +220,7 @@ class MediaEmbed(QObject):
         return True
 
     def _host_rect(self) -> QRect | None:
-        item = self._root.findChild(QQuickItem, HOLE_NAME)
+        item = self._hole_item()
         if item is None or not item.isVisible():
             return None
         width = float(item.width())
@@ -235,8 +241,13 @@ class MediaEmbed(QObject):
             return
         rect = self._host_rect()
         if rect is None:
+            self._geo = None
             holder.hide()
             return
+        key = (rect.x(), rect.y(), rect.width(), rect.height())
+        if holder.isVisible() and self._geo == key:
+            return
+        self._geo = key
         holder.setGeometry(rect)
         if not holder.isVisible():
             holder.show()

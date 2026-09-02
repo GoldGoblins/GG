@@ -20,11 +20,12 @@ DEFAULTS = {
     "utilityHeight": 112,
     "accentColor": "#8a8a8a",
     "frameBorder": "#6a6a6a",
-    "frameRadius": 2,
+    "frameRadius": 4,
     "showOpenTabInInput": False,
     "showInnerEditorChrome": True,
     "showProductSourceTabs": False,
     "showDemoFixtures": False,
+    "desktopShell": False,
 }
 
 _ROOT_KEYS = {
@@ -39,6 +40,7 @@ _ROOT_KEYS = {
     "showInnerEditorChrome": "showInnerEditorChrome",
     "showProductSourceTabs": "showProductSourceTabs",
     "showDemoFixtures": "alphaShowDemoFixtures",
+    "desktopShell": "desktopShell",
 }
 
 
@@ -91,6 +93,7 @@ def normalize_settings(raw: object) -> dict[str, object]:
         "showInnerEditorChrome",
         "showProductSourceTabs",
         "showDemoFixtures",
+        "desktopShell",
     ):
         value = data.get(key, DEFAULTS[key])
         out[key] = bool(value)

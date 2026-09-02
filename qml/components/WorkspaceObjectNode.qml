@@ -65,7 +65,7 @@ Item {
             color: "#7d8590"
             elide: Text.ElideMiddle
             font.family: "monospace"
-            font.pixelSize: 8
+            font.pixelSize: 12
         }
 
         Text {
@@ -73,9 +73,9 @@ Item {
             text: root.realLocalFile
                 ? "REAL_LOCAL_FILE"
                 : root.provenanceClass
-            color: root.syntheticFixture ? "#c8a97e" : "#8b949e"
+            color: root.syntheticFixture ? "#c8a97e" : "#c8cdd4"
             font.family: "monospace"
-            font.pixelSize: 8
+            font.pixelSize: 12
         }
 
         ActivityStrip {
@@ -98,7 +98,7 @@ Item {
             text: "DEMO / SAMPLE · NO EXECUTION"
             color: "#7d7368"
             font.family: "monospace"
-            font.pixelSize: 8
+            font.pixelSize: 12
         }
     }
 

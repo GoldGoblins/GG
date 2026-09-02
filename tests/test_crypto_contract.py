@@ -51,6 +51,20 @@ def main() -> int:
         raise AssertionError("format_sol 101")
     if parsed["mode"] != "TESTNET":
         raise AssertionError("testnet default")
+    if crypto_contract.human_error("LAB_OFF") != crypto_contract.ERROR_HINTS["LAB_OFF"]:
+        raise AssertionError("human_error LAB_OFF")
+    if crypto_contract.short_error("-32603 Internal error") != "AIRDROP_FAIL":
+        raise AssertionError("short -32603")
+    decorated = crypto_contract.decorate_ledger_row(
+        {"txid": "NONE", "error": "LAB_OFF"}
+    )
+    if "Start LAB first" not in str(decorated.get("hint") or ""):
+        raise AssertionError("decorate hint")
+    if crypto_contract.load_proven()["ready"]:
+        raise AssertionError("empty proven ready")
+    crypto_contract.mark_proven("lab")
+    if not crypto_contract.load_proven()["lab"]:
+        raise AssertionError("mark lab")
     wallet = crypto_contract.save_wallet(key, 0)
     if not wallet["connected"]:
         raise AssertionError("wallet not connected")

@@ -28,12 +28,12 @@ Item {
     property bool assignmentExpanded: false
     property string engineTarget: "LOCAL_QWEN"
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     property bool showOpenTab: false
 
     implicitHeight: root.engineTarget === "GROK_TUI"
-        ? 22
-        : (root.assignmentExpanded ? 160 : 96)
+        ? 28
+        : (root.assignmentExpanded ? 166 : 102)
     implicitWidth: 720
 
     function submit() {
@@ -71,7 +71,7 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: engineFooter.top
-        anchors.bottomMargin: 16
+        anchors.bottomMargin: 18
         leftLegend: root.showOpenTab
             && root.workspaceObjectTitle.length > 0
                 ? "INPUT · " + root.workspaceObjectTitle
@@ -113,6 +113,81 @@ Item {
                     displayText: currentIndex >= 0
                         ? currentText
                         : "Explicit participant…"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    background: Rectangle {
+                        implicitWidth: 240
+                        implicitHeight: 28
+                        color: "#121212"
+                        border.width: 1
+                        border.color: participantSelector.activeFocus
+                            ? "#8a8a8a"
+                            : "#6a6a6a"
+                        radius: 2
+                        antialiasing: false
+                    }
+                    contentItem: Text {
+                        leftPadding: 8
+                        rightPadding: 18
+                        text: participantSelector.displayText
+                        color: participantSelector.currentIndex >= 0
+                            ? "#e6e6e6"
+                            : "#8a8a8a"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        verticalAlignment: Text.AlignVCenter
+                        elide: Text.ElideRight
+                    }
+                    indicator: Text {
+                        x: participantSelector.width - 16
+                        y: (participantSelector.height - implicitHeight) / 2
+                        text: "v"
+                        color: "#8a8a8a"
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                    }
+                    delegate: ItemDelegate {
+                        id: optionDelegate
+                        required property int index
+                        required property var modelData
+                        width: participantSelector.width
+                        height: 26
+                        highlighted: participantSelector.highlightedIndex === index
+                        contentItem: Text {
+                            text: String(optionDelegate.modelData)
+                            color: optionDelegate.highlighted
+                                ? "#e6e6e6"
+                                : "#c8cdd4"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        background: Rectangle {
+                            color: optionDelegate.highlighted
+                                ? "#2a2a2a"
+                                : "#161616"
+                        }
+                    }
+                    popup: Popup {
+                        y: participantSelector.height + 2
+                        width: participantSelector.width
+                        padding: 1
+                        background: Rectangle {
+                            color: "#161616"
+                            border.color: "#6a6a6a"
+                            border.width: 1
+                        }
+                        contentItem: ListView {
+                            clip: true
+                            implicitHeight: contentHeight
+                            model: participantSelector.popup.visible
+                                ? participantSelector.delegateModel
+                                : null
+                            currentIndex: participantSelector.highlightedIndex
+                            ScrollBar.vertical: GgScrollBar {}
+                        }
+                    }
                 }
 
                 TextField {
@@ -125,7 +200,22 @@ Item {
                         - 24
                     height: 28
                     placeholderText: "Explicit creator actor"
+                    placeholderTextColor: "#5d6670"
+                    color: "#e6e6e6"
+                    font.family: "monospace"
+                    font.pixelSize: 12
                     selectByMouse: true
+                    leftPadding: 8
+                    rightPadding: 8
+                    background: Rectangle {
+                        color: "#121212"
+                        border.width: 1
+                        border.color: creatorActorInput.activeFocus
+                            ? "#8a8a8a"
+                            : "#6a6a6a"
+                        radius: 2
+                        antialiasing: false
+                    }
                 }
 
                 Text {
@@ -139,7 +229,7 @@ Item {
                         ? "#d8dee9"
                         : "#5d6670"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: participantSelector.currentIndex >= 0
                         && creatorActorInput.text.trim().length > 0
 
@@ -163,7 +253,7 @@ Item {
                     verticalAlignment: Text.AlignVCenter
                     color: "#d8dee9"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: true
 
                     MouseArea {
@@ -184,7 +274,7 @@ Item {
 
                 Text {
                     text: ">"
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     font.family: "monospace"
                     font.pixelSize: 13
                     verticalAlignment: Text.AlignVCenter
@@ -236,7 +326,7 @@ Item {
         anchors.leftMargin: -6
         anchors.bottom: peopleRow.bottom
         width: peopleRow.width + 12
-        height: 18
+        height: 20
         color: "#161616"
         visible: peopleRow.width > 0 && root.engineTarget !== "GROK_TUI"
     }
@@ -247,8 +337,8 @@ Item {
         anchors.left: inputFrame.left
         anchors.leftMargin: 14
         anchors.bottom: inputFrame.bottom
-        anchors.bottomMargin: -7
-        height: 18
+        anchors.bottomMargin: -8
+        height: 20
         spacing: 0
         visible: root.engineTarget !== "GROK_TUI"
         Text {
@@ -259,7 +349,7 @@ Item {
                 : "People"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: true
 
             MouseArea {
@@ -277,7 +367,7 @@ Item {
         anchors.leftMargin: -6
         anchors.bottom: sendRow.bottom
         width: sendRow.width + 12
-        height: 18
+        height: 20
         color: "#161616"
         visible: sendRow.width > 0 && root.engineTarget !== "GROK_TUI"
     }
@@ -288,17 +378,17 @@ Item {
         anchors.right: inputFrame.right
         anchors.rightMargin: 14
         anchors.bottom: inputFrame.bottom
-        anchors.bottomMargin: -7
-        height: 18
+        anchors.bottomMargin: -8
+        height: 20
         spacing: 0
         visible: root.engineTarget !== "GROK_TUI"
         Text {
             id: sendButton
             text: "Send"
             visible: !root.busy
-            color: root.canSend ? "#d8dee9" : "#5d6670"
+            color: root.canSend ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.canSend
 
             MouseArea {
@@ -316,9 +406,9 @@ Item {
             text: "Stop"
             visible: root.busy
             enabled: root.busy
-            color: root.busy ? "#d8dee9" : "#5d6670"
+            color: root.busy ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.busy
 
             MouseArea {
@@ -336,8 +426,8 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: 14
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 2
-        height: 16
+        anchors.bottomMargin: 8
+        height: 18
         spacing: 0
 
         Text {
@@ -347,7 +437,7 @@ Item {
                 ? "#d8dee9"
                 : "#5d6670"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.engineTarget === "LOCAL_QWEN"
 
             MouseArea {
@@ -359,9 +449,9 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
@@ -371,7 +461,7 @@ Item {
                 ? "#d8dee9"
                 : "#5d6670"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.engineTarget === "GROK_WORKER"
 
             MouseArea {
@@ -383,9 +473,9 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
@@ -395,7 +485,7 @@ Item {
                 ? "#d8dee9"
                 : "#5d6670"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.engineTarget === "GROK_TUI"
 
             MouseArea {

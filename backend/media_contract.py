@@ -43,32 +43,37 @@ SYSTEMS: dict[str, dict[str, Any]] = {
     "nes": {
         "label": "NES",
         "ext": {".nes", ".fds"},
-        "bins": ("fceux", "nestopia", "mednafen", "retroarch"),
-        "tokens": ("fceux", "nestopia", "mednafen", "retroarch"),
+        "folders": ("nes", "famicom"),
+        "bins": ("mednafen", "fceux", "nestopia", "retroarch"),
+        "tokens": ("mednafen", "fceux", "nestopia", "retroarch"),
     },
     "snes": {
         "label": "SNES",
         "ext": {".smc", ".sfc"},
-        "bins": ("snes9x", "snes9x-gtk", "zsnes", "mednafen", "retroarch"),
-        "tokens": ("snes9x", "zsnes", "mednafen", "retroarch"),
+        "folders": ("snes", "sfc"),
+        "bins": ("mednafen", "snes9x", "snes9x-gtk", "zsnes", "retroarch"),
+        "tokens": ("mednafen", "snes9x", "zsnes", "retroarch"),
     },
     "n64": {
         "label": "N64",
         "ext": {".n64", ".z64", ".v64"},
+        "folders": ("n64",),
         "bins": ("mupen64plus", "retroarch"),
         "tokens": ("mupen64plus", "retroarch"),
     },
     "gb": {
         "label": "GAME BOY",
         "ext": {".gb", ".gbc"},
-        "bins": ("mgba", "vbam", "sameboy", "retroarch"),
-        "tokens": ("mgba", "vbam", "sameboy", "retroarch"),
+        "folders": ("gb", "gbc", "gameboy"),
+        "bins": ("mednafen", "mgba", "vbam", "sameboy", "retroarch"),
+        "tokens": ("mednafen", "mgba", "vbam", "sameboy", "retroarch"),
     },
     "gba": {
         "label": "GBA",
         "ext": {".gba"},
-        "bins": ("mgba", "vbam", "retroarch"),
-        "tokens": ("mgba", "vbam", "retroarch"),
+        "folders": ("gba",),
+        "bins": ("mednafen", "mgba", "vbam", "retroarch"),
+        "tokens": ("mednafen", "mgba", "vbam", "retroarch"),
     },
     "nds": {
         "label": "NDS",
@@ -79,7 +84,8 @@ SYSTEMS: dict[str, dict[str, Any]] = {
     "genesis": {
         "label": "GENESIS",
         "ext": {".md", ".gen", ".smd"},
-        "bins": ("genesis_plus_gx", "mednafen", "retroarch"),
+        "folders": ("genesis", "md", "megadrive"),
+        "bins": ("mednafen", "retroarch"),
         "tokens": ("mednafen", "retroarch"),
     },
     "ps1": {
@@ -145,6 +151,7 @@ TOOL_DIRS = (
     Path("/home/GG/.local/bin"),
     Path.home() / ".local/bin",
     Path("/home/GG/.local/share/goldgoblins/tools"),
+    Path("/home/GG/.local/share/goldgoblins/tools/emu/usr/bin"),
     Path("/home/GG/.local/share/goldgoblins/tools/node/bin"),
     Path("/home/GG/.local/share/pnpm"),
     Path("/home/GG/.local/share/pnpm/bin"),
@@ -159,29 +166,52 @@ IPTV_PLAYLISTS = (
     "https://iptv-org.github.io/iptv/categories/news.m3u",
 )
 IPTV_PER_SOURCE = 80
+HOMEBREW_API = "https://hh3.gbdev.io/api"
+HOMEBREW_PAGES = 2
+HOMEBREW_DENIED_TYPES = frozenset({"hackrom"})
+HOMEBREW_PLATFORM = {
+    "GB": "gb",
+    "GBC": "gb",
+    "GBA": "gba",
+    "NES": "nes",
+}
+HOMEBREW_REPO = {
+    "gb": "https://github.com/gbdev/database",
+    "gba": "https://github.com/gbadev-org/games",
+    "nes": "https://github.com/nesdev-org/homebrew-db",
+}
+MAX_ROM_BYTES = 16 * 1024 * 1024
 HTTP_UA = "gg-ai-desktop/media"
 CACHE_TTL = 6 * 3600
 
 RADIO_PRESETS = (
     {
         "title": "SR P1",
-        "url": "https://http-live.sr.se/p1-mp3-192",
+        "url": "https://live1.sr.se/p1-mp3-192",
     },
     {
         "title": "SR P2",
-        "url": "https://http-live.sr.se/p2-mp3-192",
+        "url": "https://live1.sr.se/p2-mp3-192",
     },
     {
         "title": "SR P3",
-        "url": "https://http-live.sr.se/p3-mp3-192",
+        "url": "https://live1.sr.se/p3-mp3-96",
     },
     {
         "title": "SR P4 Stockholm",
-        "url": "https://http-live.sr.se/p4stockholm-mp3-192",
+        "url": "https://edge1.sr.se/p4sth-aac-320",
     },
     {
         "title": "BBC World Service",
         "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+    },
+    {
+        "title": "cliamp Lofi",
+        "url": "http://radio.cliamp.stream/lofi/stream",
+    },
+    {
+        "title": "SomaFM Groove Salad",
+        "url": "https://ice2.somafm.com/groovesalad-128-mp3",
     },
 )
 
@@ -199,6 +229,9 @@ LIBRARY_DIRS = (
     Path.home() / "Games",
     STATE_DIR / "library",
 )
+FETCH_DIR = Path.home() / "Downloads" / "torlink"
+FETCH_TUI_TITLE = "gg-ai-torlink"
+KONSOLE_BIN = Path("/usr/bin/konsole")
 
 
 def ensure_state_dir() -> Path:
@@ -219,7 +252,16 @@ def which_first(names: tuple[str, ...]) -> str:
     return ""
 
 
+_PROBE_TTL = 30.0
+_probe_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
+
+
 def probe_tools() -> dict[str, dict[str, Any]]:
+    global _probe_cache
+    now = time.monotonic()
+    hit = _probe_cache
+    if hit is not None and now - hit[0] < _PROBE_TTL:
+        return hit[1]
     rows: dict[str, dict[str, Any]] = {}
     for key, names in TOOL_BINS.items():
         path = which_first(names)
@@ -237,6 +279,7 @@ def probe_tools() -> dict[str, dict[str, Any]]:
             "path": path,
         }
     rows["cores"] = cores
+    _probe_cache = (now, rows)
     return rows
 
 
@@ -260,6 +303,30 @@ def _library_roots() -> list[Path]:
 
 def library_roots() -> list[Path]:
     return _library_roots()
+
+
+def fetch_download_dir() -> Path:
+    return FETCH_DIR
+
+
+def fetch_terminal() -> str:
+    found = which_first(("konsole",))
+    if found:
+        return found
+    if KONSOLE_BIN.is_file() and os.access(KONSOLE_BIN, os.X_OK):
+        return str(KONSOLE_BIN)
+    return ""
+
+
+def ensure_rom_library() -> Path:
+    root = Path("/home/GG/ROMs")
+    home = Path.home() / "ROMs"
+    if not root.exists() and home.exists():
+        root = home
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for system in SYSTEMS:
+        (root / system).mkdir(mode=0o700, exist_ok=True)
+    return root
 
 
 def _denied_path(path: Path) -> bool:
@@ -473,7 +540,7 @@ def _iptv_playlist(url: str) -> list[dict[str, Any]]:
         return []
     rows: list[dict[str, Any]] = []
     for item in parse_m3u_text(text, "TV"):
-        item["player"] = "vlc"
+        item["player"] = "qml"
         rows.append(item)
     return rows
 
@@ -515,7 +582,7 @@ def query_item(kind: str, query: str) -> dict[str, Any] | None:
         "source": source,
         "media": "stream",
         "system": "",
-        "player": "cliamp" if kind == "RADIO" else "vlc",
+        "player": "cliamp" if kind == "RADIO" else "qml",
     }
 
 
@@ -572,7 +639,7 @@ def music_catalog() -> list[dict[str, Any]]:
 def video_catalog() -> list[dict[str, Any]]:
     rows = _scan_files("TV", VIDEO_EXT)
     for item in rows:
-        item["player"] = "vlc"
+        item["player"] = "qml"
     playlist = ensure_state_dir() / "tv.m3u"
     if playlist.is_file():
         rows.extend(parse_m3u(playlist, "TV"))
@@ -623,11 +690,72 @@ def radio_catalog() -> list[dict[str, Any]]:
     return rows[:MAX_ITEMS]
 
 
+def fetch_catalog() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    root = fetch_download_dir()
+    try:
+        root = root.expanduser()
+        if not root.exists() or not root.is_dir():
+            return rows
+        root = root.resolve()
+    except OSError:
+        return rows
+    suffixes = AUDIO_EXT | VIDEO_EXT
+    stack = [(root, 0)]
+    while stack and len(rows) < MAX_ITEMS:
+        folder, depth = stack.pop()
+        if depth > MAX_SCAN_DEPTH:
+            continue
+        try:
+            children = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_symlink() or child.name.startswith("."):
+                continue
+            if child.is_dir():
+                if not _denied_path(child):
+                    stack.append((child, depth + 1))
+                continue
+            suffix = child.suffix.lower()
+            if suffix not in suffixes or _denied_path(child):
+                continue
+            try:
+                source = str(confined(child, roots=[root]))
+            except ValueError:
+                continue
+            if source in seen:
+                continue
+            seen.add(source)
+            rows.append(
+                {
+                    "id": item_id("FETCH", source),
+                    "kind": "FETCH",
+                    "title": _title_of(child),
+                    "source": source,
+                    "media": "file",
+                    "system": "",
+                    "play": "video" if suffix in VIDEO_EXT else "audio",
+                }
+            )
+            if len(rows) >= MAX_ITEMS:
+                break
+    return rows
+
+
 def search_items(mode: str, query: str) -> list[dict[str, Any]]:
     kind = str(mode or DEFAULT_MODE).strip().upper()
     cleaned = str(query or "").strip()
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    if kind == "FETCH":
+        needle = cleaned.lower()
+        for item in fetch_catalog():
+            if needle and needle not in str(item.get("title") or "").lower():
+                continue
+            rows.append(item)
+        return rows[:MAX_ITEMS]
     direct = query_item("RADIO" if kind == "RADIO" else "TV", cleaned)
     if direct is not None:
         rows.append(direct)
@@ -664,7 +792,7 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
                 continue
             if item["source"] in seen:
                 continue
-            item["player"] = "vlc"
+            item["player"] = "qml"
             rows.append(item)
         return rows[:MAX_ITEMS]
     if kind == "MUSIC":
@@ -681,6 +809,14 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
             if needle and needle not in hay:
                 continue
             rows.append(item)
+            seen.add(item["id"])
+        for item in homebrew_search(query=cleaned, pages=3):
+            if item["id"] in seen:
+                continue
+            rows.append(item)
+            seen.add(item["id"])
+            if len(rows) >= MAX_ITEMS:
+                break
         return rows[:MAX_ITEMS]
     return rows
 
@@ -734,6 +870,163 @@ def game_catalog() -> list[dict[str, Any]]:
     return rows
 
 
+def _homebrew_file(entry: dict[str, Any]) -> dict[str, Any] | None:
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return None
+    chosen: dict[str, Any] | None = None
+    for row in files:
+        if not isinstance(row, dict) or not row.get("playable"):
+            continue
+        if row.get("default"):
+            return row
+        if chosen is None:
+            chosen = row
+    return chosen
+
+
+def homebrew_entry_item(entry: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    kind = str(entry.get("typetag") or "").strip().lower()
+    if kind in HOMEBREW_DENIED_TYPES:
+        return None
+    if kind not in ("game", "homebrew", "demo"):
+        return None
+    platform = str(entry.get("platform") or "").strip().upper()
+    system = HOMEBREW_PLATFORM.get(platform)
+    if not system:
+        return None
+    slug = str(entry.get("slug") or "").strip()
+    title = str(entry.get("title") or slug).strip()
+    if not slug or not title:
+        return None
+    playable = _homebrew_file(entry)
+    if playable is None:
+        return None
+    filename = str(playable.get("filename") or "").strip().lstrip("/")
+    if not filename or ".." in Path(filename).parts:
+        return None
+    leaf = Path(filename).name
+    spec = SYSTEMS[system]
+    if Path(leaf).suffix.lower() not in spec["ext"]:
+        return None
+    repo = str(entry.get("baserepo") or HOMEBREW_REPO.get(system) or "").strip().rstrip("/")
+    if not repo.startswith("https://github.com/"):
+        return None
+    gh = repo[len("https://github.com/") :].strip("/")
+    parts = [urllib.parse.quote(slug, safe="-_.")] + [
+        urllib.parse.quote(part, safe="-_.") for part in Path(filename).parts
+    ]
+    source = "https://raw.githubusercontent.com/" + gh + "/master/entries/" + "/".join(parts)
+    return {
+        "id": item_id("GAME", "homebrew:" + slug),
+        "kind": "GAME",
+        "title": title[:MAX_TITLE],
+        "source": source,
+        "media": "homebrew",
+        "system": system,
+        "system_label": spec["label"],
+        "slug": slug,
+        "filename": leaf,
+        "player": "mednafen",
+    }
+
+
+def homebrew_search(
+    query: str = "",
+    platform: str = "",
+    pages: int = HOMEBREW_PAGES,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    params_base: dict[str, str] = {}
+    cleaned = str(query or "").strip()
+    if cleaned:
+        params_base["q"] = cleaned[:80]
+    else:
+        params_base["typetag"] = "game"
+    if platform:
+        params_base["platform"] = str(platform).strip().upper()[:8]
+    for page in range(1, max(1, int(pages)) + 1):
+        params = dict(params_base)
+        params["page"] = str(page)
+        url = HOMEBREW_API + "/search?" + urllib.parse.urlencode(params)
+        cache_name = "hb-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16] + ".json"
+        try:
+            payload = json.loads(_cached_bytes(cache_name, url).decode("utf-8"))
+        except (
+            OSError,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            UnicodeError,
+        ):
+            break
+        if not isinstance(payload, dict):
+            break
+        entries = payload.get("entries")
+        if not isinstance(entries, list) or not entries:
+            break
+        for entry in entries:
+            item = homebrew_entry_item(entry)
+            if item is None or item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            rows.append(item)
+            if len(rows) >= MAX_ITEMS:
+                return rows
+        try:
+            total = int(payload.get("page_total") or page)
+        except (TypeError, ValueError):
+            total = page
+        if page >= total:
+            break
+    return rows
+
+
+def homebrew_catalog() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for platform in HOMEBREW_PLATFORM:
+        for item in homebrew_search(platform=platform, pages=HOMEBREW_PAGES):
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            rows.append(item)
+            if len(rows) >= MAX_ITEMS:
+                return rows
+    return rows
+
+
+def materialize_homebrew(item: dict[str, Any]) -> dict[str, Any]:
+    system = str(item.get("system") or "")
+    spec = SYSTEMS.get(system)
+    if spec is None:
+        raise ValueError("MEDIA_SYSTEM_UNKNOWN")
+    leaf = Path(str(item.get("filename") or "")).name
+    if not leaf or Path(leaf).suffix.lower() not in spec["ext"]:
+        raise ValueError("MEDIA_HOMEBREW_FILE")
+    root = ensure_rom_library()
+    dest = confined(root / system / leaf, roots=[root])
+    if dest.is_file() and dest.stat().st_size > 16:
+        out = dict(item)
+        out["source"] = str(dest)
+        out["media"] = "rom"
+        return out
+    url = stream_allowed(str(item.get("source") or ""))
+    raw = _http_get(url, timeout=30.0)
+    if len(raw) < 16 or len(raw) > MAX_ROM_BYTES:
+        raise RuntimeError("MEDIA_HOMEBREW_SIZE")
+    dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    dest.chmod(0o600)
+    out = dict(item)
+    out["source"] = str(dest)
+    out["media"] = "rom"
+    return out
+
+
 def catalog_for(mode: str) -> list[dict[str, Any]]:
     kind = str(mode or DEFAULT_MODE).strip().upper()
     if kind == "MUSIC":
@@ -743,12 +1036,36 @@ def catalog_for(mode: str) -> list[dict[str, Any]]:
     if kind == "TV":
         return video_catalog()
     if kind == "GAME":
-        return game_catalog()
+        ensure_rom_library()
+        rows = game_catalog()
+        seen = {item["id"] for item in rows}
+        for item in homebrew_catalog():
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            rows.append(item)
+            if len(rows) >= MAX_ITEMS:
+                break
+        return rows[:MAX_ITEMS]
+    if kind == "FETCH":
+        return fetch_catalog()
     return []
 
 
+_PREFS_CACHE: tuple[str, float, dict[str, Any]] | None = None
+
+
 def load_prefs() -> dict[str, Any]:
+    global _PREFS_CACHE
     path = ensure_state_dir() / "prefs.json"
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    hit = _PREFS_CACHE
+    if hit is not None and hit[0] == key and hit[1] == mtime:
+        return dict(hit[2])
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
@@ -763,14 +1080,17 @@ def load_prefs() -> dict[str, Any]:
     except (TypeError, ValueError):
         volume = VOLUME_DEFAULT
     volume = max(0, min(100, volume))
-    return {
+    current = {
         "mode": mode,
         "volume": volume,
         "last_id": str(payload.get("last_id") or ""),
     }
+    _PREFS_CACHE = (key, mtime, dict(current))
+    return current
 
 
 def save_prefs(prefs: dict[str, Any]) -> dict[str, Any]:
+    global _PREFS_CACHE
     current = load_prefs()
     current.update(prefs)
     mode = str(current.get("mode") or DEFAULT_MODE).upper()
@@ -786,6 +1106,11 @@ def save_prefs(prefs: dict[str, Any]) -> dict[str, Any]:
     path = ensure_state_dir() / "prefs.json"
     path.write_text(json.dumps(current) + "\n", encoding="utf-8")
     path.chmod(0o600)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    _PREFS_CACHE = (str(path), mtime, dict(current))
     return current
 
 
@@ -807,3 +1132,60 @@ def format_clock(seconds: float | int | None) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{rest:02d}"
     return f"{minutes:02d}:{rest:02d}"
+
+
+SPECTRUM_BARS = 120
+EQ_PRESETS = (
+    "Flat",
+    "Rock",
+    "Pop",
+    "Jazz",
+    "Classical",
+    "Bass Boost",
+    "Treble Boost",
+    "Vocal",
+    "Electronic",
+    "Acoustic",
+)
+
+
+def normalize_spectrum(raw: Any, count: int = SPECTRUM_BARS) -> list[float]:
+    count = max(1, int(count))
+    vals: list[float] = []
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                vals.append(max(0.0, float(item)))
+            except (TypeError, ValueError):
+                continue
+    if not vals:
+        return [0.0] * count
+    peak = max(vals)
+    if peak > 1.5:
+        vals = [min(1.0, v / peak) for v in vals]
+    else:
+        vals = [min(1.0, v) for v in vals]
+    if len(vals) == count:
+        return vals
+    last = len(vals) - 1
+    out: list[float] = []
+    for i in range(count):
+        pos = 0.0 if last == 0 else (i * last / (count - 1))
+        lo = int(pos)
+        hi = min(last, lo + 1)
+        frac = pos - lo
+        out.append(vals[lo] * (1.0 - frac) + vals[hi] * frac)
+    return out
+
+
+def normalize_eq(raw: Any, count: int = 10) -> list[float]:
+    vals: list[float] = []
+    if isinstance(raw, list):
+        for item in raw[: max(1, int(count))]:
+            try:
+                vals.append(max(-12.0, min(12.0, float(item))))
+            except (TypeError, ValueError):
+                vals.append(0.0)
+    while len(vals) < count:
+        vals.append(0.0)
+    return vals[:count]

@@ -12,7 +12,7 @@ Item {
     signal hostKindChangedByUser(string value)
     signal spawnInstanceRequested()
 
-    implicitHeight: 188
+    implicitHeight: 208
 
     GgFrame {
         anchors.fill: parent
@@ -34,7 +34,7 @@ Item {
             text: "Host"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Row {
@@ -42,7 +42,7 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA", "DRAW"]
 
                 delegate: Text {
                     required property string modelData
@@ -52,7 +52,7 @@ Item {
                         ? "#d8dee9"
                         : "#5d6670"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: root.hostKind === modelData
 
                     MouseArea {
@@ -67,7 +67,7 @@ Item {
         Row {
             spacing: 10
 
-            CheckBox {
+            GgCheck {
                 id: innerChromeBox
                 text: "Show inner CODE frame"
                 checked: root.showInnerEditorChrome
@@ -77,7 +77,7 @@ Item {
                     )
             }
 
-            Button {
+            GgButton {
                 text: "New tab +"
                 onClicked: root.spawnInstanceRequested()
             }
@@ -91,10 +91,12 @@ Item {
                 + "PHP on 127.0.0.1 only. The AI does not log in or "
                 + "deploy to one.com. EXTERNAL stays honest until a "
                 + "window embed exists. MEDIA is playlists, radio, TV "
-                + "and older-console games; the bottom strip is the player."
+                + "and older-console games; the bottom strip is the player. "
+                + "DRAW hosts Krita, GIMP, Inkscape or darktable in this box "
+                + "when they are on PATH, plus a small sketch pad."
             color: "#8a8a8a"
             wrapMode: Text.WordWrap
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
     }
 }

@@ -24,8 +24,8 @@ Item {
         text: "Future themes and visual modules can integrate here. "
             + "A1.2 grants no arbitrary QML, Python, shell, network or "
             + "capability execution."
-        color: "#8b949e"
+        color: "#c8cdd4"
         wrapMode: Text.WordWrap
-        font.pixelSize: 10
+        font.pixelSize: 12
     }
 }

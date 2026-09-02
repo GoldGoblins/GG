@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
+    Property,
     QFileSystemWatcher,
     QObject,
     QProcess,
@@ -24,6 +25,7 @@ from PySide6.QtCore import (
 
 from backend.chat_sessions import list_for_ui
 from backend import crypto_host
+from backend import libretro_host
 from backend import media_host
 from backend import tmog_contract
 from backend.grok_wallet import parse_pty_wallet, snapshot as grok_wallet_snapshot
@@ -40,6 +42,24 @@ from backend import shell_load
 from backend import web_surface
 
 BASH = "/bin/bash"
+_PTY_READ_BUDGET = 48 * 1024
+_PTY_DRAIN_MS = 32
+_PTY_BACKUP_MS = 500
+_GAME_KEYS = {
+    0x01000012: 6,
+    0x01000014: 7,
+    0x01000013: 4,
+    0x01000015: 5,
+    0x01000004: 3,
+    0x01000005: 3,
+    32: 2,
+    90: 0,
+    88: 8,
+    65: 8,
+    83: 0,
+    81: 10,
+    87: 11,
+}
 SCRATCH_ROOT = (
     Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/scratch")
 )
@@ -64,6 +84,9 @@ class ChatSurfaceHost(QObject):
     qmlLiveReload = Signal()
     workspaceFileChanged = Signal(str, str, str)
     siteImportProgress = Signal(str, int, int, str)
+    mediaFrameSeqChanged = Signal()
+    mediaStateChanged = Signal()
+    mediaSeekChanged = Signal(float)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -75,6 +98,8 @@ class ChatSurfaceHost(QObject):
         self._tui_grid: object | None = None
         self._tmog_embed: object | None = None
         self._media_embed: object | None = None
+        self._torlink_embed: object | None = None
+        self._draw_embed: object | None = None
         self._pending_tui_size: tuple[int, int] | None = None
         self._fs: QFileSystemWatcher | None = None
         self._fs_suppress: set[str] = set()
@@ -85,7 +110,7 @@ class ChatSurfaceHost(QObject):
         self._sessions_json = ""
         self._pending_resume = ""
         self._wallet_timer = QTimer(self)
-        self._wallet_timer.setInterval(2000)
+        self._wallet_timer.setInterval(15000)
         self._wallet_timer.timeout.connect(self._emit_wallet)
         self._wallet_timer.start()
         self._qml_watch: QFileSystemWatcher | None = None
@@ -93,11 +118,24 @@ class ChatSurfaceHost(QObject):
         self._qml_reload.setSingleShot(True)
         self._qml_reload.setInterval(250)
         self._qml_reload.timeout.connect(self._emit_qml_reload)
+        self._console_timer = QTimer(self)
+        self._console_timer.setInterval(16)
+        self._console_timer.timeout.connect(self._console_tick)
+        self._crypto_timer = QTimer(self)
+        self._crypto_timer.setInterval(60000)
+        self._crypto_timer.timeout.connect(self._crypto_idle_tick)
+        self._crypto_timer.start()
+        self._console_provider = None
+        self._console_provider_added = False
+        self._console_sink = None
+        self._console_io = None
+        self._frame_seq = 0
 
     def set_qml_root(self, root: QObject | None) -> None:
         self._qml_root = root
         self.watchDesktopWorkspace()
         self._attach_native_tui()
+        self._ensure_console_provider()
 
     def _tui_hole(self):
         root = self._qml_root
@@ -116,6 +154,9 @@ class ChatSurfaceHost(QObject):
         if grid is not None and getattr(grid, "parentItem", lambda: None)() is hole:
             return
         if grid is not None:
+            stop = getattr(grid, "_stop_worker", None)
+            if callable(stop):
+                stop()
             grid.setParentItem(None)
             grid.deleteLater()
             self._tui_grid = None
@@ -190,9 +231,12 @@ class ChatSurfaceHost(QObject):
         return web_surface.default_browse_url()
 
     @Slot(result=str)
-    def tmogSnapshot(self) -> str:
+    @Slot(str, result=str)
+    def tmogSnapshot(self, page: str = "") -> str:
         try:
-            return json.dumps(tmog_contract.snapshot(), separators=(",", ":"))
+            return json.dumps(
+                tmog_contract.snapshot(page), separators=(",", ":")
+            )
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
 
@@ -215,6 +259,34 @@ class ChatSurfaceHost(QObject):
         if embed is not None:
             embed.hide()
 
+    @Slot(result=str)
+    def drawStatus(self) -> str:
+        from backend import draw_contract
+
+        try:
+            return json.dumps(draw_contract.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": draw_contract.SCHEMA})
+
+    @Slot(str, result=bool)
+    def drawStart(self, editor_id: str) -> bool:
+        root = self._qml_root
+        if root is None:
+            return False
+        embed = self._draw_embed
+        if embed is None:
+            from backend.draw_embed import DrawEmbed
+
+            embed = DrawEmbed(root)
+            self._draw_embed = embed
+        return bool(embed.start(str(editor_id or "")))
+
+    @Slot()
+    def hideDraw(self) -> None:
+        embed = self._draw_embed
+        if embed is not None:
+            embed.hide()
+
     def _media_embedder(self):
         root = self._qml_root
         if root is None:
@@ -227,70 +299,242 @@ class ChatSurfaceHost(QObject):
             self._media_embed = embed
         return embed
 
+    def _torlink_embedder(self):
+        root = self._qml_root
+        if root is None:
+            return None
+        embed = self._torlink_embed
+        if embed is None:
+            from backend.torlink_embed import TorlinkEmbed
+
+            embed = TorlinkEmbed(root)
+            self._torlink_embed = embed
+        return embed
+
+    def _hide_torlink(self) -> None:
+        embed = self._torlink_embed
+        if embed is not None:
+            embed.hide()
+
     def _media_follow(self, payload: dict[str, Any]) -> dict[str, Any]:
         embed = self._media_embed
-        if payload.get("screen") != "EMBED":
+        backend = str(payload.get("backend") or "")
+        kind = str(payload.get("kind") or "")
+        if backend in ("qml", "libretro"):
+            if embed is not None:
+                embed.hide()
+            self._hide_torlink()
+            return payload
+        if backend == "torlink":
             if embed is not None:
                 embed.hide()
             return payload
+        if payload.get("screen") != "EMBED":
+            if embed is not None:
+                embed.hide()
+            self._hide_torlink()
+            return payload
+        self._hide_torlink()
         embed = self._media_embedder()
         if embed is None:
             return payload
-        kind = str(payload.get("kind") or "")
-        if kind in ("game", "fetch") or (
-            kind == "video" and not payload.get("drawable")
-        ):
+        if kind == "game" or (kind == "video" and not payload.get("drawable")):
             embed.attach(media_host.player_pid(), media_host.embed_tokens())
         embed.show()
         return payload
 
+    def _mediaFrameSeq(self) -> int:
+        return int(self._frame_seq)
+
+    mediaFrameSeq = Property(int, _mediaFrameSeq, notify=mediaFrameSeqChanged)
+
+    def _ensure_console_provider(self) -> None:
+        root = self._qml_root
+        if root is None or self._console_provider_added:
+            return
+        from PySide6.QtGui import QImage
+        from PySide6.QtQml import QQmlEngine
+        from PySide6.QtQuick import QQuickImageProvider
+
+        class _ConsoleFrames(QQuickImageProvider):
+            def __init__(self) -> None:
+                super().__init__(QQuickImageProvider.ImageType.Image)
+                self.image = QImage()
+
+            def requestImage(self, ident, size, requested_size):  # type: ignore[no-untyped-def]
+                return self.image
+
+        ctx = QQmlEngine.contextForObject(root)
+        if ctx is None or ctx.engine() is None:
+            return
+        self._console_provider = _ConsoleFrames()
+        ctx.engine().addImageProvider("console", self._console_provider)
+        self._console_provider_added = True
+
+    def _console_sync(self, payload: dict[str, Any]) -> None:
+        if str(payload.get("backend") or "") == "libretro" and libretro_host.loaded():
+            self._ensure_console_provider()
+            interval = max(8, int(round(1000.0 / max(1.0, libretro_host.fps()))))
+            self._console_timer.setInterval(interval)
+            self._console_start_audio()
+            if not self._console_timer.isActive():
+                self._console_timer.start()
+            return
+        self._console_timer.stop()
+        self._console_stop_audio()
+
+    def _console_start_audio(self) -> None:
+        if self._console_sink is not None:
+            return
+        try:
+            from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+        except Exception:
+            return
+        fmt = QAudioFormat()
+        fmt.setSampleRate(int(libretro_host.sample_rate()))
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        try:
+            device = QMediaDevices.defaultAudioOutput()
+            sink = QAudioSink(device, fmt, self)
+            payload = media_host.status_payload()
+            sink.setVolume(max(0.0, min(1.0, int(payload.get("volume") or 70) / 100.0)))
+            io = sink.start()
+        except Exception:
+            return
+        self._console_sink = sink
+        self._console_io = io
+
+    def _console_stop_audio(self) -> None:
+        sink = self._console_sink
+        self._console_sink = None
+        self._console_io = None
+        if sink is not None:
+            try:
+                sink.stop()
+            except Exception:
+                pass
+
+    def _console_tick(self) -> None:
+        if not libretro_host.loaded():
+            self._console_timer.stop()
+            self._console_stop_audio()
+            return
+        if media_host._paused:
+            return
+        libretro_host.run()
+        raw, width, height, pitch, pixel = libretro_host.frame()
+        provider = self._console_provider
+        if provider is not None and raw and width >= 8 and height >= 8:
+            from PySide6.QtGui import QImage
+
+            if pixel == 1:
+                qfmt = QImage.Format.Format_RGB32
+            elif pixel == 2:
+                qfmt = QImage.Format.Format_RGB16
+            else:
+                qfmt = QImage.Format.Format_RGB555
+            image = QImage(raw, int(width), int(height), int(pitch), qfmt)
+            if not image.isNull():
+                provider.image = image.copy()
+                self._frame_seq += 1
+                self.mediaFrameSeqChanged.emit()
+        pcm = libretro_host.audio_bytes()
+        io = self._console_io
+        if pcm and io is not None:
+            try:
+                io.write(pcm)
+            except Exception:
+                pass
+
+    @Slot(int, bool)
+    def mediaGameKey(self, key: int, down: bool) -> None:
+        button = _GAME_KEYS.get(int(key))
+        if button is None:
+            return
+        libretro_host.set_button(int(button), bool(down))
+
+    def _media_status_json(self, live: bool) -> str:
+        payload = media_host.status_payload(live=live)
+        if live:
+            return json.dumps(payload, separators=(",", ":"))
+        embed = self._media_embed
+        torlink = self._torlink_embed
+        if torlink is not None and str(payload.get("kind") or "") == "fetch":
+            payload["embed_error"] = torlink.error()
+            payload["embed_attached"] = bool(torlink.attached())
+        elif embed is not None:
+            payload["embed_error"] = embed.error()
+            payload["embed_attached"] = bool(embed.attached())
+        return json.dumps(payload, separators=(",", ":"))
+
     @Slot(result=str)
     def mediaStatus(self) -> str:
         try:
-            return json.dumps(media_host.status_payload(), separators=(",", ":"))
+            return self._media_status_json(False)
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
+
+    @Slot(result=str)
+    def mediaLiveStatus(self) -> str:
+        try:
+            return self._media_status_json(True)
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
+
+    def _media_changed(self, payload: dict[str, Any]) -> str:
+        self.mediaStateChanged.emit()
+        return json.dumps(payload, separators=(",", ":"))
 
     @Slot(str, result=str)
     def mediaSetMode(self, mode: str) -> str:
         try:
-            return json.dumps(media_host.set_mode(mode), separators=(",", ":"))
+            return self._media_changed(media_host.set_mode(mode))
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
     @Slot(str, result=str)
     def mediaPlay(self, item_id: str) -> str:
         try:
-            item = media_host.item_by_id(item_id)
-            xid = 0
-            kind = str((item or {}).get("kind") or "")
-            if kind in ("TV", "GAME"):
-                embed = self._media_embedder()
-                if embed is not None:
-                    xid = int(embed.holder_xid())
-            payload = self._media_follow(
-                media_host.play_item(item_id, drawable_xid=xid)
-            )
-            return json.dumps(payload, separators=(",", ":"))
+            payload = self._media_follow(media_host.play_item(item_id))
+            self._console_sync(payload)
+            return self._media_changed(payload)
         except (ValueError, RuntimeError) as exc:
             return json.dumps({"error": str(exc)})
 
     @Slot(result=str)
     def mediaPause(self) -> str:
-        return json.dumps(media_host.pause(), separators=(",", ":"))
+        return self._media_changed(media_host.pause())
 
     @Slot(result=str)
     def mediaStop(self) -> str:
         embed = self._media_embed
         if embed is not None:
             embed.stop()
-        return json.dumps(media_host.stop(), separators=(",", ":"))
+        torlink = self._torlink_embed
+        if torlink is not None:
+            torlink.stop()
+        payload = media_host.stop()
+        self._console_sync(payload)
+        return self._media_changed(payload)
+
+    @Slot(float, float)
+    def mediaReportClock(self, position: float, duration: float) -> None:
+        media_host.report_clock(float(position), float(duration))
+
+    @Slot(float, result=str)
+    def mediaSeek(self, seconds: float) -> str:
+        payload = media_host.seek(float(seconds))
+        if str(payload.get("backend") or "") == "qml":
+            self.mediaSeekChanged.emit(float(payload.get("position") or seconds))
+        self.mediaStateChanged.emit()
+        return json.dumps(payload, separators=(",", ":"))
 
     @Slot(int, result=str)
     def mediaSkip(self, delta: int) -> str:
         payload = media_host.status_payload()
         if str(payload.get("backend") or "") == "cliamp":
-            return json.dumps(media_host.skip(int(delta)), separators=(",", ":"))
+            return self._media_changed(media_host.skip(int(delta)))
         nxt = media_host.next_item_id(int(delta))
         if not nxt:
             return json.dumps(payload, separators=(",", ":"))
@@ -299,30 +543,60 @@ class ChatSurfaceHost(QObject):
     @Slot(str, result=str)
     def mediaSearch(self, query: str) -> str:
         try:
-            return json.dumps(media_host.search(query), separators=(",", ":"))
+            return self._media_changed(media_host.search(query))
         except (ValueError, RuntimeError) as exc:
             return json.dumps({"error": str(exc)})
 
     @Slot(int, result=str)
     def mediaSetVolume(self, volume: int) -> str:
         try:
-            return json.dumps(media_host.set_volume(int(volume)), separators=(",", ":"))
+            payload = media_host.set_volume(int(volume))
+            sink = self._console_sink
+            if sink is not None:
+                sink.setVolume(max(0.0, min(1.0, int(payload.get("volume") or 70) / 100.0)))
+            return self._media_changed(payload)
         except (TypeError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(str, result=str)
+    def mediaSetEqPreset(self, name: str) -> str:
+        try:
+            return self._media_changed(media_host.set_eq_preset(name))
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @Slot(int, float, result=str)
+    def mediaSetEqBand(self, band: int, db: float) -> str:
+        try:
+            return self._media_changed(media_host.set_eq_band(int(band), float(db)))
+        except (TypeError, ValueError, RuntimeError) as exc:
             return json.dumps({"error": str(exc)})
 
     @Slot(result=str)
     def mediaStartCliamp(self) -> str:
         try:
             payload = self._media_follow(media_host.start_cliamp())
-            return json.dumps(payload, separators=(",", ":"))
+            return self._media_changed(payload)
         except RuntimeError as exc:
             return json.dumps({"error": str(exc)})
 
     @Slot(result=str)
     def mediaStartFetch(self) -> str:
         try:
-            payload = self._media_follow(media_host.start_fetch())
-            return json.dumps(payload, separators=(",", ":"))
+            payload = media_host.start_fetch()
+            media = self._media_embed
+            if media is not None:
+                media.hide()
+            embed = self._torlink_embedder()
+            if embed is None:
+                return json.dumps({"error": "MEDIA_TORLINK_EMBED"})
+            if not embed.start():
+                return json.dumps({"error": embed.error() or "MEDIA_TORLINK_EMBED"})
+            payload = media_host.status_payload()
+            payload["screen"] = "EMBED"
+            payload["embed_error"] = embed.error()
+            payload["embed_attached"] = bool(embed.attached())
+            return self._media_changed(payload)
         except RuntimeError as exc:
             return json.dumps({"error": str(exc)})
 
@@ -331,10 +605,28 @@ class ChatSurfaceHost(QObject):
         embed = self._media_embed
         if embed is not None:
             embed.hide()
+        self._hide_torlink()
 
     @Slot(result=str)
     def cryptoStatus(self) -> str:
         try:
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
+    def cryptoRailStatus(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.status_payload(rail=True), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
+    def cryptoRefreshChart(self) -> str:
+        try:
+            crypto_host.cached_sol_chart()
             return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__})
@@ -426,6 +718,18 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
+    def _crypto_idle_tick(self) -> None:
+        try:
+            from backend import crypto_trader
+
+            if crypto_trader.load_state().get("armed"):
+                crypto_host.tick_trader()
+            bot = crypto_host.load_bot()
+            if bot.get("armed"):
+                crypto_host.tick_bot()
+        except Exception:
+            return
+
     @Slot(result=str)
     def cryptoTickTrader(self) -> str:
         try:
@@ -437,6 +741,23 @@ class ChatSurfaceHost(QObject):
     def cryptoResetTrader(self) -> str:
         try:
             return json.dumps(crypto_host.reset_trader(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, result=str)
+    def cryptoSetBook(self, book_id: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.set_trader_book(str(book_id or "")),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoBacktestTrader(self) -> str:
+        try:
+            return json.dumps(crypto_host.start_backtest_trader(), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
@@ -621,6 +942,27 @@ class ChatSurfaceHost(QObject):
             return ""
         return save_settings(payload)
 
+    @Slot(bool)
+    def applyDesktopShell(self, enabled: bool) -> None:
+        from backend.desktop_shell import apply_desktop_shell_window
+
+        root = self._qml_root
+        if root is None:
+            return
+        window = None
+        getter = getattr(root, "window", None)
+        if callable(getter):
+            try:
+                window = getter()
+            except RuntimeError:
+                window = None
+        if window is None:
+            from PySide6.QtGui import QWindow
+
+            if isinstance(root, QWindow):
+                window = root
+        apply_desktop_shell_window(window, bool(enabled))
+
     @Slot(str, result=bool)
     def startChatTerminal(self, terminal_id: str) -> bool:
         identity = str(terminal_id or "").strip()
@@ -742,21 +1084,27 @@ class ChatSurfaceHost(QObject):
         screen: MiniVt | None = None,
     ) -> None:
         notifier = QSocketNotifier(master, QSocketNotifier.Type.Read, self)
-        timer = QTimer(self)
-        timer.setInterval(50)
+        drain = QTimer(self)
+        drain.setSingleShot(True)
+        drain.setInterval(_PTY_DRAIN_MS)
+        backup = QTimer(self)
+        backup.setInterval(_PTY_BACKUP_MS)
         session = {
             "proc": proc,
             "master": master,
             "notifier": notifier,
-            "timer": timer,
+            "drain": drain,
+            "timer": backup,
             "screen": screen,
         }
         notifier.activated.connect(
-            lambda _fd=None, key=identity: self._read(key)
+            lambda _fd=None, key=identity: self._pty_readable(key)
         )
-        timer.timeout.connect(lambda key=identity: self._read(key))
+        drain.timeout.connect(lambda key=identity: self._drain_pty(key))
+        backup.timeout.connect(lambda key=identity: self._pty_readable(key))
         self._sessions[identity] = session
-        timer.start()
+        backup.start()
+        drain.start()
 
     @Slot(str, result=bool)
     def stopChatTerminal(self, terminal_id: str) -> bool:
@@ -1072,41 +1420,81 @@ class ChatSurfaceHost(QObject):
         self._media_embed = None
         if media is not None:
             media.stop()
+        torlink = self._torlink_embed
+        self._torlink_embed = None
+        if torlink is not None:
+            torlink.stop()
+        draw = self._draw_embed
+        self._draw_embed = None
+        if draw is not None:
+            draw.stop()
         media_host.stop()
         for key in list(self._sessions):
             self._close(key)
 
-    def _read(self, terminal_id: str) -> None:
+    def _pty_readable(self, terminal_id: str) -> None:
         session = self._sessions.get(terminal_id)
         if session is None:
             return
+        notifier = session.get("notifier")
+        if notifier is not None:
+            notifier.setEnabled(False)
+        drain = session.get("drain")
+        if drain is not None and not drain.isActive():
+            drain.start()
+
+    def _drain_pty(self, terminal_id: str) -> None:
+        more = False
+        try:
+            more = self._read(terminal_id)
+        except Exception:
+            more = False
+        session = self._sessions.get(terminal_id)
+        if session is None:
+            return
+        if more:
+            drain = session.get("drain")
+            if drain is not None:
+                drain.start()
+            return
+        notifier = session.get("notifier")
+        if notifier is not None:
+            notifier.setEnabled(True)
+
+    def _read(self, terminal_id: str) -> bool:
+        session = self._sessions.get(terminal_id)
+        if session is None:
+            return False
         master = session["master"]
         chunks: list[bytes] = []
+        hit_budget = False
+        total = 0
         try:
             while True:
-                piece = os.read(master, 4096)
+                if total >= _PTY_READ_BUDGET:
+                    hit_budget = True
+                    break
+                piece = os.read(master, min(4096, _PTY_READ_BUDGET - total))
                 if not piece:
                     break
                 chunks.append(piece)
+                total += len(piece)
         except BlockingIOError:
             pass
         except OSError:
             self._close(terminal_id)
-            return
+            return False
         if chunks:
             raw = b"".join(chunks)
             if terminal_id == GROK_TUI_TERMINAL_ID:
-                import base64
-
-                self.grokTuiChunk.emit(base64.b64encode(raw).decode("ascii"))
                 grid = self._tui_grid
                 if grid is not None:
                     grid.feed_bytes(raw)
-                decoded = raw.decode("utf-8", errors="replace")
-                overlay = parse_pty_wallet(_strip_ansi(decoded))
-                if overlay:
-                    self._wallet_pty.update(overlay)
-                    self._emit_wallet()
+                if b"K/" in raw or b"k/" in raw:
+                    decoded = raw.decode("utf-8", errors="replace")
+                    overlay = parse_pty_wallet(_strip_ansi(decoded))
+                    if overlay:
+                        self._wallet_pty.update(overlay)
             else:
                 text = raw.decode("utf-8", errors="replace")
                 screen = session.get("screen")
@@ -1121,11 +1509,17 @@ class ChatSurfaceHost(QObject):
         if proc.poll() is not None:
             self.chatTerminalExit.emit(terminal_id, int(proc.returncode or 0))
             self._close(terminal_id)
+            return False
+        return hit_budget
 
     def _close(self, terminal_id: str) -> None:
         session = self._sessions.pop(terminal_id, None)
         if session is None:
             return
+        drain = session.get("drain")
+        if drain is not None:
+            drain.stop()
+            drain.deleteLater()
         timer = session.get("timer")
         if timer is not None:
             timer.stop()
@@ -1153,3 +1547,7 @@ class ChatSurfaceHost(QObject):
                     os.killpg(proc.pid, signal.SIGKILL)
                 except OSError:
                     proc.kill()
+                try:
+                    proc.wait(timeout=0.4)
+                except Exception:
+                    pass

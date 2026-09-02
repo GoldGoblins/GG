@@ -74,7 +74,7 @@ Item {
     }
 
     Timer {
-        interval: 10
+        interval: 100
         repeat: true
         running: root.busy
         onTriggered: {
@@ -92,7 +92,7 @@ Item {
         text: ":: " + root.statusText + "  " + root.formatSegment(root.segmentMs)
         color: "#c8a97e"
         font.family: "monospace"
-        font.pixelSize: 11
+        font.pixelSize: 12
         elide: Text.ElideRight
     }
 
@@ -105,8 +105,8 @@ Item {
                 ? root.elapsedSeconds * 1000
                 : root.elapsedMs
         )
-        color: "#8b949e"
+        color: "#c8cdd4"
         font.family: "monospace"
-        font.pixelSize: 11
+        font.pixelSize: 12
     }
 }

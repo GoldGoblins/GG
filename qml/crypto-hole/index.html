@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body, #chart {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      background: #161616;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div id="chart"></div>
+  <!-- TradingView Lightweight Charts v4.2.3, Apache-2.0 -->
+  <script src="lightweight-charts.min.js"></script>
+  <script>
+    var chart = null;
+    var series = null;
+    var equitySeries = null;
+    var pending = null;
+
+    function uniqPoints(rows) {
+      var out = [];
+      var last = null;
+      var i;
+      for (i = 0; i < rows.length; i++) {
+        var row = rows[i] || {};
+        var t = Number(row.time || 0);
+        var v = Number(row.value || 0);
+        if (!(t > 0) || !(v > 0))
+          continue;
+        if (last !== null && t === last) {
+          out[out.length - 1] = { time: t, value: v };
+          continue;
+        }
+        last = t;
+        out.push({ time: t, value: v });
+      }
+      return out;
+    }
+
+    function boot() {
+      if (chart || !window.LightweightCharts)
+        return;
+      var host = document.getElementById("chart");
+      chart = LightweightCharts.createChart(host, {
+        layout: {
+          background: { color: "#161616" },
+          textColor: "#8b949e",
+          fontFamily: "monospace",
+          fontSize: 10
+        },
+        grid: {
+          vertLines: { color: "#1e1e1e" },
+          horzLines: { color: "#1e1e1e" }
+        },
+        rightPriceScale: { borderColor: "#242424" },
+        leftPriceScale: { borderColor: "#242424", visible: false },
+        timeScale: {
+          borderColor: "#242424",
+          timeVisible: true,
+          secondsVisible: false
+        },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+        autoSize: true
+      });
+      series = chart.addAreaSeries({
+        lineColor: "#c98989",
+        topColor: "rgba(201,137,137,0.28)",
+        bottomColor: "rgba(36,24,24,0.04)",
+        lineWidth: 1,
+        priceLineVisible: false
+      });
+      equitySeries = chart.addLineSeries({
+        color: "#8db89a",
+        lineWidth: 1,
+        priceScaleId: "left",
+        lastValueVisible: true,
+        priceLineVisible: false
+      });
+    }
+
+    function setTape(payload) {
+      payload = payload || {};
+      if (!series) {
+        pending = payload;
+        boot();
+        if (!series)
+          return;
+      }
+      var points = uniqPoints(payload.points || []);
+      series.setData(points);
+      series.setMarkers(payload.markers || []);
+      var eq = uniqPoints(payload.equity || []);
+      if (equitySeries) {
+        equitySeries.setData(eq);
+        if (chart)
+          chart.priceScale("left").applyOptions({ visible: eq.length > 1 });
+      }
+      if (chart)
+        chart.timeScale().fitContent();
+      pending = null;
+    }
+
+    boot();
+    if (pending)
+      setTape(pending);
+    window.setTape = setTape;
+  </script>
+</body>
+</html>

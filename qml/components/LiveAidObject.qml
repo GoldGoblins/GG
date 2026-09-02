@@ -70,15 +70,14 @@ Item {
                     visible: root.evidenceSummary.length > 0
                     width: parent.width
                     text: root.evidenceSummary
-                    color: "#6e7681"
+                    color: "#a8b0b8"
                     wrapMode: Text.WordWrap
                     font.family: "monospace"
-                    font.pixelSize: 8
+                    font.pixelSize: 12
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
+            ScrollBar.vertical: GgScrollBar {
             }
         }
     }

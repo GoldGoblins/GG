@@ -17,6 +17,31 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-02
+
+What GitHub had until this push (`7ca8453`, 27 Aug 2026):
+
+- Workspace hosts CODE, TERMINAL, WEB, EXTERNAL, SITE, **MEDIA**, **CRYPTO**, **TMOG**
+- GROK TUI on a native terminal grid (not Chromium)
+- Screenshot of that drop (`docs/gg-ai-desktop.png`)
+- Control plane, Safe Tools, Limited Write, task-bound autonomy as before
+
+What this patch adds on top of that:
+
+**DRAW.** New workspace host. Built-in sketch pad (brush, eraser, shapes, layers, undo, PNG) plus real desks when they are on PATH: Krita, GIMP, Inkscape, darktable, KolourPaint. Chat intents like `rita`, `draw`, `gimp` switch to DRAW.
+
+**Interactive desktop.** Settings → Layout → Interactive desktop. The window goes frameless, stays below other windows, and fills the work area. SETTINGS in the header, DESKTOP there to return to a normal window.
+
+**MEDIA / UTILITIES strip.** The bottom bar is a real player, not a reserved placeholder. MUSIC / RADIO / TV / GAME / FETCH, transport, volume, 120-bar spectrum with peak hold, 10-band EQ, seek when duration is known. Radio uses cliamp. TV/video stays in the workspace hole. GAME uses libretro in-hole for GB/GBC/GBA/NES plus the user's own files under `~/ROMs/`.
+
+**CRYPTO desk.** Live Lightweight Charts, watch-only Solana pubkey, paper books GG / STOCH+RSI / DCA / DCA+SWING, flash-arb lab, trader lots on the local test validator. Telemetry rail shows CRYPTO holdings. Mainnet stays `MAINNET_NOT_ARMED`.
+
+**Ledger chrome.** Stock Qt Fusion buttons, switches, sliders, checkboxes and fields are replaced by `GgButton`, `GgSwitch`, `GgSlider`, `GgCheck`, `GgField` and an interactive `GgScrollBar`. Settings, Live Aid, DRAW, WEB address, crypto pubkey and the terminal line use the same language as the frames.
+
+**Shell load.** Startup walks the real QML dependency graph. No fake timer, no unrelated vendor dump in the load queue. RELOAD still uses `shellNonce`.
+
+Unchanged: GROK TUI as motor, no GGUF in git, no `/shell` or `/exec`, network authority NONE, ACTION_AUTHORITY NONE. The screenshot is still the 27 Aug drop; the running program is this patch.
+
 ## Control & Bootstrap Plane v1
 
 The Workbench now has a typed local control plane. Control commands are parsed
@@ -222,13 +247,14 @@ preview evidence is required first.
 The QML entrypoint remains `qml/Main.qml`. Reusable product grammar now lives
 under `qml/components/`:
 
-- `GgFrame.qml`
+- `GgFrame.qml`, `GgButton.qml`, `GgSwitch.qml`, `GgSlider.qml`, `GgCheck.qml`, `GgField.qml`, `GgScrollBar.qml`
 - `ActivityStrip.qml`
 - `ChatNode.qml`
 - `WorkObject.qml`
 - `WorkspaceSurface.qml`
 - `TelemetryRail.qml`
 - `ContextComposer.qml`
+- `UtilitySurface.qml`, `MediaSurface.qml`, `CryptoSurface.qml`, `TmogSurface.qml`, `DrawSurface.qml`
 
 The frozen local-AI contract, schemas and published model runner remain
 unchanged.

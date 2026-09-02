@@ -143,6 +143,44 @@ def quote_flash_arb(usd_borrow: int, pools: dict[str, Any] | None = None) -> dic
     }
 
 
+def swap_usd_for_sol(usd_in: int) -> dict[str, Any]:
+    amount = int(usd_in)
+    if amount <= 0:
+        raise ValueError("CRYPTO_ARB_SIZE")
+    pools = load_pools()
+    fee = int(pools.get("fee_bps") or SWAP_FEE_BPS)
+    snapshot = json.loads(json.dumps(pools))
+    buy = dict(snapshot["A"])
+    sol_out = _swap_usd_for_sol(buy, amount, fee)
+    snapshot["A"] = buy
+    save_pools(snapshot)
+    return {
+        "usd": amount,
+        "sol": sol_out,
+        "venue": "cpmm-A",
+        "price": price_usd_per_sol(buy),
+    }
+
+
+def swap_sol_for_usd(sol_in: int) -> dict[str, Any]:
+    amount = int(sol_in)
+    if amount <= 0:
+        raise ValueError("CRYPTO_ARB_SIZE")
+    pools = load_pools()
+    fee = int(pools.get("fee_bps") or SWAP_FEE_BPS)
+    snapshot = json.loads(json.dumps(pools))
+    sell = dict(snapshot["A"])
+    usd_out = _swap_sol_for_usd(sell, amount, fee)
+    snapshot["A"] = sell
+    save_pools(snapshot)
+    return {
+        "sol": amount,
+        "usd": usd_out,
+        "venue": "cpmm-A",
+        "price": price_usd_per_sol(sell),
+    }
+
+
 def commit_flash_arb(usd_borrow: int) -> dict[str, Any]:
     current = load_pools()
     quoted = quote_flash_arb(usd_borrow, current)

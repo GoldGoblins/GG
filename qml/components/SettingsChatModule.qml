@@ -33,7 +33,7 @@ Item {
             text: "Engine"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Row {
@@ -46,7 +46,7 @@ Item {
                     ? "#d8dee9"
                     : "#5d6670"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
                 font.bold: root.engineTarget === "LOCAL_QWEN"
 
                 MouseArea {
@@ -59,9 +59,9 @@ Item {
 
             Text {
                 text: " | "
-                color: "#5d6670"
+                color: "#a8b0b8"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
 
             Text {
@@ -70,7 +70,7 @@ Item {
                     ? "#d8dee9"
                     : "#5d6670"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
                 font.bold: root.engineTarget === "GROK_WORKER"
 
                 MouseArea {
@@ -83,9 +83,9 @@ Item {
 
             Text {
                 text: " | "
-                color: "#5d6670"
+                color: "#a8b0b8"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
 
             Text {
@@ -94,7 +94,7 @@ Item {
                     ? "#d8dee9"
                     : "#5d6670"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
                 font.bold: root.engineTarget === "GROK_TUI"
 
                 MouseArea {
@@ -106,8 +106,9 @@ Item {
             }
         }
 
-        CheckBox {
+        GgCheck {
             id: openTabBox
+            width: parent.width
             text: "Show the open tab name in the input frame"
             checked: root.showOpenTabInInput
             onToggled:
@@ -121,7 +122,7 @@ Item {
                 + "you type."
             color: "#8a8a8a"
             wrapMode: Text.WordWrap
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
     }
 }

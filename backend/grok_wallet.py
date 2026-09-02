@@ -152,6 +152,8 @@ def load_wallet_index(path: Path | None = None) -> set[str]:
 
 def save_wallet_index(ids: set[str], path: Path | None = None) -> None:
     target = path or WALLET_INDEX
+    if load_wallet_index(target) == set(ids):
+        return
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
@@ -187,7 +189,7 @@ def discover_program_sessions(
         home is None
         and packed is not None
         and packed[1] == cache_key
-        and now - packed[0] < 2.0
+        and now - packed[0] < 15.0
     ):
         return packed[2]
     root = (home or DEV_GROK_HOME) / "sessions"

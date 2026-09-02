@@ -52,7 +52,7 @@ Item {
             evidenceSummary: root.evidenceSummary
         }
 
-        Button {
+        GgButton {
             objectName: "workspacePostDraftAutoRepairButton"
             width: parent.width
             height: 30
@@ -68,7 +68,7 @@ Item {
             onClicked: root.postDraftRequested()
         }
 
-        Button {
+        GgButton {
             objectName: "workspacePreflightButton"
             width: parent.width
             height: 30
@@ -83,7 +83,7 @@ Item {
             onClicked: root.preflightRequested()
         }
 
-        Button {
+        GgButton {
             objectName: "workspaceRepairButton"
             width: parent.width
             height: 30
@@ -99,7 +99,7 @@ Item {
             onClicked: root.repairRequested()
         }
 
-        Button {
+        GgButton {
             objectName: "workspaceApplyRepairButton"
             width: parent.width
             height: 30

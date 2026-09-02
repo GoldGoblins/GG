@@ -556,7 +556,7 @@ Item {
                         text: "Thought"
                         color: "#7d8590"
                         font.family: "monospace"
-                        font.pixelSize: 11
+                        font.pixelSize: 12
                     }
 
                     Text {
@@ -730,12 +730,11 @@ Item {
                         text: root.workLogText
                         color: root.workLogHasError ? "#c98989" : "#9aa7b3"
                         font.family: "monospace"
-                        font.pixelSize: 11
+                        font.pixelSize: 12
                         wrapMode: Text.WordWrap
                     }
 
-                    ScrollBar.vertical: ScrollBar {
-                        policy: ScrollBar.AsNeeded
+                    ScrollBar.vertical: GgScrollBar {
                     }
                 }
             }
@@ -746,7 +745,7 @@ Item {
                 text: root.endTitle
                 color: "#7d8590"
                 font.family: "monospace"
-                font.pixelSize: 11
+                font.pixelSize: 12
             }
 
             Text {
@@ -758,9 +757,9 @@ Item {
                             ? " · " + root.taskId
                             : ""
                     )
-                color: "#5d6670"
+                color: "#a8b0b8"
                 font.family: "monospace"
-                font.pixelSize: 8
+                font.pixelSize: 12
             }
         }
     }
@@ -792,7 +791,7 @@ Item {
                 text: "YOU · IN STREAM"
                 color: "#9a9a9a"
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: 12
                 font.bold: true
             }
 

@@ -9,11 +9,12 @@ Item {
     property string bottomRightLegend: ""
     property color backgroundColor: "#161616"
     property color borderColor: "#6a6a6a"
-    property color leftLegendColor: "#d8dee9"
-    property color rightLegendColor: "#8b949e"
-    property int radius: 2
-    property int padding: 14
+    property color leftLegendColor: "#e6edf3"
+    property color rightLegendColor: "#c8cdd4"
+    property int radius: 4
+    property int padding: 8
     property int legendGap: 8
+    property bool compact: false
 
     default property alias contentData: content.data
 
@@ -22,22 +23,27 @@ Item {
     readonly property bool hasBottomLegend:
         root.bottomLeftLegend.length > 0 || root.bottomRightLegend.length > 0
 
+    readonly property int topChrome:
+        root.hasTopLegend ? (root.compact ? 18 : 20) : (root.compact ? 6 : 8)
+    readonly property int bottomChrome:
+        root.hasBottomLegend ? (root.compact ? 12 : 14) : (root.compact ? 6 : 8)
+
     implicitWidth: 320
     implicitHeight: Math.max(
-        44,
-        content.implicitHeight
-            + (root.hasTopLegend ? 22 : 10)
-            + (root.hasBottomLegend ? 22 : 10)
-            + root.padding
+        36,
+        content.implicitHeight + root.topChrome + root.bottomChrome
     )
 
     Rectangle {
         id: frame
         anchors.fill: parent
+        anchors.margins: 1
         radius: root.radius
         color: root.backgroundColor
         border.width: 1
         border.color: root.borderColor
+        antialiasing: false
+        clip: false
     }
 
     Rectangle {
@@ -46,10 +52,12 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: 12
         anchors.top: parent.top
-        anchors.topMargin: -7
-        height: 18
+        anchors.topMargin: -8
+        height: Math.max(18, leftLegendText.implicitHeight + 4)
         width: leftLegendText.implicitWidth + 12
         color: root.backgroundColor
+        radius: Math.min(3, Math.max(1, root.radius - 1))
+        antialiasing: false
 
         Text {
             id: leftLegendText
@@ -57,8 +65,9 @@ Item {
             text: root.leftLegend
             color: root.leftLegendColor
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: true
+            verticalAlignment: Text.AlignVCenter
         }
     }
 
@@ -67,10 +76,12 @@ Item {
         anchors.right: parent.right
         anchors.rightMargin: 12
         anchors.top: parent.top
-        anchors.topMargin: -7
-        height: 18
+        anchors.topMargin: -8
+        height: Math.max(18, rightLegendText.implicitHeight + 4)
         width: rightLegendText.implicitWidth + 12
         color: root.backgroundColor
+        radius: Math.min(3, Math.max(1, root.radius - 1))
+        antialiasing: false
 
         Text {
             id: rightLegendText
@@ -78,8 +89,9 @@ Item {
             text: root.rightLegend
             color: root.rightLegendColor
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: true
+            verticalAlignment: Text.AlignVCenter
         }
     }
 
@@ -88,10 +100,12 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: 12
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: -7
-        height: 18
+        anchors.bottomMargin: -8
+        height: Math.max(18, bottomLeftLegendText.implicitHeight + 4)
         width: bottomLeftLegendText.implicitWidth + 12
         color: root.backgroundColor
+        radius: Math.min(3, Math.max(1, root.radius - 1))
+        antialiasing: false
 
         Text {
             id: bottomLeftLegendText
@@ -99,8 +113,9 @@ Item {
             text: root.bottomLeftLegend
             color: root.leftLegendColor
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: true
+            verticalAlignment: Text.AlignVCenter
         }
     }
 
@@ -109,10 +124,12 @@ Item {
         anchors.right: parent.right
         anchors.rightMargin: 12
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: -7
-        height: 18
+        anchors.bottomMargin: -8
+        height: Math.max(18, bottomRightLegendText.implicitHeight + 4)
         width: bottomRightLegendText.implicitWidth + 12
         color: root.backgroundColor
+        radius: Math.min(3, Math.max(1, root.radius - 1))
+        antialiasing: false
 
         Text {
             id: bottomRightLegendText
@@ -120,18 +137,27 @@ Item {
             text: root.bottomRightLegend
             color: root.rightLegendColor
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
+            verticalAlignment: Text.AlignVCenter
         }
     }
 
-    Column {
-        id: content
+    Item {
+        id: contentClip
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.leftMargin: root.padding
-        anchors.rightMargin: root.padding
-        anchors.topMargin: root.hasTopLegend ? 22 : 10
-        spacing: 8
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: root.compact ? 6 : root.padding
+        anchors.rightMargin: root.compact ? 6 : root.padding
+        anchors.topMargin: root.topChrome
+        anchors.bottomMargin: root.bottomChrome
+        clip: true
+
+        Column {
+            id: content
+            width: parent.width
+            spacing: 8
+        }
     }
 }

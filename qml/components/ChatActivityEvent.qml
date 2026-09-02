@@ -133,7 +133,7 @@ Item {
                     : root.nodeKind
                 color: root.stateColor
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
                 font.bold: true
             }
 
@@ -142,22 +142,22 @@ Item {
                 text: root.authorLabel
                 color: "#9aa7b3"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
 
             Text {
                 text: root.nodeKind
                 color: "#9aa7b3"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
 
             Text {
                 visible: root.taskId.length > 0
                 text: root.taskId
-                color: "#6e7681"
+                color: "#a8b0b8"
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: 12
             }
         }
 
@@ -168,7 +168,7 @@ Item {
             color: "#c7d0d9"
             wrapMode: Text.WordWrap
             font.family: "monospace"
-            font.pixelSize: 11
+            font.pixelSize: 12
         }
 
         Repeater {
@@ -187,10 +187,10 @@ Item {
                             ? " · " + String(modelData.text)
                             : ""
                     )
-                color: "#8b949e"
+                color: "#c8cdd4"
                 wrapMode: Text.WordWrap
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
         }
 
@@ -198,9 +198,9 @@ Item {
             visible: root.contextReference.length > 0
             width: parent.width
             text: "ctx " + root.contextReference
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 8
+            font.pixelSize: 12
         }
     }
 }

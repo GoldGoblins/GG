@@ -21,6 +21,8 @@ def main() -> int:
         loaded = desktop_settings.load_settings()
         if loaded["engineTarget"] != "LOCAL_QWEN":
             raise AssertionError("missing defaults")
+        if loaded.get("desktopShell") is not False:
+            raise AssertionError("desktop shell must default off")
         path = desktop_settings.save_settings(
             {
                 "engineTarget": "GROK_WORKER",
@@ -32,6 +34,7 @@ def main() -> int:
                 "frameRadius": -3,
                 "showInnerEditorChrome": 0,
                 "showProductSourceTabs": 1,
+                "desktopShell": 1,
             }
         )
         if not Path(path).is_file():
@@ -59,6 +62,8 @@ def main() -> int:
             raise AssertionError("bool inner chrome mismatch")
         if again["showProductSourceTabs"] is not True:
             raise AssertionError("bool product tabs mismatch")
+        if again["desktopShell"] is not True:
+            raise AssertionError("desktop shell did not persist")
         rejected = desktop_settings.normalize_settings(
             {"engineTarget": "OPEN_INTERNET"}
         )
@@ -77,6 +82,15 @@ def main() -> int:
             raise AssertionError("apply_to_root missed engine")
         if root.props.get("cyan") != "#112233":
             raise AssertionError("apply_to_root missed accent")
+        if root.props.get("desktopShell") is not True:
+            raise AssertionError("apply_to_root missed desktop shell")
+        shell_src = (
+            Path(__file__).resolve().parents[1] / "backend" / "desktop_shell.py"
+        ).read_text(encoding="utf-8")
+        if "WindowStaysOnBottomHint" not in shell_src:
+            raise AssertionError("desktop shell stacking missing")
+        if "/bin/sh" in shell_src or "bash -c" in shell_src:
+            raise AssertionError("generic shell in desktop shell")
     finally:
         desktop_settings.SETTINGS_PATH = saved_path
     print("DESKTOP_SETTINGS_TEST=PASS")

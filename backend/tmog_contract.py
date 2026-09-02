@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "gg.ai-desktop.tmog-snapshot.v2"
+SCHEMA = "gg.ai-desktop.tmog-snapshot.v3"
 APPIMAGE_NAMES = frozenset(
     {
         "TMOG-Task-Manager-Linux-x86_64.AppImage",
@@ -65,6 +65,9 @@ _net_hist: list[float] = []
 _disk_hist: list[float] = []
 _temp_hist: list[float] = []
 _core_hist: list[list[float]] = []
+_last_proc: dict[int, dict[str, Any]] = {}
+_tombstones: dict[int, dict[str, Any]] = {}
+_TOMBSTONE_TTL = 8.0
 
 
 def resolve_appimage(
@@ -396,15 +399,86 @@ def _pid_dirs() -> list[Path]:
     return found
 
 
+_UID_NAMES: dict[int, str] = {}
+_HOST_IDENTITY: dict[str, str] | None = None
+_NAME_CACHE: dict[str, tuple[float, list[str]]] = {}
+_APPIMAGE_CACHE: tuple[float, str] | None = None
+_NAME_TTL = 20.0
+_APPIMAGE_TTL = 30.0
+
+
 def _user_name(uid: int) -> str:
+    hit = _UID_NAMES.get(uid)
+    if hit is not None:
+        return hit
     try:
-        return pwd.getpwuid(uid).pw_name
+        name = pwd.getpwuid(uid).pw_name
     except KeyError:
-        return str(uid)
+        name = str(uid)
+    _UID_NAMES[uid] = name
+    return name
 
 
-def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    global _prev_times
+def _host_identity() -> dict[str, str]:
+    global _HOST_IDENTITY
+    if _HOST_IDENTITY is not None:
+        return _HOST_IDENTITY
+    _HOST_IDENTITY = {
+        "hostname": socket.gethostname()[:48],
+        "kernel": os.uname().release[:48],
+        "cpu_model": _cpu_model(),
+    }
+    return _HOST_IDENTITY
+
+
+def _cached_names(key: str, folder: Path, suffix: str) -> list[str]:
+    now = time.monotonic()
+    hit = _NAME_CACHE.get(key)
+    if hit is not None and now - hit[0] < _NAME_TTL:
+        return hit[1]
+    rows = _names_from_dir(folder, suffix)
+    _NAME_CACHE[key] = (now, rows)
+    return rows
+
+
+def _cached_appimage() -> str:
+    global _APPIMAGE_CACHE
+    now = time.monotonic()
+    hit = _APPIMAGE_CACHE
+    if hit is not None and now - hit[0] < _APPIMAGE_TTL:
+        return hit[1]
+    app = resolve_appimage()
+    path = str(app) if app is not None else ""
+    _APPIMAGE_CACHE = (now, path)
+    return path
+
+
+def _fill_proc(row: dict[str, Any]) -> dict[str, Any]:
+    proc_dir = row.pop("_dir", None)
+    if not isinstance(proc_dir, Path):
+        return row
+    comm = _read_text(proc_dir / "comm", 64).strip() or "?"
+    cmdline = _read_text(proc_dir / "cmdline", 512).replace("\x00", " ").strip()
+    if len(cmdline) > MAX_CMDLINE:
+        cmdline = cmdline[: MAX_CMDLINE - 1] + "…"
+    row["comm"] = comm[:32]
+    row["cmdline"] = cmdline
+    return row
+
+
+def _task_hint() -> tuple[int, int]:
+    parts = _read_text(Path("/proc/loadavg"), 64).split()
+    if len(parts) < 4 or "/" not in parts[3]:
+        return 0, 0
+    run_s, total_s = parts[3].split("/", 1)
+    try:
+        return int(run_s), int(total_s)
+    except ValueError:
+        return 0, 0
+
+
+def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
+    global _prev_times, _last_proc, _tombstones
     rows: list[dict[str, Any]] = []
     next_times: dict[int, tuple[float, int]] = {}
     users: dict[str, int] = {}
@@ -440,10 +514,6 @@ def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], d
         prev = _prev_times.get(pid)
         if prev is not None and dt > 0.05:
             cpu_pct = max(0.0, min(100.0, (ticks - prev[1]) / clk / dt * 100.0))
-        comm = _read_text(proc_dir / "comm", 64).strip() or "?"
-        cmdline = _read_text(proc_dir / "cmdline", 512).replace("\x00", " ").strip()
-        if len(cmdline) > MAX_CMDLINE:
-            cmdline = cmdline[: MAX_CMDLINE - 1] + "…"
         try:
             uid = proc_dir.stat().st_uid
         except OSError:
@@ -452,29 +522,62 @@ def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], d
         users[user] = users.get(user, 0) + 1
         if state == "R":
             running += 1
-        rows.append(
-            {
-                "pid": pid,
-                "ppid": ppid,
-                "comm": comm[:32],
-                "state": state[:1],
-                "status": PROC_STATES.get(state[:1], state[:1]),
-                "user": user[:24],
-                "rss_kb": max(0, rss_pages * page),
-                "virt_kb": max(0, vsize // 1024),
-                "cpu_pct": round(cpu_pct, 1),
-                "threads": max(1, threads),
-                "cmdline": cmdline,
-            }
-        )
+        row = {
+            "pid": pid,
+            "ppid": ppid,
+            "comm": "",
+            "state": state[:1],
+            "status": PROC_STATES.get(state[:1], state[:1]),
+            "user": user[:24],
+            "rss_kb": max(0, rss_pages * page),
+            "virt_kb": max(0, vsize // 1024),
+            "cpu_pct": round(cpu_pct, 1),
+            "threads": max(1, threads),
+            "cmdline": "",
+            "tombstone": False,
+            "_dir": proc_dir,
+        }
+        rows.append(row)
+    gone = set(_last_proc) - set(next_times)
+    for pid in gone:
+        marker = dict(_last_proc.pop(pid))
+        marker.pop("_dir", None)
+        marker["tombstone"] = True
+        marker["status"] = "Tombstone"
+        marker["state"] = "X"
+        marker["cpu_pct"] = 0.0
+        marker["gone_at"] = now
+        _tombstones[pid] = marker
+    for pid, marker in list(_tombstones.items()):
+        if pid in next_times or now - float(marker.get("gone_at") or 0) > _TOMBSTONE_TTL:
+            _tombstones.pop(pid, None)
     _prev_times = next_times
     rows.sort(key=lambda item: (float(item["cpu_pct"]), int(item["rss_kb"])), reverse=True)
+    stones = list(_tombstones.values())
+    stones.sort(key=lambda item: float(item.get("gone_at") or 0), reverse=True)
+    live_cap = max(0, MAX_PROCESSES - len(stones))
+    kept = rows[:live_cap]
+    for row in kept:
+        _fill_proc(row)
+    new_last: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        stored = {key: value for key, value in row.items() if key != "_dir"}
+        pid = int(stored["pid"])
+        if not stored.get("comm"):
+            prev = _last_proc.get(pid)
+            if prev:
+                stored["comm"] = str(prev.get("comm") or "")
+                stored["cmdline"] = str(prev.get("cmdline") or "")
+        new_last[pid] = stored
+    _last_proc = new_last
+    shown = stones + kept
     counts = {
         "running": running,
         "total": len(next_times),
-        "shown": min(len(rows), MAX_PROCESSES),
+        "shown": len(shown),
+        "tombstones": len(stones),
     }
-    return rows[:MAX_PROCESSES], counts, users
+    return shown, counts, users
 
 
 def _mounts() -> list[dict[str, Any]]:
@@ -611,8 +714,14 @@ def _names_from_dir(folder: Path, suffix: str) -> list[str]:
     return names
 
 
-def snapshot() -> dict[str, Any]:
+def snapshot(page: str = "") -> dict[str, Any]:
     global _prev_mono, _prev_net, _prev_disk
+    kind = str(page or "").strip().upper()
+    full = kind == ""
+    want_procs = full or kind in {"SUMMARY", "PROCESSES", "USERS"}
+    want_conns = full or kind == "CONNECTIONS"
+    want_mounts = full or kind == "DISK"
+    want_names = full or kind in {"STARTUP", "APPS", "SERVICES"}
     now = time.monotonic()
     dt = now - _prev_mono if _prev_mono else 0.0
     clk = _clk()
@@ -643,17 +752,24 @@ def snapshot() -> dict[str, Any]:
     _prev_net, rx_bps, tx_bps = _rate(_prev_net, now, rx, tx)
     dread, dwrite = _disk_bytes()
     _prev_disk, read_bps, write_bps = _rate(_prev_disk, now, dread, dwrite)
-    procs, tasks, users = _processes(now, dt, clk)
+    procs: list[dict[str, Any]] = []
+    users: dict[str, int] = {}
+    if want_procs:
+        procs, tasks, users = _processes(now, dt, clk)
+    else:
+        run, total = _task_hint()
+        tasks = {"running": run, "total": total, "tombstones": 0}
     _prev_mono = now
     user_rows = [
         {"name": name, "procs": count}
         for name, count in sorted(users.items(), key=lambda item: item[1], reverse=True)[:16]
     ]
-    app = resolve_appimage()
+    ident = _host_identity()
+    app = _cached_appimage()
     return {
         "schema": SCHEMA,
         "cpu_busy": overall,
-        "cpu_model": _cpu_model(),
+        "cpu_model": ident["cpu_model"],
         "cores": cores,
         "mhz": mhz[0] if mhz else 0,
         "mhz_max": max(mhz) if mhz else 0,
@@ -673,8 +789,8 @@ def snapshot() -> dict[str, Any]:
         "load5": load5,
         "load15": load15,
         "uptime_s": int(_uptime()),
-        "hostname": socket.gethostname()[:48],
-        "kernel": os.uname().release[:48],
+        "hostname": ident["hostname"],
+        "kernel": ident["kernel"],
         "process_count": tasks["total"],
         "tasks_running": tasks["running"],
         "net_iface": iface,
@@ -682,6 +798,8 @@ def snapshot() -> dict[str, Any]:
         "net_tx_bps": tx_bps,
         "disk_read_bps": read_bps,
         "disk_write_bps": write_bps,
+        "disk_led": round(min(1.0, (read_bps + write_bps) / float(8 * 1024 * 1024)), 3),
+        "tombstones": int(tasks.get("tombstones") or 0),
         "cpu_hist": _push(_cpu_hist, overall),
         "core_hist": core_hist,
         "mem_hist": _push(
@@ -693,15 +811,26 @@ def snapshot() -> dict[str, Any]:
         "temp_hist": _push(_temp_hist, temp_c),
         "processes": procs,
         "users": user_rows,
-        "mounts": _mounts(),
-        "connections": _connections(),
-        "startup": _names_from_dir(Path.home() / ".config/autostart", ".desktop"),
-        "apps": _names_from_dir(
-            Path.home() / ".local/share/applications", ".desktop"
-        ),
-        "services": _names_from_dir(Path("/etc/systemd/system"), ".service"),
-        "appimage": str(app) if app is not None else "",
-        "appimage_found": app is not None,
+        "mounts": _mounts() if want_mounts else [],
+        "connections": _connections() if want_conns else [],
+        "startup": _cached_names(
+            "startup", Path.home() / ".config/autostart", ".desktop"
+        )
+        if want_names
+        else [],
+        "apps": _cached_names(
+            "apps", Path.home() / ".local/share/applications", ".desktop"
+        )
+        if want_names
+        else [],
+        "services": _cached_names(
+            "services", Path("/etc/systemd/system"), ".service"
+        )
+        if want_names
+        else [],
+        "appimage": app,
+        "appimage_found": bool(app),
+        "page": kind or "FULL",
     }
 
 

@@ -34,7 +34,7 @@ Item {
                     + (root.code.length > 0 ? " · " + root.code : "")
                 color: "#d8dee9"
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: 12
                 font.bold: true
             }
             Text {
@@ -42,7 +42,7 @@ Item {
                 text: root.message
                 color: "#c7d0d9"
                 wrapMode: Text.WordWrap
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
             Text {
                 visible: root.suggestion.length > 0
@@ -50,7 +50,7 @@ Item {
                 text: "FIX · " + root.suggestion
                 color: "#9eb6c3"
                 wrapMode: Text.WordWrap
-                font.pixelSize: 9
+                font.pixelSize: 12
             }
         }
     }

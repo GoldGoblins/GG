@@ -21,6 +21,52 @@ XPROP = Path("/usr/bin/xprop")
 TITLE = "gg-ai-grok-tui"
 
 
+def drop_qt_wrap(obj: object | None) -> None:
+    if obj is None:
+        return
+    try:
+        from shiboken6 import Shiboken
+    except ImportError:
+        Shiboken = None
+    try:
+        if Shiboken is not None and not Shiboken.isValid(obj):
+            return
+        hide = getattr(obj, "hide", None)
+        if callable(hide):
+            hide()
+        parent = getattr(obj, "setParent", None)
+        if callable(parent):
+            parent(None)
+        if Shiboken is not None:
+            Shiboken.delete(obj)
+            return
+        later = getattr(obj, "deleteLater", None)
+        if callable(later):
+            later()
+    except RuntimeError:
+        return
+
+
+def release_embed_windows(foreign: object | None, holder: object | None) -> None:
+    drop_qt_wrap(foreign)
+    drop_qt_wrap(holder)
+
+
+def cached_quick_item(
+    root: QObject | None, name: str, current: QQuickItem | None
+) -> QQuickItem | None:
+    if current is not None:
+        try:
+            if current.objectName() == name:
+                return current
+        except RuntimeError:
+            pass
+    if root is None:
+        return None
+    found = root.findChild(QQuickItem, name)
+    return found if isinstance(found, QQuickItem) else None
+
+
 def _descendants(pid: int) -> set[int]:
     found = {pid}
     stack = [pid]
@@ -39,7 +85,7 @@ def _descendants(pid: int) -> set[int]:
     return found
 
 
-def _konsole_xids(pids: set[int]) -> list[int]:
+def konsole_xids(pids: set[int], title: str = TITLE) -> list[int]:
     if not XPROP.is_file() or not pids:
         return []
     try:
@@ -51,6 +97,7 @@ def _konsole_xids(pids: set[int]) -> list[int]:
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
     found: list[int] = []
+    wanted = str(title or "")
     for token in re.findall(r"0x[0-9a-fA-F]+", raw.split(":", 1)[-1]):
         try:
             info = subprocess.check_output(
@@ -66,9 +113,13 @@ def _konsole_xids(pids: set[int]) -> list[int]:
         if "konsole" not in lower:
             continue
         pid_ok = any(re.search(r"\b" + str(pid) + r"\b", info) for pid in pids)
-        if TITLE in info or pid_ok:
+        if (wanted and wanted in info) or pid_ok:
             found.append(int(token, 16))
     return found
+
+
+def _konsole_xids(pids: set[int]) -> list[int]:
+    return konsole_xids(pids, TITLE)
 
 
 class GrokTuiEmbed(QObject):
@@ -81,10 +132,12 @@ class GrokTuiEmbed(QObject):
         self._holder: QWidget | None = None
         self._foreign: QWindow | None = None
         self._timer = QTimer(self)
-        self._timer.setInterval(80)
+        self._timer.setInterval(250)
         self._timer.timeout.connect(self._sync_geometry)
         self._attach_tries = 0
         self._attached = False
+        self._geo: tuple[int, int, int, int] | None = None
+        self._hole: QQuickItem | None = None
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -149,8 +202,12 @@ class GrokTuiEmbed(QObject):
         self.stop()
         self.attachFailed.emit()
 
+    def _hole_item(self) -> QQuickItem | None:
+        self._hole = cached_quick_item(self._root, "grokTuiHost", self._hole)
+        return self._hole
+
     def _main_xid(self) -> int:
-        item = self._root.findChild(QQuickItem, "grokTuiHost")
+        item = self._hole_item()
         if item is None:
             return 0
         window = item.window()
@@ -197,17 +254,13 @@ class GrokTuiEmbed(QObject):
     def stop(self) -> None:
         self._timer.stop()
         self._attached = False
-        foreign = self._foreign
-        self._foreign = None
-        if foreign is not None:
-            foreign.setParent(None)
-        holder = self._holder
-        self._holder = None
-        if holder is not None:
-            holder.hide()
-            holder.deleteLater()
         proc = self._proc
         self._proc = None
+        foreign = self._foreign
+        self._foreign = None
+        holder = self._holder
+        self._holder = None
+        release_embed_windows(foreign, holder)
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -216,7 +269,7 @@ class GrokTuiEmbed(QObject):
                 proc.kill()
 
     def _host_rect(self) -> QRect | None:
-        item = self._root.findChild(QQuickItem, "grokTuiHost")
+        item = self._hole_item()
         if item is None or not item.isVisible():
             return None
         width = float(item.width())
@@ -237,8 +290,13 @@ class GrokTuiEmbed(QObject):
             return
         rect = self._host_rect()
         if rect is None:
+            self._geo = None
             holder.hide()
             return
+        key = (rect.x(), rect.y(), rect.width(), rect.height())
+        if holder.isVisible() and self._geo == key:
+            return
+        self._geo = key
         holder.setGeometry(rect)
         if not holder.isVisible():
             holder.show()

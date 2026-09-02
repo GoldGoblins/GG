@@ -7,7 +7,7 @@ Item {
 
     property var surfaceHost: null
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     property string statusJson: "{}"
     property int selectedPid: -1
     property string page: "SUMMARY"
@@ -56,7 +56,10 @@ Item {
     function refresh() {
         if (!root.surfaceHost || !root.surfaceHost.tmogSnapshot)
             return
-        root.statusJson = root.surfaceHost.tmogSnapshot()
+        var raw = root.surfaceHost.tmogSnapshot(root.page)
+        if (raw === root.statusJson)
+            return
+        root.statusJson = raw
     }
 
     function swallow() {
@@ -114,10 +117,15 @@ Item {
     }
 
     Timer {
-        interval: 1000
+        interval: 2000
         running: root.visible
         repeat: true
         onTriggered: root.refresh()
+    }
+
+    onPageChanged: {
+        if (root.visible)
+            root.refresh()
     }
 
     onVisibleChanged: {
@@ -127,22 +135,16 @@ Item {
             root.hideEmbed()
     }
 
-    GgFrame {
+    Item {
         anchors.fill: parent
-        anchors.margins: 10
-        leftLegend: "TMOG"
-        rightLegend: root.page
-        backgroundColor: "#161616"
-        borderColor: root.frameBorder
-        radius: root.frameRadius
+        anchors.leftMargin: 6
+        anchors.rightMargin: 6
+        anchors.topMargin: 4
+        anchors.bottomMargin: 6
 
-        Item {
-            width: parent.width
-            height: Math.max(280, root.height - 52)
-
-            Row {
-                anchors.fill: parent
-                spacing: 10
+        Row {
+            anchors.fill: parent
+            spacing: 10
 
                 Column {
                     id: navCol
@@ -155,9 +157,9 @@ Item {
                             required property string modelData
                             width: navCol.width
                             text: modelData
-                            color: root.page === modelData ? "#d8dee9" : "#5d6670"
+                            color: root.page === modelData ? "#d8dee9" : "#a8b0b8"
                             font.family: "monospace"
-                            font.pixelSize: 10
+                            font.pixelSize: 12
                             font.bold: root.page === modelData
                             MouseArea {
                                 anchors.fill: parent
@@ -175,7 +177,7 @@ Item {
                         text: "OPEN APPIMAGE"
                         color: "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                         wrapMode: Text.WordWrap
                         MouseArea {
                             anchors.fill: parent
@@ -243,7 +245,7 @@ Item {
                                             anchors.bottomMargin: 2
                                             anchors.horizontalCenter: parent.horizontalCenter
                                             text: modelData.l
-                                            color: "#6a6a6a"
+                                            color: "#a8b0b8"
                                             font.family: "monospace"
                                             font.pixelSize: 7
                                             rotation: -90
@@ -297,7 +299,7 @@ Item {
                                             + "  " + String(modelData.comm || "")
                                         color: "#d8dee9"
                                         font.family: "monospace"
-                                        font.pixelSize: 10
+                                        font.pixelSize: 12
                                         elide: Text.ElideRight
                                     }
                                 }
@@ -363,9 +365,9 @@ Item {
                                     Text {
                                         text: String(root.n("load5")) + "  "
                                             + String(root.n("load15"))
-                                        color: "#8b949e"
+                                        color: "#c8cdd4"
                                         font.family: "monospace"
-                                        font.pixelSize: 9
+                                        font.pixelSize: 12
                                     }
                                 }
                             }
@@ -385,9 +387,9 @@ Item {
                                     }
                                     Text {
                                         text: "running / total"
-                                        color: "#6a6a6a"
+                                        color: "#a8b0b8"
                                         font.family: "monospace"
-                                        font.pixelSize: 8
+                                        font.pixelSize: 12
                                     }
                                 }
                             }
@@ -411,9 +413,9 @@ Item {
                                     }
                                     Text {
                                         text: String(root.energy.source || "AC")
-                                        color: "#8b949e"
+                                        color: "#c8cdd4"
                                         font.family: "monospace"
-                                        font.pixelSize: 9
+                                        font.pixelSize: 12
                                     }
                                     TmogSpark {
                                         width: parent.width
@@ -636,9 +638,9 @@ Item {
                                 Text {
                                     width: parent.width
                                     wrapMode: Text.WordWrap
-                                    color: "#8b949e"
+                                    color: "#c8cdd4"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                     text: root.perfKey === "CPU"
                                         ? (root.status.cpu_model || "")
                                             + "\n" + root.arr("cores").length + " logical   "
@@ -692,15 +694,20 @@ Item {
                                 visible: root.page === "PROCESSES"
                                 leftLegend: "PROCESSES"
                                 rightLegend: String(root.n("process_count"))
+                                    + (
+                                        root.n("tombstones") > 0
+                                            ? (" · " + String(root.n("tombstones")) + " GONE")
+                                            : ""
+                                    )
                                 Column {
                                     width: parent.width
                                     spacing: 3
                                     Text {
                                         width: parent.width
                                         text: "NAME            PID     STATUS      USER        CPU    RSS     THR"
-                                        color: "#6a6a6a"
+                                        color: "#a8b0b8"
                                         font.family: "monospace"
-                                        font.pixelSize: 9
+                                        font.pixelSize: 12
                                     }
                                     Repeater {
                                         model: root.processes
@@ -714,11 +721,15 @@ Item {
                                                 + " " + String(modelData.cpu_pct).padStart(5, " ") + "%"
                                                 + " " + root.kib(modelData.rss_kb).padStart(7, " ")
                                                 + " " + String(modelData.threads).padStart(4, " ")
-                                            color: Number(modelData.pid) === root.selectedPid
-                                                ? "#d8dee9"
-                                                : "#8b949e"
+                                            color: modelData.tombstone
+                                                ? "#c98989"
+                                                : (
+                                                    Number(modelData.pid) === root.selectedPid
+                                                        ? "#e6edf3"
+                                                        : "#c8cdd4"
+                                                )
                                             font.family: "monospace"
-                                            font.pixelSize: 10
+                                            font.pixelSize: 12
                                             elide: Text.ElideRight
                                             MouseArea {
                                                 anchors.fill: parent
@@ -735,7 +746,7 @@ Item {
                                             : ""
                                         color: "#c8a97e"
                                         font.family: "monospace"
-                                        font.pixelSize: 9
+                                        font.pixelSize: 12
                                         wrapMode: Text.WrapAnywhere
                                     }
                                 }
@@ -755,7 +766,7 @@ Item {
                                         + "\nUP  " + root.clock(root.n("uptime_s"))
                                     color: "#d8dee9"
                                     font.family: "monospace"
-                                    font.pixelSize: 11
+                                    font.pixelSize: 12
                                     wrapMode: Text.WordWrap
                                 }
                             }
@@ -767,7 +778,7 @@ Item {
                                     text: String(modelData.name) + "   " + String(modelData.procs)
                                     color: "#d8dee9"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
                             }
                             Repeater {
@@ -777,10 +788,29 @@ Item {
                                     width: listBody.width
                                     text: String(modelData.state) + "  "
                                         + String(modelData.local) + " → " + String(modelData.remote)
-                                    color: "#8b949e"
+                                    color: "#c8cdd4"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                     elide: Text.ElideRight
+                                }
+                            }
+                            TmogCard {
+                                width: parent.width
+                                height: 28
+                                visible: root.page === "DISK"
+                                leftLegend: "BLINKENDISK"
+                                rightLegend: root.bps(root.n("disk_read_bps") + root.n("disk_write_bps"))
+                                Rectangle {
+                                    width: parent.width
+                                    height: 8
+                                    color: "#1a1a1a"
+                                    radius: 2
+                                    Rectangle {
+                                        width: Math.max(4, parent.width * Math.min(1, root.n("disk_led")))
+                                        height: parent.height
+                                        color: root.n("disk_led") > 0.04 ? "#e05050" : "#3a3a3a"
+                                        radius: 2
+                                    }
                                 }
                             }
                             Repeater {
@@ -808,7 +838,7 @@ Item {
                                         + modelData.mhz + " MHz  " + modelData.pct + "%"
                                     color: "#8db89a"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
                             }
                             Repeater {
@@ -818,7 +848,7 @@ Item {
                                     text: String(modelData)
                                     color: "#d8dee9"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
                             }
                             Repeater {
@@ -826,9 +856,9 @@ Item {
                                 delegate: Text {
                                     required property var modelData
                                     text: String(modelData)
-                                    color: "#8b949e"
+                                    color: "#c8cdd4"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
                             }
                             Repeater {
@@ -836,9 +866,9 @@ Item {
                                 delegate: Text {
                                     required property var modelData
                                     text: String(modelData)
-                                    color: "#8b949e"
+                                    color: "#c8cdd4"
                                     font.family: "monospace"
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
                             }
                         }
@@ -846,7 +876,6 @@ Item {
                 }
             }
         }
-    }
 
     Item {
         id: hole

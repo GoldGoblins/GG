@@ -39,7 +39,7 @@ Item {
         + "shell and arbitrary exec remain NONE."
 
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
 
     readonly property var wallet: {
         var empty = {
@@ -60,6 +60,8 @@ Item {
             parsed.live_label = parsed.live_label || "—"
             if (parsed.live_tokens === undefined)
                 parsed.live_tokens = 0
+            if (parsed.weekly_percent === undefined || parsed.weekly_percent === "")
+                parsed.weekly_percent = null
             return parsed
         } catch (err) {
             return empty
@@ -114,17 +116,61 @@ Item {
             backgroundColor: "#161616"
             borderColor: root.frameBorder
             radius: root.frameRadius
+            compact: true
 
-            Text {
+            Column {
                 width: parent.width
-                text: "THINKING  ON\n"
-                    + "TOOLS     " + root.toolAuthority + "\n"
-                    + "WRITE     " + root.writeAuthority + "\n"
-                    + "NETWORK   " + root.networkAuthority
-                color: "#d8dee9"
-                font.family: "monospace"
-                font.pixelSize: 9
-                lineHeight: 1.2
+                spacing: 3
+
+                Repeater {
+                    model: [
+                        {
+                            "k": "THINKING",
+                            "v": "ON",
+                            "c": "#8db89a"
+                        },
+                        {
+                            "k": "TOOLS",
+                            "v": root.toolAuthority,
+                            "c": "#8db89a"
+                        },
+                        {
+                            "k": "WRITE",
+                            "v": root.writeAuthority,
+                            "c": "#c8a97e"
+                        },
+                        {
+                            "k": "NETWORK",
+                            "v": root.networkAuthority,
+                            "c": String(root.networkAuthority) === "CONNECTED"
+                                ? "#8db89a"
+                                : "#a8b0b8"
+                        }
+                    ]
+
+                    delegate: Row {
+                        required property var modelData
+                        width: parent.width
+                        spacing: 8
+
+                        Text {
+                            width: 72
+                            text: modelData.k
+                            color: "#c8cdd4"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                        }
+
+                        Text {
+                            width: Math.max(40, parent.width - 80)
+                            text: modelData.v
+                            color: modelData.c
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
             }
         }
 
@@ -135,6 +181,7 @@ Item {
             backgroundColor: "#161616"
             borderColor: root.frameBorder
             radius: root.frameRadius
+            compact: true
 
             Column {
                 width: parent.width
@@ -153,9 +200,9 @@ Item {
                     )
                         + " · "
                         + root.modelState
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     wrapMode: Text.WordWrap
-                    font.pixelSize: 9
+                    font.pixelSize: 12
                 }
 
                 Column {
@@ -167,49 +214,50 @@ Item {
                     Text {
                         width: parent.width
                         text: "WALLET"
-                        color: "#6a6a6a"
+                        color: "#a8b0b8"
                         font.family: "monospace"
-                        font.pixelSize: 8
+                        font.pixelSize: 12
                     }
                     Text {
                         width: parent.width
                         text: "CTX  " + root.wallet.context_label
                         color: "#d8dee9"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                     }
                     Text {
                         width: parent.width
                         text: "ALL  " + root.wallet.session_total_label
                         color: "#d8dee9"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                     }
                     Text {
                         width: parent.width
                         text: "TURN " + root.wallet.turn_label
-                        color: "#8b949e"
+                        color: "#c8cdd4"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                     }
                     Text {
                         width: parent.width
                         text: "LIVE " + root.wallet.live_label
-                        color: root.wallet.live_tokens > 0 ? "#c8a97e" : "#8b949e"
+                        color: root.wallet.live_tokens > 0 ? "#c8a97e" : "#c8cdd4"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                     }
                     Text {
                         width: parent.width
                         text: "WEEK "
                             + (
                                 root.wallet.weekly_percent === null
+                                || root.wallet.weekly_percent === undefined
                                     ? "—"
-                                    : (root.wallet.weekly_percent + "%")
+                                    : (Number(root.wallet.weekly_percent) + "%")
                             )
-                        color: "#8b949e"
+                        color: "#c8cdd4"
                         font.family: "monospace"
-                        font.pixelSize: 9
+                        font.pixelSize: 12
                     }
                     Rectangle {
                         width: parent.width
@@ -243,14 +291,15 @@ Item {
             backgroundColor: "#161616"
             borderColor: root.frameBorder
             radius: root.frameRadius
+            compact: true
 
             Text {
                 width: parent.width
                 text: "CHAT → MODEL\nSAFE TOOLS · BOUND\nWRITE · APPROVAL"
-                color: "#8b949e"
+                color: "#c8cdd4"
                 wrapMode: Text.WordWrap
                 font.family: "monospace"
-                font.pixelSize: 9
+                font.pixelSize: 12
             }
         }
     }
@@ -273,6 +322,7 @@ Item {
         backgroundColor: "#161616"
         borderColor: root.frameBorder
         radius: root.frameRadius
+        compact: true
 
         Flickable {
             id: snippetFlick
@@ -301,7 +351,7 @@ Item {
                             ? "#d8dee9"
                             : "#8b949e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         font.bold: path === root.activeSnippet
                         wrapMode: Text.NoWrap
                         elide: Text.ElideMiddle
@@ -315,9 +365,7 @@ Item {
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-            }
+            ScrollBar.vertical: GgScrollBar {}
         }
     }
 
@@ -339,6 +387,7 @@ Item {
         backgroundColor: "#161616"
         borderColor: root.frameBorder
         radius: root.frameRadius
+        compact: true
 
         Flickable {
             id: chatFlick
@@ -360,9 +409,9 @@ Item {
                     width: chatColumn.width
                     visible: root.chatSessions.length === 0
                     text: "NO DESKTOP CHATS"
-                    color: "#6a6a6a"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 9
+                    font.pixelSize: 12
                 }
 
                 Repeater {
@@ -376,7 +425,7 @@ Item {
                             ? "#d8dee9"
                             : "#8b949e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         font.bold: String(modelData.session_id) === root.activeChatSession
                         wrapMode: Text.NoWrap
                         elide: Text.ElideRight
@@ -393,9 +442,7 @@ Item {
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-            }
+            ScrollBar.vertical: GgScrollBar {}
         }
     }
 
@@ -412,6 +459,7 @@ Item {
         backgroundColor: "#161616"
         borderColor: root.frameBorder
         radius: root.frameRadius
+        compact: true
 
         Flickable {
             id: cryptoFlick
@@ -444,7 +492,7 @@ Item {
                         ? "#d8dee9"
                         : "#6a6a6a"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     wrapMode: Text.NoWrap
                     elide: Text.ElideMiddle
                 }
@@ -452,9 +500,9 @@ Item {
                 Text {
                     width: parent.width
                     text: root.crypto.signer ? "SIGNER  YES" : "SIGNER  NO"
-                    color: root.crypto.signer ? "#8db89a" : "#8b949e"
+                    color: root.crypto.signer ? "#8db89a" : "#c8cdd4"
                     font.family: "monospace"
-                    font.pixelSize: 8
+                    font.pixelSize: 12
                 }
 
                 Text {
@@ -464,16 +512,16 @@ Item {
                         ? "#8db89a"
                         : "#8b949e"
                     font.family: "monospace"
-                    font.pixelSize: 8
+                    font.pixelSize: 12
                 }
 
                 Text {
                     width: parent.width
                     visible: root.crypto.holdings.length === 0
                     text: "NO TOKENS"
-                    color: "#6a6a6a"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 9
+                    font.pixelSize: 12
                 }
 
                 Repeater {
@@ -487,25 +535,23 @@ Item {
                         Text {
                             width: parent.width
                             text: String(modelData.symbol || "")
-                            color: "#8b949e"
+                            color: "#c8cdd4"
                             font.family: "monospace"
-                            font.pixelSize: 8
+                            font.pixelSize: 12
                         }
                         Text {
                             width: parent.width
                             text: String(modelData.display || "")
                             color: "#d8dee9"
                             font.family: "monospace"
-                            font.pixelSize: 9
+                            font.pixelSize: 12
                             wrapMode: Text.WrapAnywhere
                         }
                     }
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-            }
+            ScrollBar.vertical: GgScrollBar {}
         }
     }
 }

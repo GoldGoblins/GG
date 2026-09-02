@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -224,3 +225,138 @@ def read_ledger(limit: int = 20) -> list[dict[str, Any]]:
         if isinstance(item, dict):
             rows.append(item)
     return rows
+
+
+ERROR_HINTS = {
+    "LAB_OFF": "Start LAB first. Local validator is off.",
+    "LAB_STARTING": "Lab is still starting. Wait for LAB ON.",
+    "RPC_UNREACHABLE": "Lab RPC is down. Turn LAB ON.",
+    "NEED_FEE_SOL": "Too little SOL for fees. AIRDROP first.",
+    "NO_SIGNER": "CREATE TEST WALLET first.",
+    "MAINNET_NOT_ARMED": "Mainnet stays locked until testnet is proven.",
+    "NO_PROFIT": "Arb reverted. Pools unchanged.",
+    "NO_MARKET_DATA": "Market feed quiet. EVAL needs a SOL chart.",
+    "AIRDROP_FAIL": "Lab airdrop failed. Retry after LAB ON.",
+    "CRYPTO_BLOCKHASH": "Lab did not give a blockhash. Retry.",
+    "CRYPTO_NO_SIGNER": "CREATE TEST WALLET first.",
+    "CRYPTO_RPC": "Lab RPC rejected the transaction.",
+    "CRYPTO_VALIDATOR_MISSING": "solana-test-validator is not installed.",
+    "CRYPTO_KLINE": "Market feed quiet. EVAL needs a SOL chart.",
+    "CRYPTO_CANDLES": "Not enough candles yet. Refresh the SOL chart.",
+}
+PROVEN_STEPS = ("lab", "airdrop", "buy", "bot", "arb")
+PROVEN_NAME = "testnet-proven.json"
+_DEAD_TX = frozenset({"", "NONE", "UNSENT", "REVERT", "POOLS_ONLY", "RESET"})
+
+
+def human_error(code: str | None) -> str:
+    raw = str(code or "").strip()
+    if not raw:
+        return ""
+    key = raw.split(":", 1)[-1].strip() if raw.startswith("CRYPTO_") is False else raw
+    if raw in ERROR_HINTS:
+        return ERROR_HINTS[raw]
+    if key in ERROR_HINTS:
+        return ERROR_HINTS[key]
+    low = raw.lower()
+    if "insufficient" in low:
+        return ERROR_HINTS["NEED_FEE_SOL"]
+    if "blockhash" in low:
+        return ERROR_HINTS["CRYPTO_BLOCKHASH"]
+    if "-32603" in raw or "internal error" in low:
+        return "Lab RPC internal error. Is LAB ON?"
+    if "429" in raw or "airdrop" in low and ("limit" in low or "dry" in low):
+        return "Use the local lab airdrop, not a public faucet."
+    if len(raw) > 80:
+        return raw[:72] + "…"
+    return raw
+
+
+def short_error(code: str | None) -> str:
+    raw = str(code or "").strip()
+    if not raw:
+        return ""
+    if raw in ERROR_HINTS:
+        return raw
+    low = raw.lower()
+    if "insufficient" in low:
+        return "NEED_FEE_SOL"
+    if "blockhash" in low:
+        return "CRYPTO_BLOCKHASH"
+    if "-32603" in raw or "internal error" in low:
+        return "AIRDROP_FAIL"
+    if raw.startswith("HTTP ") or "urlerror" in low or "unreachable" in low:
+        return "RPC_UNREACHABLE"
+    token = raw.split(":", 1)[0].strip()
+    if token in ERROR_HINTS:
+        return token
+    if len(raw) > 32:
+        return raw[:32]
+    return raw
+
+
+def decorate_ledger_row(row: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    err = out.get("error")
+    if err:
+        out["error"] = short_error(str(err))
+        if not out.get("hint"):
+            out["hint"] = human_error(str(err))
+    elif not out.get("hint"):
+        tx = str(out.get("txid") or "")
+        if tx not in _DEAD_TX:
+            out["hint"] = "Signed on lab. " + tx[:8] + "…" + tx[-6:]
+    hint = str(out.get("hint") or "")
+    if "Swap path next" in hint:
+        out["hint"] = "Signed lab fill."
+    if "Balance not yet visible" in hint:
+        out["hint"] = "Lab airdrop submitted."
+    return out
+
+
+def proven_path() -> Path:
+    return ensure_state_dir() / PROVEN_NAME
+
+
+def load_proven() -> dict[str, Any]:
+    path = proven_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    out: dict[str, Any] = {step: bool(payload.get(step)) for step in PROVEN_STEPS}
+    out["ready"] = all(out[step] for step in PROVEN_STEPS)
+    done = sum(1 for step in PROVEN_STEPS if out[step])
+    out["done"] = done
+    out["total"] = len(PROVEN_STEPS)
+    out["label"] = str(done) + "/" + str(len(PROVEN_STEPS))
+    if payload.get("ts"):
+        out["ts"] = payload.get("ts")
+    return out
+
+
+def mark_proven(step: str, txid: str | None = None) -> dict[str, Any]:
+    name = str(step or "").strip().lower()
+    if name not in PROVEN_STEPS:
+        raise ValueError("CRYPTO_PROVEN_STEP")
+    path = proven_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload[name] = True
+    payload[name + "_ts"] = int(time.time())
+    if txid:
+        payload[name + "_txid"] = str(txid)[:88]
+    payload["ready"] = all(bool(payload.get(item)) for item in PROVEN_STEPS)
+    payload["ts"] = int(time.time())
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return load_proven()

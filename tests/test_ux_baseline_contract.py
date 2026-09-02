@@ -237,6 +237,11 @@ def main() -> int:
     )
     settings_chat = text("qml/components/SettingsChatModule.qml")
     settings_layout = text("qml/components/SettingsLayoutModule.qml")
+    require(
+        "Interactive desktop" in settings_layout
+        and "desktopShellChangedByUser" in settings_layout,
+        "Interactive desktop setting missing.",
+    )
     workspace_alpha = text("qml/components/WorkspaceSurface.qml")
 
     for marker in (
@@ -429,12 +434,16 @@ def main() -> int:
         'text: "CRYPTO"',
         'text: "TMOG"',
         'text: "MEDIA"',
+        'text: "DRAW"',
         'hostKind === "CRYPTO"',
         'hostKind === "TMOG"',
         'hostKind === "MEDIA"',
+        'hostKind === "DRAW"',
         'objectName: "workspaceTmogPane"',
         'objectName: "workspaceMediaPane"',
+        'objectName: "workspaceDrawPane"',
         "MediaSurface {",
+        "DrawSurface {",
         "function applyLiveReload()",
         "liveEpoch",
         'objectName: "workspaceWebHost"',
@@ -534,13 +543,50 @@ def main() -> int:
         "signal frameBorderChangedByUser(color value)",
         "signal frameRadiusChangedByUser(int value)",
         "TapHandler {",
-        "Slider {",
+        "GgSlider {",
         "grayToken",
     ):
         require(
             marker in settings_appearance,
             "Settings Appearance marker missing: " + marker,
         )
+
+    for rel, marker in (
+        ("qml/components/GgButton.qml", "signal clicked()"),
+        ("qml/components/GgSwitch.qml", "signal toggled()"),
+        ("qml/components/GgSlider.qml", "handle: Rectangle {"),
+        ("qml/components/GgCheck.qml", "signal toggled()"),
+        ("qml/components/GgField.qml", 'placeholderTextColor: "#5d6670"'),
+        ("qml/components/GgScrollBar.qml", "interactive: true"),
+    ):
+        require(
+            marker in text(rel),
+            "Themed primitive missing: " + rel,
+        )
+    require(
+        "GgButton {" in settings_surface
+        and settings_surface.count("Button {")
+        == settings_surface.count("GgButton {"),
+        "Settings still uses stock Qt buttons.",
+    )
+    require(
+        "GgSwitch {" in settings_layout
+        and settings_layout.count("Switch {")
+        == settings_layout.count("GgSwitch {"),
+        "Layout still uses stock Qt switches.",
+    )
+    require(
+        "GgCheck {" in settings_chat
+        and "CheckBox {" not in settings_chat,
+        "Chat settings still uses stock Qt checkboxes.",
+    )
+    live_aid_work = text("qml/components/ChatLiveAidWork.qml")
+    require(
+        "GgButton {" in live_aid_work
+        and live_aid_work.count("Button {")
+        == live_aid_work.count("GgButton {"),
+        "Live Aid still uses stock Qt buttons.",
+    )
 
     for marker in (
         'text: "Show DEMO / SAMPLE fixtures"',
@@ -556,7 +602,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA", "DRAW"]',
     ):
         require(
             marker in settings_workspace,
@@ -1157,7 +1203,7 @@ def main() -> int:
 
     for marker in (
         'id: centerColumn',
-        'UtilitySurface {',
+        'function utilityUrl(',
         'id: utilitySurface',
         'ChatLiveAidWork {',
         'id: chatLiveAidWork',
@@ -1214,12 +1260,81 @@ def main() -> int:
         "Independent UtilitySurface identity missing.",
     )
     require(
-        "Button {" not in a1_2_utility,
+        a1_2_utility.count("Button {")
+        == a1_2_utility.count("GgButton {"),
         "UtilitySurface gained fake controls.",
     )
     require(
         'objectName: "utilityTransport"' in a1_2_utility,
         "UtilitySurface transport missing.",
+    )
+    require(
+        'objectName: "utilitySpectrum"' in a1_2_utility
+        and "spectrumBars: 120" in a1_2_utility
+        and "peakHoldTicks" in a1_2_utility
+        and "function ledColor(" in a1_2_utility,
+        "UtilitySurface spectrum missing.",
+    )
+    a1_2_frame = text("qml/components/GgFrame.qml")
+    require(
+        "antialiasing: true" not in a1_2_frame,
+        "GgFrame still antialiases every chrome rectangle.",
+    )
+    require(
+        "property int padding: 8" in a1_2_frame
+        and "property bool compact: false" in a1_2_frame
+        and "verticalAlignment: Text.AlignVCenter" in a1_2_frame,
+        "GgFrame chrome still clips legend text.",
+    )
+    require(
+        'leftLegend: "MEDIA"' not in text("qml/components/MediaSurface.qml"),
+        "MediaSurface still double-frames the workspace MEDIA box.",
+    )
+    require(
+        "bottomRightLegend: \"drag band" not in a1_2_utility
+        and "MEDIA / UTILITIES" in a1_2_utility,
+        "UtilitySurface still spends height on hanging GgFrame legends.",
+    )
+    require(
+        'objectName: "utilityTimeline"' in a1_2_utility
+        and "function seekAt(" in a1_2_utility
+        and "playing ? 1" not in a1_2_utility,
+        "UtilitySurface timeline missing or still fills gold on live streams.",
+    )
+    ws_qml = text("qml/components/WorkspaceSurface.qml")
+    require(
+        "Loader {" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"CRYPTO\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"TMOG\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml,
+        "Unused workspace function panes are still kept alive.",
+    )
+    require(
+        'leftLegend: "CODE · "' not in ws_qml
+        and "tabStripLeft" in ws_qml
+        and "frameKindLabel" in ws_qml,
+        "Workspace CODE tabs still collide with hanging CODE · title.",
+    )
+    require(
+        "WEEK undefined" not in text("qml/components/TelemetryRail.qml")
+        and "weekly_percent === undefined" in text("qml/components/TelemetryRail.qml"),
+        "Wallet week label can still print undefined%.",
+    )
+    require(
+        "visible: root.seekable" in a1_2_utility,
+        "Empty utility timeline still draws a hairline when nothing is seekable.",
+    )
+    require(
+        'objectName: "utilityEq"' in a1_2_utility,
+        "UtilitySurface equalizer missing.",
+    )
+    require(
+        "function setEqFromY(" in a1_2_utility,
+        "EQ bands are not adjustable.",
+    )
+    require(
+        "function cycleEq(" in a1_2_utility,
+        "EQ preset cycle missing.",
     )
     require(
         "workspaceMediaHole" not in a1_2_utility,
@@ -1233,6 +1348,17 @@ def main() -> int:
     require(
         'objectName: "workspaceMediaStage"' in a1_2_media,
         "Workspace media stage missing.",
+    )
+    require(
+        "import QtMultimedia" in a1_2_media
+        and 'objectName: "workspaceMediaVideo"' in a1_2_media
+        and 'objectName: "workspaceMediaFrame"' in a1_2_media
+        and "search homebrew or local ROM" in a1_2_media,
+        "Workspace media screen/search missing.",
+    )
+    require(
+        "QtMultimedia" not in a1_2_utility,
+        "Video output leaked into the utility strip.",
     )
     for marker in ("MUSIC", "RADIO", "TV", "GAME", "FETCH"):
         require(
@@ -1266,6 +1392,14 @@ def main() -> int:
     require(
         "height: utilitySurface.implicitHeight" in a1_2_main,
         "UtilitySurface does not use its independent implicit height.",
+    )
+    require(
+        "utilitySurface.setSource(root.utilityUrl())" in a1_2_main,
+        "RELOAD does not recreate UtilitySurface.",
+    )
+    require(
+        "?r=" in a1_2_main and "shellNonce" in a1_2_main,
+        "RELOAD QML cache-bust nonce missing.",
     )
     require(
         "property int surfaceHeight: 112" in a1_2_utility,

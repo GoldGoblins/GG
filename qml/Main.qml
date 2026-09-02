@@ -41,6 +41,17 @@ ApplicationWindow {
     property string cryptoStatusJson: "{}"
     onSurfaceHostChanged: {
         root.pullCryptoStatus()
+        root.applyDesktopShellNow()
+    }
+
+    onDesktopShellChanged: {
+        root.persistDesktopSettings()
+        root.applyDesktopShellNow()
+    }
+
+    onActiveChanged: {
+        if (root.active && root.desktopShell)
+            root.applyDesktopShellNow()
     }
     property string chatSessionsJson: "[]"
     property string activeChatSession: ""
@@ -55,8 +66,16 @@ ApplicationWindow {
     property var _shellComp: null
     readonly property int alphaBottomStripMargin: 8
 
+    property int shellNonce: 0
+
     function workspaceUrl() {
         return Qt.resolvedUrl("components/WorkspaceSurface.qml")
+            + "?r=" + String(root.shellNonce)
+    }
+
+    function utilityUrl() {
+        return Qt.resolvedUrl("components/UtilitySurface.qml")
+            + "?r=" + String(root.shellNonce)
     }
 
     function unloadDesktopShell() {
@@ -67,6 +86,7 @@ ApplicationWindow {
         root._shellQueueIndex = 0
         root._shellComp = null
         workspaceLoader.source = ""
+        utilitySurface.source = ""
     }
 
     function parseShellQueue() {
@@ -153,7 +173,33 @@ ApplicationWindow {
         var rel = "qml/components/WorkspaceSurface.qml"
         root.shellLoadCurrent = rel
         root.appendShellLog(rel)
+        root.appendShellLog("qml/components/UtilitySurface.qml")
+        utilitySurface.setSource(root.utilityUrl())
         workspaceLoader.setSource(root.workspaceUrl())
+    }
+
+    function bindUtility(item) {
+        if (!item)
+            return
+        item.surfaceHost = Qt.binding(function() {
+            return root.surfaceHost
+        })
+        item.accentColor = Qt.binding(function() {
+            return root.cyan
+        })
+        item.frameBorder = Qt.binding(function() {
+            return root.frameBorder
+        })
+        item.frameRadius = Qt.binding(function() {
+            return root.frameRadius
+        })
+        item.surfaceHeight = Qt.binding(function() {
+            return root.alphaUtilityHeight
+        })
+        item.surfaceRequested.connect(function(kind) {
+            if (workspace)
+                workspace.setHostKind(kind)
+        })
     }
 
     function bindWorkspace(item) {
@@ -194,6 +240,9 @@ ApplicationWindow {
         })
         item.utilityHeight = Qt.binding(function() {
             return root.alphaUtilityHeight
+        })
+        item.desktopShell = Qt.binding(function() {
+            return root.desktopShell
         })
         item.liveAidBackend = Qt.binding(function() {
             return root.liveAidBackend
@@ -242,6 +291,9 @@ ApplicationWindow {
             root.alphaUtilityHeight = value
             root.persistDesktopSettings()
         })
+        item.desktopShellRequested.connect(function(value) {
+            root.desktopShell = value
+        })
         item.activeObjectChanged.connect(function(objectId, title) {
             if (objectId === root.lastSelectedObjectId)
                 return
@@ -263,6 +315,7 @@ ApplicationWindow {
     }
 
     function beginShellLoad(label) {
+        root.shellNonce += 1
         root.shellLoadLabel = label
         root.shellLoading = true
         root.unloadDesktopShell()
@@ -293,9 +346,10 @@ ApplicationWindow {
     readonly property color textMuted: "#8a8a8a"
     property color cyan: "#8a8a8a"
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     property bool showOpenTabInInput: false
     property bool showInnerEditorChrome: true
+    property bool desktopShell: false
     readonly property color violet: "#b6a6c8"
     readonly property color green: "#8db89a"
     readonly property color amber: "#c8a97e"
@@ -351,13 +405,22 @@ ApplicationWindow {
     }
 
     function pullCryptoStatus() {
-        if (!root.surfaceHost || !root.surfaceHost.cryptoStatus)
+        if (!root.surfaceHost)
             return
-        root.cryptoStatusJson = root.surfaceHost.cryptoStatus()
+        var raw = ""
+        if (root.surfaceHost.cryptoRailStatus)
+            raw = root.surfaceHost.cryptoRailStatus()
+        else if (root.surfaceHost.cryptoStatus)
+            raw = root.surfaceHost.cryptoStatus()
+        else
+            return
+        if (raw === root.cryptoStatusJson)
+            return
+        root.cryptoStatusJson = raw
     }
 
     Timer {
-        interval: 10000
+        interval: 30000
         running: true
         repeat: true
         onTriggered: root.pullCryptoStatus()
@@ -377,8 +440,15 @@ ApplicationWindow {
             "showOpenTabInInput": root.showOpenTabInInput,
             "showInnerEditorChrome": root.showInnerEditorChrome,
             "showProductSourceTabs": root.showProductSourceTabs,
-            "showDemoFixtures": root.alphaShowDemoFixtures
+            "showDemoFixtures": root.alphaShowDemoFixtures,
+            "desktopShell": root.desktopShell
         }))
+    }
+
+    function applyDesktopShellNow() {
+        if (!root.surfaceHost || !root.surfaceHost.applyDesktopShell)
+            return
+        root.surfaceHost.applyDesktopShell(root.desktopShell)
     }
 
     title: "GG AI Desktop · Alpha"
@@ -386,7 +456,10 @@ ApplicationWindow {
     height: 1080
     minimumWidth: 820
     minimumHeight: 620
-    visibility: Window.Maximized
+    flags: root.desktopShell
+        ? (Qt.FramelessWindowHint | Qt.WindowStaysOnBottomHint)
+        : Qt.Window
+    visibility: root.desktopShell ? Window.Windowed : Window.Maximized
     color: root.canvas
 
     ListModel {
@@ -1001,155 +1074,172 @@ ApplicationWindow {
         }
     }
 
-    Rectangle {
+    GgFrame {
         id: topBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: 52
-        color: "#141414"
-        border.width: 1
-        border.color: root.line
+        anchors.leftMargin: 12
+        anchors.rightMargin: 12
+        anchors.topMargin: 12
+        height: 54
+        leftLegend: "GG AI DESKTOP"
+        rightLegend: "AUTHORITY · NONE"
+        backgroundColor: root.surface
+        borderColor: root.frameBorder
+        radius: root.frameRadius
+        padding: 12
+        leftLegendColor: "#e6edf3"
+        rightLegendColor: root.amber
 
-        Row {
-            anchors.left: parent.left
-            anchors.leftMargin: 16
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 14
+        Item {
+            width: parent.width
+            height: 22
 
-            Text {
-                text: "GG AI DESKTOP"
-                color: root.textMain
-                font.family: "monospace"
-                font.pixelSize: 16
-                font.bold: true
-            }
+            Row {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 14
 
-            Text {
-                text: "OBSIDIAN / LEDGER"
-                color: root.textMuted
-                font.family: "monospace"
-                font.pixelSize: 10
-            }
+                Text {
+                    text: "OBSIDIAN / LEDGER"
+                    color: "#c8cdd4"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
 
-            Text {
-                text: "."
-                color: "#5d6670"
-                font.family: "monospace"
-                font.pixelSize: 10
-            }
+                Text {
+                    text: "·"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
 
-            Text {
-                id: settingsButton
-                objectName: "topBarSettingsButton"
-                text: "SETTINGS"
-                color: workspace && workspace.settingsOpen ? "#d8dee9" : "#5d6670"
-                font.family: "monospace"
-                font.pixelSize: 10
-                font.bold: workspace && workspace.settingsOpen
+                Text {
+                    visible: root.desktopShell
+                    text: "DESKTOP"
+                    color: "#c8a97e"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    font.bold: true
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.desktopShell = false
+                    }
+                }
 
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (!workspace)
-                            return
-                        workspace.settingsOpen
-                            ? workspace.closeSettings()
-                            : workspace.openSettings()
+                Text {
+                    visible: root.desktopShell
+                    text: "·"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    id: settingsButton
+                    objectName: "topBarSettingsButton"
+                    text: "SETTINGS"
+                    color: workspace && workspace.settingsOpen ? "#e6edf3" : "#c8cdd4"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    font.bold: workspace && workspace.settingsOpen
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (!workspace)
+                                return
+                            workspace.settingsOpen
+                                ? workspace.closeSettings()
+                                : workspace.openSettings()
+                        }
+                    }
+                }
+
+                Text {
+                    text: "·"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    id: reloadButton
+                    objectName: "topBarReloadButton"
+                    text: "RELOAD"
+                    color: "#c8cdd4"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (root.shellLoading)
+                                return
+                            root.beginShellLoad("RELOAD")
+                            if (root.surfaceHost && root.surfaceHost.restartDesktop)
+                                root.surfaceHost.restartDesktop()
+                        }
                     }
                 }
             }
 
-            Text {
-                text: "."
-                color: "#5d6670"
-                font.family: "monospace"
-                font.pixelSize: 10
-            }
+            Row {
+                visible: root.narrowLayout
+                anchors.centerIn: parent
+                spacing: 6
 
-            Text {
-                id: reloadButton
-                objectName: "topBarReloadButton"
-                text: "RELOAD"
-                color: "#5d6670"
-                font.family: "monospace"
-                font.pixelSize: 10
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (root.shellLoading)
-                            return
-                        root.beginShellLoad("RELOAD")
-                        if (root.surfaceHost && root.surfaceHost.restartDesktop)
-                            root.surfaceHost.restartDesktop()
-                    }
+                GgButton {
+                    text: "CHAT"
+                    checkable: true
+                    checked: root.narrowPane === "CHAT"
+                    onClicked: root.narrowPane = "CHAT"
                 }
-            }
-        }
 
-        Row {
-            visible: root.narrowLayout
-            anchors.centerIn: parent
-            spacing: 6
-
-            Button {
-                text: "CHAT"
-                checkable: true
-                checked: root.narrowPane === "CHAT"
-                onClicked: root.narrowPane = "CHAT"
-            }
-
-            Button {
-                text: "WORKSPACE"
-                checkable: true
-                checked: root.narrowPane === "WORKSPACE"
-                onClicked: root.narrowPane = "WORKSPACE"
-            }
-        }
-
-        Row {
-            anchors.right: parent.right
-            anchors.rightMargin: 16
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 16
-
-            Text {
-                text: "LOCAL · ALPHA"
-                color: root.cyan
-                font.family: "monospace"
-                font.pixelSize: 9
-            }
-
-            Text {
-                objectName: "topBarWalletChip"
-                text: workspace
-                    ? workspace.cryptoWalletLabel
-                    : "WALLET · DISCONNECTED"
-                color: !workspace
-                    || workspace.cryptoWalletLabel.indexOf("DISCONNECTED") >= 0
-                    ? "#8b949e"
-                    : root.green
-                font.family: "monospace"
-                font.pixelSize: 9
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (workspace)
-                            workspace.setHostKind("CRYPTO")
-                    }
+                GgButton {
+                    text: "WORKSPACE"
+                    checkable: true
+                    checked: root.narrowPane === "WORKSPACE"
+                    onClicked: root.narrowPane = "WORKSPACE"
                 }
             }
 
-            Text {
-                text: "AUTHORITY · NONE"
-                color: root.amber
-                font.family: "monospace"
-                font.pixelSize: 9
-                font.bold: true
+            Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 16
+
+                Text {
+                    text: "LOCAL · ALPHA"
+                    color: root.cyan
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    objectName: "topBarWalletChip"
+                    text: workspace
+                        ? workspace.cryptoWalletLabel
+                        : "WALLET · DISCONNECTED"
+                    color: !workspace
+                        || workspace.cryptoWalletLabel.indexOf("DISCONNECTED") >= 0
+                        ? "#c8cdd4"
+                        : root.green
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (workspace)
+                                workspace.setHostKind("CRYPTO")
+                        }
+                    }
+                }
             }
         }
     }
@@ -1160,7 +1250,10 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.top: topBar.bottom
         anchors.bottom: parent.bottom
-        anchors.margins: 12
+        anchors.leftMargin: 12
+        anchors.rightMargin: 12
+        anchors.bottomMargin: 12
+        anchors.topMargin: 10
 
         Row {
             anchors.fill: parent
@@ -1198,8 +1291,8 @@ ApplicationWindow {
                     anchors.bottom: composer.top
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    anchors.topMargin: 22
-                    anchors.bottomMargin: 2
+                    anchors.topMargin: 14
+                    anchors.bottomMargin: 4
                     surfaceHost: root.surfaceHost
                 }
 
@@ -1213,7 +1306,7 @@ ApplicationWindow {
                     anchors.bottom: chatStatusDock.top
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    anchors.topMargin: 22
+                    anchors.topMargin: 14
                     anchors.bottomMargin: 8
                     clip: true
                     contentWidth: width
@@ -1223,7 +1316,7 @@ ApplicationWindow {
                     )
                     flickableDirection: Flickable.VerticalFlick
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar {}
+                    ScrollBar.vertical: GgScrollBar {}
                     onContentHeightChanged: {
                         if (root.followChatTail || root.bridgeBusy)
                             root.stickChatToLatest()
@@ -1476,15 +1569,11 @@ ApplicationWindow {
                                             textFormat: TextEdit.PlainText
                                             wrapMode: TextEdit.NoWrap
                                             font.family: "monospace"
-                                            font.pixelSize: 11
+                                            font.pixelSize: 12
                                         }
 
-                                        ScrollBar.vertical: ScrollBar {
-                                            policy: ScrollBar.AsNeeded
-                                        }
-                                        ScrollBar.horizontal: ScrollBar {
-                                            policy: ScrollBar.AsNeeded
-                                        }
+                                        ScrollBar.vertical: GgScrollBar {}
+                                        ScrollBar.horizontal: GgScrollBar {}
                                     }
                                 }
 
@@ -1740,22 +1829,16 @@ ApplicationWindow {
                     }
                 }
 
-                UtilitySurface {
+                Loader {
                     id: utilitySurface
+                    anchors.bottomMargin: 0
+                    objectName: "utilitySurfaceLoader"
+                    asynchronous: true
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 0
                     height: utilitySurface.implicitHeight
-                    surfaceHeight: root.alphaUtilityHeight
-                    accentColor: root.cyan
-                    frameBorder: root.frameBorder
-                    frameRadius: root.frameRadius
-                    surfaceHost: root.surfaceHost
-                    onSurfaceRequested: function(kind) {
-                        if (workspace)
-                            workspace.setHostKind(kind)
-                    }
+                    onLoaded: root.bindUtility(utilitySurface.item)
                 }
             }
 
@@ -1812,9 +1895,9 @@ ApplicationWindow {
             Text {
                 width: parent.width
                 text: root.shellLoadLog
-                color: "#6a6a6a"
+                color: "#a8b0b8"
                 font.family: "monospace"
-                font.pixelSize: 10
+                font.pixelSize: 12
                 wrapMode: Text.NoWrap
             }
 
@@ -1824,7 +1907,7 @@ ApplicationWindow {
                 text: root.shellLoadCurrent
                 color: "#c8a97e"
                 font.family: "monospace"
-                font.pixelSize: 11
+                font.pixelSize: 12
                 wrapMode: Text.NoWrap
                 elide: Text.ElideMiddle
             }
@@ -1871,7 +1954,7 @@ ApplicationWindow {
                 text: String(Math.round(root.shellLoadPercent)) + "%"
                 color: root.textMuted
                 font.family: "monospace"
-                font.pixelSize: 11
+                font.pixelSize: 12
             }
         }
     }

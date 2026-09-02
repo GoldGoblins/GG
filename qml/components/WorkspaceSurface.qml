@@ -299,7 +299,7 @@ Item {
     property int telemetryWidth: 168
     property color accentColor: "#8a8a8a"
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     property bool showOpenTabInInput: false
     property bool showInnerEditorChrome: true
     property bool settingsOpen: false
@@ -313,6 +313,7 @@ Item {
         root.liveEpoch = root.liveEpoch + 1
     }
     property int utilityHeight: 112
+    property bool desktopShell: false
     property int nextInstanceSerial: 2
     property string siteRelativePath: "index.html"
     property string webPageUrl: ""
@@ -336,6 +337,7 @@ Item {
     signal showInnerEditorChromeRequested(bool value)
     signal engineTargetRequested(string value)
     signal utilityHeightRequested(int value)
+    signal desktopShellRequested(bool value)
 
     function openSettings() {
         root.settingsOpen = true
@@ -560,7 +562,9 @@ Item {
             return "CRYPTO"
         if (objectType === "TMOG_DESK")
             return "TMOG"
-        if (objectType === "PDF" || objectType === "IMAGE")
+        if (objectType === "DRAW_DESK" || objectType === "IMAGE")
+            return "DRAW"
+        if (objectType === "PDF")
             return "WEB"
         return "CODE"
     }
@@ -583,7 +587,7 @@ Item {
 
     function setHostKind(kind) {
         root.hostKind = kind
-        if (kind === "CRYPTO" || kind === "TMOG" || kind === "MEDIA")
+        if (kind === "CRYPTO" || kind === "TMOG" || kind === "MEDIA" || kind === "DRAW")
             return
         if (
             kind === "CODE"
@@ -1609,13 +1613,21 @@ Item {
         visible: tabs.width > 0
     }
 
+    readonly property string frameKindLabel: root.settingsOpen
+        ? "SETTINGS"
+        : String(root.hostKind || "")
+    readonly property int tabStripLeft:
+        root.frameKindLabel.length > 0
+            ? (20 + root.frameKindLabel.length * 8)
+            : 14
+
     Row {
         id: tabs
         z: 6
         anchors.left: parent.left
-        anchors.leftMargin: 14
+        anchors.leftMargin: root.tabStripLeft
         anchors.top: parent.top
-        anchors.topMargin: -7
+        anchors.topMargin: -8
         height: 18
         spacing: 0
 
@@ -1660,6 +1672,8 @@ Item {
                 Text {
                     id: sepText
                     text: " | "
+                    height: 18
+                    verticalAlignment: Text.AlignVCenter
                     visible: {
                         if (!tabButton.tabVisible)
                             return false
@@ -1676,18 +1690,20 @@ Item {
                         }
                         return false
                     }
-                    color: "#5d6670"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
 
                 Text {
                     id: tabText
                     anchors.left: sepText.visible ? sepText.right : parent.left
+                    height: 18
+                    verticalAlignment: Text.AlignVCenter
                     text: tabButton.title
-                    color: tabButton.tabCurrent ? "#d8dee9" : "#5d6670"
+                    color: tabButton.tabCurrent ? "#d8dee9" : "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: tabButton.tabCurrent
                 }
 
@@ -1697,10 +1713,12 @@ Item {
                     z: 12
                     anchors.left: tabText.right
                     width: visible ? 14 : 0
+                    height: 18
+                    verticalAlignment: Text.AlignVCenter
                     text: " ×"
                     color: "#c8a97e"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     visible: root.isSpawnedObject(tabButton.objectId)
                         || (
                             tabButton.objectType === "WEBSITE"
@@ -1730,6 +1748,10 @@ Item {
         Item {
             objectName: "workspaceSpawnInstanceButton"
             visible: !root.settingsOpen
+                && root.hostKind !== "CRYPTO"
+                && root.hostKind !== "TMOG"
+                && root.hostKind !== "MEDIA"
+                && root.hostKind !== "DRAW"
             width: visible ? spawnTabRow.width : 0
             height: 18
 
@@ -1739,16 +1761,16 @@ Item {
 
                 Text {
                     text: " | "
-                    color: "#5d6670"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
 
                 Text {
                     text: "+"
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
             }
 
@@ -1770,31 +1792,92 @@ Item {
 
                 Text {
                     text: " | "
-                    color: "#5d6670"
+                    color: "#a8b0b8"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
 
                 Text {
                     text: "Settings"
                     color: "#d8dee9"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: true
                 }
 
                 Text {
                     objectName: "settingsTabCloseButton"
                     text: " ×"
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
 
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.closeSettings()
                     }
+                }
+            }
+        }
+    }
+
+    Item {
+        id: codeActions
+        objectName: "workspaceSaveScratchRow"
+        z: 6
+        visible:
+            !root.settingsOpen
+            && root.hostKind === "CODE"
+            && root.currentObjectProvenance === "REAL_UI_STATE"
+            && root.currentObjectType === "CODE_FILE"
+        anchors.right: parent.right
+        anchors.rightMargin: 88
+        anchors.top: parent.top
+        anchors.topMargin: -8
+        height: 18
+        width: scratchSaveRow.implicitWidth + 12
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#161616"
+        }
+
+        Row {
+            id: scratchSaveRow
+            anchors.centerIn: parent
+            spacing: 10
+
+            Text {
+                height: 18
+                verticalAlignment: Text.AlignVCenter
+                text: root.editorDirty ? "SAVE" : "SAVED"
+                color: "#c8cdd4"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.saveScratchBuffer()
+                }
+            }
+
+            Text {
+                objectName: "workspaceSaveScratchButton"
+                height: 18
+                verticalAlignment: Text.AlignVCenter
+                text: "SAVE AS"
+                color: "#c8cdd4"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openSaveAsDialog()
                 }
             }
         }
@@ -1807,22 +1890,32 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 8
-        leftLegend: ""
+        leftLegend: root.frameKindLabel
         rightLegend: root.chatBusy
             ? (
                 root.engineTarget === "GROK_WORKER"
                     ? "STREAMING"
                     : "GENERATING"
             )
-            : (
-                root.currentObjectTitle.length > 0
-                    ? "@current"
-                    : "@workspace"
-            )
+            : (root.hostKind === "CRYPTO"
+                ? ((cryptoPane.item && cryptoPane.item.legend) || "TESTNET")
+                : (
+                    root.currentObjectTitle.length > 0
+                        ? "@current"
+                        : "@workspace"
+                ))
         bottomLeftLegend: ""
         bottomRightLegend: root.editorDirty
-            ? "BUFFER · UNSAVED"
-            : "DISK BASE"
+            ? (
+                root.currentObjectProvenance === "REAL_LOCAL_FILE"
+                    ? "BUFFER · UNSAVED · DISK UNCHANGED"
+                    : "BUFFER · UNSAVED"
+            )
+            : (
+                root.hostKind === "CODE"
+                    ? "BUFFER · DISK BASE"
+                    : "DISK BASE"
+            )
         backgroundColor: "#161616"
         borderColor: root.frameBorder
         radius: root.frameRadius
@@ -1895,6 +1988,7 @@ Item {
                     && root.hostKind !== "CRYPTO"
                     && root.hostKind !== "TMOG"
                     && root.hostKind !== "MEDIA"
+                    && root.hostKind !== "DRAW"
                     && (
                         root.currentObjectProvenance === "REAL_LOCAL_FILE"
                         || (
@@ -1908,88 +2002,17 @@ Item {
                     width: authoringSurface.width
                     height: authoringSurface.height
 
-                    GgFrame {
-                        id: codeFrame
-                        anchors.fill: parent
-                        leftLegend: "CODE · " + root.currentObjectTitle
-                        rightLegend: (
-                            root.currentObjectProvenance === "REAL_UI_STATE"
-                            && root.currentObjectType === "CODE_FILE"
-                        )
-                            ? ""
-                            : (
-                                root.editorDirty
-                                    ? "BUFFER · UNSAVED · DISK UNCHANGED"
-                                    : "BUFFER · DISK BASE"
-                            )
-                        backgroundColor: "#161616"
-                        borderColor: root.showInnerEditorChrome
-                            ? root.frameBorder
-                            : "#161616"
-                        radius: root.frameRadius
-                    }
-
-                    Rectangle {
-                        z: 20
-                        visible:
-                            root.currentObjectProvenance === "REAL_UI_STATE"
-                            && root.currentObjectType === "CODE_FILE"
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.top: parent.top
-                        anchors.topMargin: -7
-                        height: 18
-                        width: scratchSaveRow.implicitWidth + 12
-                        color: "#161616"
-
-                        Row {
-                            id: scratchSaveRow
-                            objectName: "workspaceSaveScratchRow"
-                            anchors.centerIn: parent
-                            spacing: 10
-
-                            Text {
-                                text: root.editorDirty ? "SAVE" : "SAVED"
-                                color: "#8b949e"
-                                font.family: "monospace"
-                                font.pixelSize: 10
-                                font.bold: true
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.saveScratchBuffer()
-                                }
-                            }
-
-                            Text {
-                                objectName: "workspaceSaveScratchButton"
-                                text: "SAVE AS"
-                                color: "#8b949e"
-                                font.family: "monospace"
-                                font.pixelSize: 10
-                                font.bold: true
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.openSaveAsDialog()
-                                }
-                            }
-                        }
-                    }
-
                     ScrollView {
                         id: codeScroll
                         objectName: "workspaceCodeScroll"
                         anchors.fill: parent
                         anchors.leftMargin: 2
                         anchors.rightMargin: 2
-                        anchors.topMargin: 18
-                        anchors.bottomMargin: 10
+                        anchors.topMargin: 8
+                        anchors.bottomMargin: 8
                         clip: true
-                        ScrollBar.horizontal.policy: ScrollBar.AsNeeded
-                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                        ScrollBar.horizontal: GgScrollBar {}
+                        ScrollBar.vertical: GgScrollBar {}
 
                         TextArea {
                             id: codeEditor
@@ -2097,6 +2120,7 @@ Item {
                 hostKind: root.hostKind
                 engineTarget: root.engineTarget
                 utilityHeight: root.utilityHeight
+                desktopShell: root.desktopShell
 
                 onChatWidthRatioChangedByUser: function(value) {
                     root.chatWidthRatioRequested(value)
@@ -2147,6 +2171,10 @@ Item {
 
                 onUtilityHeightChangedByUser: function(value) {
                     root.utilityHeightRequested(value)
+                }
+
+                onDesktopShellChangedByUser: function(value) {
+                    root.desktopShellRequested(value)
                 }
 
                 onCloseRequested: root.closeSettings()
@@ -2216,7 +2244,7 @@ Item {
                         ? "#c98989"
                         : "#8b949e"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     elide: Text.ElideMiddle
                 }
 
@@ -2233,7 +2261,7 @@ Item {
                         text: "EDIT IN CODE"
                         color: "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
@@ -2245,7 +2273,7 @@ Item {
                         text: root.sitePreviewRunning ? "STOP PREVIEW" : "PREVIEW"
                         color: root.sitePreviewRunning ? "#d8dee9" : "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         font.bold: root.sitePreviewRunning
                         MouseArea {
                             anchors.fill: parent
@@ -2258,7 +2286,7 @@ Item {
                         text: "IMPORT SQL"
                         color: "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
@@ -2270,7 +2298,7 @@ Item {
                         text: "IMPORT ZIP"
                         color: "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
@@ -2282,7 +2310,7 @@ Item {
                         text: "IMPORT FOLDER"
                         color: "#c8a97e"
                         font.family: "monospace"
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
@@ -2301,36 +2329,47 @@ Item {
                 }
             }
 
-            CryptoSurface {
+            Loader {
                 id: cryptoPane
                 objectName: "workspaceCryptoPane"
                 z: 20
                 anchors.fill: parent
-                visible:
-                    !root.settingsOpen
-                    && root.hostKind === "CRYPTO"
-                surfaceHost: root.scratchHost()
-                frameBorder: root.frameBorder
-                frameRadius: root.frameRadius
-                onWalletLabelChanged: function(label) {
-                    root.cryptoWalletLabel = label
-                    var win = Window.window
-                    if (win)
-                        win.cryptoStatusJson = cryptoPane.statusJson
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "CRYPTO"
+                visible: active
+                sourceComponent: Component {
+                    CryptoSurface {
+                        objectName: "workspaceCryptoPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                        onWalletLabelChanged: function(label) {
+                            root.cryptoWalletLabel = label
+                            var win = Window.window
+                            if (win)
+                                win.cryptoStatusJson = cryptoPane.item
+                                    ? cryptoPane.item.statusJson
+                                    : win.cryptoStatusJson
+                        }
+                    }
                 }
             }
 
-            TmogSurface {
+            Loader {
                 id: tmogPane
                 objectName: "workspaceTmogPane"
                 z: 20
                 anchors.fill: parent
-                visible:
-                    !root.settingsOpen
-                    && root.hostKind === "TMOG"
-                surfaceHost: root.scratchHost()
-                frameBorder: root.frameBorder
-                frameRadius: root.frameRadius
+                active: !root.settingsOpen && root.hostKind === "TMOG"
+                visible: active
+                sourceComponent: Component {
+                    TmogSurface {
+                        objectName: "workspaceTmogPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
             }
 
             MediaSurface {
@@ -2344,6 +2383,23 @@ Item {
                 surfaceHost: root.scratchHost()
                 frameBorder: root.frameBorder
                 frameRadius: root.frameRadius
+            }
+
+            Loader {
+                id: drawPane
+                objectName: "workspaceDrawPane"
+                z: 20
+                anchors.fill: parent
+                active: !root.settingsOpen && root.hostKind === "DRAW"
+                visible: active
+                sourceComponent: Component {
+                    DrawSurface {
+                        objectName: "workspaceDrawPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
             }
 
             Item {
@@ -2384,7 +2440,7 @@ Item {
                             anchors.fill: parent
                             spacing: 6
 
-                            TextField {
+                            GgField {
                                 id: tabBrowseBar
                                 objectName: "workspaceWebAddress"
                                 width: parent.width
@@ -2393,14 +2449,6 @@ Item {
                                     ? ""
                                     : webTab.sourcePath
                                 placeholderText: "https://"
-                                color: "#e6e6e6"
-                                font.family: "monospace"
-                                font.pixelSize: 12
-                                background: Rectangle {
-                                    color: "#161616"
-                                    border.color: root.frameBorder
-                                    border.width: 1
-                                }
                                 onAccepted: root.goBrowse(tabBrowseBar.text)
                             }
 
@@ -2474,7 +2522,7 @@ Item {
                         + " · REAL_UI_STATE · HOSTING NOT AVAILABLE"
                     color: "#c8a97e"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
 
                 Text {
@@ -2484,7 +2532,7 @@ Item {
                         "No X11/Wayland window embed yet. "
                         + "This is not a fake browser or game. "
                         + "The open program fills this workspace box when hosted."
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     wrapMode: Text.WordWrap
                     font.pixelSize: 12
                 }
@@ -2499,6 +2547,7 @@ Item {
                     && root.hostKind !== "CRYPTO"
                     && root.hostKind !== "TMOG"
                     && root.hostKind !== "MEDIA"
+                    && root.hostKind !== "DRAW"
                     && root.currentObjectProvenance === "SYNTHETIC_UI_FIXTURE"
 
                 Text {
@@ -2519,7 +2568,7 @@ Item {
                         + " · DEMO / SAMPLE"
                     color: "#c8a97e"
                     font.family: "monospace"
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                 }
 
                 Text {
@@ -2530,7 +2579,7 @@ Item {
                         + "for this SAMPLE object.\n"
                         + "Synthetic fixtures remain blocked from real "
                         + "@current context."
-                    color: "#8b949e"
+                    color: "#c8cdd4"
                     wrapMode: Text.WordWrap
                     font.pixelSize: 12
                 }
@@ -2562,9 +2611,9 @@ Item {
 
         Text {
             text: "CODE"
-            color: root.hostKind === "CODE" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "CODE" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "CODE"
 
             MouseArea {
@@ -2576,16 +2625,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "TERMINAL"
-            color: root.hostKind === "TERMINAL" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "TERMINAL" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "TERMINAL"
 
             MouseArea {
@@ -2597,16 +2646,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "WEB"
-            color: root.hostKind === "WEB" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "WEB" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "WEB"
 
             MouseArea {
@@ -2618,16 +2667,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "EXTERNAL"
-            color: root.hostKind === "EXTERNAL" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "EXTERNAL" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "EXTERNAL"
 
             MouseArea {
@@ -2639,16 +2688,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "SITE"
-            color: root.hostKind === "SITE" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "SITE" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "SITE"
 
             MouseArea {
@@ -2660,16 +2709,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "CRYPTO"
-            color: root.hostKind === "CRYPTO" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "CRYPTO" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "CRYPTO"
 
             MouseArea {
@@ -2681,16 +2730,16 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "TMOG"
-            color: root.hostKind === "TMOG" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "TMOG" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "TMOG"
 
             MouseArea {
@@ -2702,22 +2751,43 @@ Item {
 
         Text {
             text: " | "
-            color: "#5d6670"
+            color: "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Text {
             text: "MEDIA"
-            color: root.hostKind === "MEDIA" ? "#d8dee9" : "#5d6670"
+            color: root.hostKind === "MEDIA" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: root.hostKind === "MEDIA"
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("MEDIA")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            text: "DRAW"
+            color: root.hostKind === "DRAW" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "DRAW"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("DRAW")
             }
         }
     }

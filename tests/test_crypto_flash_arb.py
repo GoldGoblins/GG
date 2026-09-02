@@ -34,6 +34,13 @@ def main() -> int:
         raise AssertionError("equal pools must revert")
     if dead.get("error") != "NO_PROFIT":
         raise AssertionError("error tag " + str(dead.get("error")))
+    crypto_flash_arb.reset_pools()
+    bought = crypto_flash_arb.swap_usd_for_sol(10 * 1_000_000)
+    if int(bought.get("sol") or 0) <= 0:
+        raise AssertionError("cpmm buy " + json.dumps(bought))
+    sold = crypto_flash_arb.swap_sol_for_usd(int(bought["sol"]))
+    if int(sold.get("usd") or 0) <= 0:
+        raise AssertionError("cpmm sell " + json.dumps(sold))
     print("CRYPTO_FLASH_ARB_TEST=PASS")
     return 0
 

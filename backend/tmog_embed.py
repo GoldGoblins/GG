@@ -10,7 +10,7 @@ from PySide6.QtGui import QGuiApplication, QWindow
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtWidgets import QApplication, QWidget
 
-from backend.grok_tui_embed import _descendants
+from backend.grok_tui_embed import cached_quick_item, _descendants, release_embed_windows
 from backend.tmog_contract import WINDOW_TOKENS, resolve_appimage
 
 XPROP = Path("/usr/bin/xprop")
@@ -57,11 +57,13 @@ class TmogEmbed(QObject):
         self._holder: QWidget | None = None
         self._foreign: QWindow | None = None
         self._timer = QTimer(self)
-        self._timer.setInterval(80)
+        self._timer.setInterval(250)
         self._timer.timeout.connect(self._sync_geometry)
         self._attach_tries = 0
         self._attached = False
         self._error = ""
+        self._geo: tuple[int, int, int, int] | None = None
+        self._hole: QQuickItem | None = None
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -114,23 +116,23 @@ class TmogEmbed(QObject):
     def hide(self) -> None:
         self._timer.stop()
         holder = self._holder
-        if holder is not None:
+        if holder is None:
+            return
+        try:
             holder.hide()
+        except RuntimeError:
+            self._holder = None
 
     def stop(self) -> None:
         self._timer.stop()
         self._attached = False
-        foreign = self._foreign
-        self._foreign = None
-        if foreign is not None:
-            foreign.setParent(None)
-        holder = self._holder
-        self._holder = None
-        if holder is not None:
-            holder.hide()
-            holder.deleteLater()
         proc = self._proc
         self._proc = None
+        foreign = self._foreign
+        self._foreign = None
+        holder = self._holder
+        self._holder = None
+        release_embed_windows(foreign, holder)
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -156,9 +158,13 @@ class TmogEmbed(QObject):
             return
         self._error = "TMOG_EMBED_TIMEOUT"
 
+    def _hole_item(self) -> QQuickItem | None:
+        self._hole = cached_quick_item(self._root, HOLE_NAME, self._hole)
+        return self._hole
+
     def _main_xid(self) -> int:
         window = QGuiApplication.focusWindow()
-        item = self._root.findChild(QQuickItem, HOLE_NAME)
+        item = self._hole_item()
         if item is not None and item.window() is not None:
             window = item.window()
         if window is None:
@@ -204,7 +210,7 @@ class TmogEmbed(QObject):
         return True
 
     def _host_rect(self) -> QRect | None:
-        item = self._root.findChild(QQuickItem, HOLE_NAME)
+        item = self._hole_item()
         if item is None or not item.isVisible():
             return None
         width = float(item.width())
@@ -225,8 +231,13 @@ class TmogEmbed(QObject):
             return
         rect = self._host_rect()
         if rect is None:
+            self._geo = None
             holder.hide()
             return
+        key = (rect.x(), rect.y(), rect.width(), rect.height())
+        if holder.isVisible() and self._geo == key:
+            return
+        self._geo = key
         holder.setGeometry(rect)
         if not holder.isVisible():
             holder.show()

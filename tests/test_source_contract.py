@@ -379,6 +379,7 @@ def main() -> int:
                      'subprocess',
                      'sys',
                      'tarfile',
+                     'time',
                      'uuid',
                  },
         "Unexpected launcher import roots: " + repr(sorted(roots)),

@@ -29,8 +29,9 @@ Item {
         anchors.bottomMargin: 12
         spacing: 8
 
-        Switch {
+        GgSwitch {
             id: demoSwitch
+            width: parent.width
             text: "Show DEMO / SAMPLE fixtures"
             checked: root.showDemoFixtures
 
@@ -44,13 +45,14 @@ Item {
             width: parent.width
             text: "LIVE alpha hides synthetic fixtures by default. "
                 + "This switch exposes legacy examples only for comparison."
-            color: "#8b949e"
+            color: "#c8cdd4"
             wrapMode: Text.WordWrap
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
-        Switch {
+        GgSwitch {
             id: productSourceSwitch
+            width: parent.width
             text: "Show product source files"
             checked: root.showProductSourceTabs
 
@@ -65,9 +67,9 @@ Item {
             text: "ContextComposer.qml and the other desk papers are "
                 + "internal sources. They stay off the CODE tabs unless "
                 + "this is on."
-            color: "#8b949e"
+            color: "#c8cdd4"
             wrapMode: Text.WordWrap
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
     }
 }

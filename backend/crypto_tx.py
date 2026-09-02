@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from typing import Any
 
 from backend.crypto_keys import b58decode, b58encode, load_test_pubkey, sign_message
@@ -63,41 +64,98 @@ def signed_transfer_bytes(
     return compact_u16(1) + sig + message
 
 
+def confirm_signature(rpc_call, sig: str, timeout_s: float = 8.0) -> bool:
+    token = str(sig or "")
+    if not token:
+        return False
+    deadline = time.monotonic() + max(0.2, float(timeout_s))
+    while time.monotonic() < deadline:
+        payload = rpc_call(
+            "getSignatureStatuses",
+            [[token], {"searchTransactionHistory": True}],
+        )
+        result = payload.get("result") if isinstance(payload, dict) else None
+        value = result.get("value") if isinstance(result, dict) else None
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            row = value[0]
+            if row.get("err"):
+                return False
+            status = str(row.get("confirmationStatus") or "")
+            if status in ("confirmed", "finalized"):
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _pad32(raw: bytes) -> bytes:
+    if len(raw) < 32:
+        return (b"\x00" * (32 - len(raw))) + raw
+    if len(raw) > 32:
+        return raw[-32:]
+    return raw
+
+
 def send_self_transfer(rpc_call, lamports: int) -> dict[str, Any]:
     pubkey = load_test_pubkey()
     if not pubkey:
         raise RuntimeError("CRYPTO_NO_SIGNER")
-    from_pub = b58decode(pubkey)
-    if len(from_pub) != 32:
-        from_pub = from_pub[-32:]
-    payload = rpc_call(
-        "getLatestBlockhash",
-        [{"commitment": "finalized"}],
-    )
-    result = payload.get("result") if isinstance(payload, dict) else None
-    value = result.get("value") if isinstance(result, dict) else None
-    blockhash = str((value or {}).get("blockhash") or "")
-    if not blockhash:
-        raise RuntimeError("CRYPTO_BLOCKHASH")
-    raw_hash = b58decode(blockhash)
-    if len(raw_hash) != 32:
-        raw_hash = raw_hash[-32:]
-    tx = signed_transfer_bytes(from_pub, from_pub, int(lamports), raw_hash)
-    encoded = base64.b64encode(tx).decode("ascii")
-    sent = rpc_call(
-        "sendTransaction",
-        [encoded, {"encoding": "base64", "skipPreflight": False}],
-    )
-    if not isinstance(sent, dict):
-        raise RuntimeError("CRYPTO_RPC")
-    if sent.get("error"):
-        fault = sent["error"]
-        msg = str(fault.get("message") if isinstance(fault, dict) else fault)
-        raise RuntimeError(msg)
-    sig = str(sent.get("result") or "")
-    return {
-        "txid": sig,
-        "wallet": pubkey,
-        "blockhash": blockhash,
-        "lamports": int(lamports),
-    }
+    from_pub = _pad32(b58decode(pubkey))
+    last_fault = "CRYPTO_RPC"
+    for attempt in range(6):
+        payload = rpc_call(
+            "getLatestBlockhash",
+            [{"commitment": "processed"}],
+        )
+        if not isinstance(payload, dict):
+            last_fault = "CRYPTO_RPC"
+            time.sleep(0.2)
+            continue
+        if payload.get("error"):
+            last_fault = "CRYPTO_BLOCKHASH"
+            time.sleep(0.2)
+            continue
+        result = payload.get("result")
+        value = result.get("value") if isinstance(result, dict) else None
+        blockhash = str((value or {}).get("blockhash") or "")
+        if not blockhash:
+            last_fault = "CRYPTO_BLOCKHASH"
+            time.sleep(0.2)
+            continue
+        raw_hash = _pad32(b58decode(blockhash))
+        tx = signed_transfer_bytes(from_pub, from_pub, int(lamports), raw_hash)
+        encoded = base64.b64encode(tx).decode("ascii")
+        sent = rpc_call(
+            "sendTransaction",
+            [
+                encoded,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": True,
+                    "maxRetries": 5,
+                    "preflightCommitment": "processed",
+                },
+            ],
+        )
+        if not isinstance(sent, dict):
+            last_fault = "CRYPTO_RPC"
+            time.sleep(0.2)
+            continue
+        if sent.get("error"):
+            fault = sent["error"]
+            msg = str(fault.get("message") if isinstance(fault, dict) else fault)
+            last_fault = msg
+            if "blockhash" in msg.lower() and attempt < 5:
+                continue
+            raise RuntimeError(msg)
+        sig = str(sent.get("result") or "")
+        if not sig:
+            last_fault = "CRYPTO_RPC"
+            continue
+        confirm_signature(rpc_call, sig)
+        return {
+            "txid": sig,
+            "wallet": pubkey,
+            "blockhash": blockhash,
+            "lamports": int(lamports),
+        }
+    raise RuntimeError(last_fault)

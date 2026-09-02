@@ -103,12 +103,16 @@ Item {
         id: frame
         anchors.fill: root.fillHost ? parent : undefined
         width: root.fillHost ? undefined : root.width
-        leftLegend: root.objectType + " · " + root.title
-        rightLegend: root.syntheticFixture
-            ? "DEMO · SAMPLE · NO EXECUTION"
-            : root.activityState
+        leftLegend: root.fillHost ? "" : (root.objectType + " · " + root.title)
+        rightLegend: root.fillHost
+            ? ""
+            : (
+                root.syntheticFixture
+                    ? "DEMO · SAMPLE · NO EXECUTION"
+                    : root.activityState
+            )
         backgroundColor: "#1c1c1c"
-        borderColor: "#6a6a6a"
+        borderColor: root.fillHost ? "#1c1c1c" : "#6a6a6a"
         rightLegendColor: root.syntheticFixture ? "#d2b48c" : "#8b949e"
 
         Flickable {
@@ -164,8 +168,7 @@ Item {
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
+            ScrollBar.vertical: GgScrollBar {
             }
         }
 
@@ -188,19 +191,9 @@ Item {
                 verticalAlignment: Text.AlignVCenter
             }
 
-            TextField {
+            GgField {
                 id: commandInput
                 width: parent.width - 18
-                color: "#e6e6e6"
-                font.family: "monospace"
-                font.pixelSize: 12
-                selectByMouse: true
-                background: Rectangle {
-                    color: "#161616"
-                    border.width: 1
-                    border.color: "#6a6a6a"
-                    radius: 2
-                }
                 Keys.onReturnPressed: root.sendTerminalLine()
                 Keys.onEnterPressed: root.sendTerminalLine()
             }
@@ -252,7 +245,7 @@ Item {
             text: "fixture provenance: SYNTHETIC_UI_FIXTURE"
             color: "#7d7368"
             font.family: "monospace"
-            font.pixelSize: 8
+            font.pixelSize: 12
         }
     }
 }

@@ -8,7 +8,7 @@ Item {
 
     property color accentColor: "#8a8a8a"
     property color frameBorder: "#6a6a6a"
-    property int frameRadius: 2
+    property int frameRadius: 4
     signal accentColorChangedByUser(color value)
     signal frameBorderChangedByUser(color value)
     signal frameRadiusChangedByUser(int value)
@@ -55,7 +55,7 @@ Item {
             text: "Frame border · " + String(root.frameBorder)
             color: "#e6e6e6"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Row {
@@ -84,7 +84,7 @@ Item {
             }
         }
 
-        Slider {
+        GgSlider {
             id: borderSlider
             width: parent.width
             from: 64
@@ -102,14 +102,14 @@ Item {
             text: "Corner radius · " + String(root.frameRadius) + " px"
             color: "#e6e6e6"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
-        Slider {
+        GgSlider {
             id: radiusSlider
             width: parent.width
             from: 0
-            to: 6
+            to: 8
             stepSize: 1
             value: root.frameRadius
 
@@ -124,7 +124,7 @@ Item {
             text: "Accent · telemetry and status only, not frame borders"
             color: "#e6e6e6"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
         Row {

@@ -28,6 +28,8 @@ def main() -> int:
     assert parse_surface_intent("musik") == "MEDIA"
     assert parse_surface_intent("öppna radion") == "MEDIA"
     assert parse_surface_intent("öppna emulatorn") == "MEDIA"
+    assert parse_surface_intent("draw") == "DRAW"
+    assert parse_surface_intent("öppna gimp") == "DRAW"
     assert parse_surface_intent("terminal") == "TERMINAL"
     assert parse_surface_intent("Hej") == ""
     assert parse_surface_intent("läs main.py") == ""

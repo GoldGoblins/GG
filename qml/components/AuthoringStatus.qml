@@ -9,15 +9,15 @@ Row {
 
     Text {
         text: "LIVE AID · " + root.status
-        color: "#8b949e"
+        color: "#c8cdd4"
         font.family: "monospace"
-        font.pixelSize: 9
+        font.pixelSize: 12
         font.bold: true
     }
     Text {
         text: "diagnostics " + root.diagnosticCount + " · unresolved " + root.unresolvedCount
         color: "#7d8590"
         font.family: "monospace"
-        font.pixelSize: 9
+        font.pixelSize: 12
     }
 }

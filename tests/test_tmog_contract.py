@@ -45,8 +45,19 @@ def main() -> int:
     payload = snapshot()
     if payload.get("schema") != SCHEMA:
         raise AssertionError("snapshot schema")
+    json.dumps(payload, separators=(",", ":"))
     if not isinstance(payload.get("processes"), list):
         raise AssertionError("process list missing")
+    if not any(str(row.get("comm") or "") for row in payload["processes"]):
+        raise AssertionError("process comm still empty after two-pass fill")
+    light = snapshot("PERFORMANCE")
+    if light.get("processes"):
+        raise AssertionError("performance page still walks the process table")
+    if light.get("connections"):
+        raise AssertionError("performance page still parses tcp tables")
+    summary = snapshot("SUMMARY")
+    if not summary.get("processes"):
+        raise AssertionError("summary page dropped top processes")
     if int(payload.get("process_count") or 0) < 1:
         raise AssertionError("host process count empty")
     if int(payload.get("mem_total_kb") or 0) < 1:
@@ -60,7 +71,11 @@ def main() -> int:
     for row in payload["processes"]:
         if "pid" not in row or "comm" not in row or "user" not in row:
             raise AssertionError("process row incomplete")
+        if "tombstone" not in row:
+            raise AssertionError("process tombstone flag missing")
         break
+    if "disk_led" not in payload:
+        raise AssertionError("blinkendisk missing")
     if "GiB" not in format_kib(2_097_152) and "MiB" not in format_kib(2048):
         raise AssertionError("kib format")
 
@@ -96,6 +111,12 @@ def main() -> int:
         raise AssertionError("tmog pane objectName")
     if 'objectName: "workspaceTmogHole"' not in qml:
         raise AssertionError("tmog hole missing")
+    if "interval: 1000" in qml:
+        raise AssertionError("tmog still snapshots every second")
+    if "tmogSnapshot(root.page)" not in qml:
+        raise AssertionError("tmog still dumps every page on each tick")
+    if 'leftLegend: "TMOG"' in qml:
+        raise AssertionError("tmog pane still nests a TMOG GgFrame inside the workspace frame")
     for page in (
         '"SUMMARY"',
         '"PERFORMANCE"',
@@ -111,6 +132,15 @@ def main() -> int:
     ):
         if page not in qml:
             raise AssertionError("tmog page missing: " + page)
+
+    card = (PROJECT / "qml" / "components" / "TmogCard.qml").read_text(encoding="utf-8")
+    if "property var tabs" not in card or "signal tabChosen" not in card:
+        raise AssertionError("tmog card tabs missing")
+    spark = (PROJECT / "qml" / "components" / "TmogSpark.qml").read_text(encoding="utf-8")
+    if "property var marks" not in spark:
+        raise AssertionError("spark marks missing")
+    if "property bool fromZero: true" not in spark:
+        raise AssertionError("spark fromZero default must stay true for meters")
 
     print("TMOG_CONTRACT_TEST=PASS")
     return 0

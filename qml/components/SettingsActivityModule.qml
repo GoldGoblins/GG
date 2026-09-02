@@ -24,8 +24,8 @@ Item {
         text: "Activity may show real state, elapsed time and verified "
             + "evidence. Fabricated percentages remain forbidden when "
             + "there is no real denominator."
-        color: "#8b949e"
+        color: "#c8cdd4"
         wrapMode: Text.WordWrap
-        font.pixelSize: 10
+        font.pixelSize: 12
     }
 }

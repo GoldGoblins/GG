@@ -686,7 +686,7 @@ def main() -> int:
         "function formatElapsed(",
         "function formatSegment(",
         'text: ":: " + root.statusText',
-        "interval: 10",
+        "interval: 100",
         "hundredths",
         "SequentialAnimation",
     ):

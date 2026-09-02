@@ -356,6 +356,12 @@ def main() -> int:
         str(workspace.property("hostKind") or "") == "MEDIA",
         "Host kind footer did not select MEDIA.",
     )
+    set_kind("DRAW")
+    app.processEvents()
+    require(
+        str(workspace.property("hostKind") or "") == "DRAW",
+        "Host kind footer did not select DRAW.",
+    )
     require(
         str(workspace.property("currentObjectId") or "") == "ws.site.current",
         "SITE host kind did not focus the site project.",

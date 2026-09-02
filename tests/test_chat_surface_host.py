@@ -117,10 +117,38 @@ def main() -> int:
         raise AssertionError("resume grok tui missing")
     if "GIT_TERMINAL_PROMPT" not in src:
         raise AssertionError("TUI must not wait on git credentials")
-    if "setInterval(2000)" not in src:
+    if "setInterval(15000)" not in src:
         raise AssertionError("wallet timer still too hot")
+    if "_PTY_READ_BUDGET" not in src or "def _drain_pty" not in src:
+        raise AssertionError("PTY output still parsed on every socket tick")
+    if "_PTY_DRAIN_MS = 16" in src:
+        raise AssertionError("PTY drain still at 16ms")
+    if "cached_quick_item" not in (
+        PROJECT / "backend" / "grok_tui_embed.py"
+    ).read_text(encoding="utf-8"):
+        raise AssertionError("embed hole cache helper missing")
+    grid_src = (PROJECT / "backend" / "terminal_grid.py").read_text(encoding="utf-8")
+    if "class _VtHost" not in grid_src or "QThread" not in grid_src:
+        raise AssertionError("native TUI parser is still on the GUI thread")
+    if "QThread(self)" in grid_src:
+        raise AssertionError("VT QThread still dies with the Quick item")
+    attach = src[src.index("def _attach_native_tui") : src.index("def _on_native_tui_ready")]
+    if "_stop_worker" not in attach:
+        raise AssertionError("TUI reattach still deleteLater a running QThread")
+    if "mediaLiveStatus" not in src:
+        raise AssertionError("mediaLiveStatus slot missing")
+    if "mediaStateChanged" not in src:
+        raise AssertionError("mediaStateChanged signal missing")
+    if "cryptoRailStatus" not in src:
+        raise AssertionError("rail status slot missing")
     if "cryptoTickTrader" not in src or "cryptoArmTrader" not in src:
         raise AssertionError("swing trader slots missing")
+    if "cryptoBacktestTrader" not in src:
+        raise AssertionError("trader backtest slot missing")
+    if "cryptoSetBook" not in src:
+        raise AssertionError("book switch slot missing")
+    if "_crypto_idle_tick" not in src or "setInterval(60000)" not in src:
+        raise AssertionError("nonstop crypto ticker missing")
     if "cryptoFlashArb" not in src:
         raise AssertionError("flash arb slot missing")
     if "cryptoEvalSignals" not in src or "cryptoArmBot" not in src:

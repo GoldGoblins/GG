@@ -42,6 +42,14 @@ def main() -> int:
     event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
     if mapped(event) != "\x1b[A":
         raise AssertionError("arrow mapping failed")
+    src = (PROJECT / "backend" / "terminal_grid.py").read_text(encoding="utf-8")
+    if "class _VtHost" not in src or "QueuedConnection" not in src:
+        raise AssertionError("TUI parse still runs on the GUI thread")
+    if "QThread(self)" in src:
+        raise AssertionError("VT QThread is still parented to the Quick item")
+    if "def itemChange" not in src or "aboutToQuit" not in src:
+        raise AssertionError("VT thread is not stopped when the scene goes away")
+    grid._stop_worker()
     _ = app
     print("TERMINAL_GRID_TEST=PASS")
     return 0

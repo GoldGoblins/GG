@@ -3,10 +3,12 @@ import QtQuick
 Item {
     id: root
     property var values: []
+    property var marks: []
     property color stroke: "#8db89a"
     property color fill: "#1c2a22"
     property color grid: "#242424"
     property real yMax: 0
+    property bool fromZero: true
 
     Canvas {
         id: plot
@@ -40,21 +42,35 @@ Item {
             if (!pts || pts.length < 1)
                 return
             var maxv = Number(root.yMax || 0)
+            var minv = root.fromZero ? 0 : Number.POSITIVE_INFINITY
             var i
             for (i = 0; i < pts.length; i++) {
                 var v = Number(pts[i] || 0)
                 if (v > maxv)
                     maxv = v
+                if (!root.fromZero && v < minv)
+                    minv = v
             }
-            if (maxv <= 0)
-                maxv = 1
+            if (minv === Number.POSITIVE_INFINITY)
+                minv = 0
+            if (maxv <= minv)
+                maxv = minv + 1
+            if (!root.fromZero) {
+                var pad = (maxv - minv) * 0.12
+                if (pad <= 0)
+                    pad = Math.abs(maxv) * 0.02 || 1
+                minv -= pad
+                maxv += pad
+            }
+            function yAt(val) {
+                return h - ((Number(val || 0) - minv) / (maxv - minv)) * (h - 8) - 4
+            }
             var last = pts.length < 2 ? 2 : pts.length
             ctx.beginPath()
             ctx.moveTo(0, h)
             for (i = 0; i < pts.length; i++) {
                 var px = (pts.length === 1 ? 1 : i / (last - 1)) * w
-                var py = h - (Number(pts[i] || 0) / maxv) * (h - 3) - 1
-                ctx.lineTo(px, py)
+                ctx.lineTo(px, yAt(pts[i]))
             }
             ctx.lineTo(w, h)
             ctx.closePath()
@@ -63,7 +79,7 @@ Item {
             ctx.beginPath()
             for (i = 0; i < pts.length; i++) {
                 var sx = (pts.length === 1 ? 1 : i / (last - 1)) * w
-                var sy = h - (Number(pts[i] || 0) / maxv) * (h - 3) - 1
+                var sy = yAt(pts[i])
                 if (i === 0)
                     ctx.moveTo(sx, sy)
                 else
@@ -72,11 +88,41 @@ Item {
             ctx.strokeStyle = root.stroke
             ctx.lineWidth = 1.4
             ctx.stroke()
+            var marks = root.marks || []
+            var n = pts.length
+            for (i = 0; i < marks.length; i++) {
+                var m = marks[i] || {}
+                var mi = Number(m.i)
+                if (mi < 0)
+                    continue
+                if (mi > n - 1)
+                    mi = n - 1
+                var mx = (n <= 1 ? 1 : mi / (last - 1)) * w
+                var my = yAt(m.px !== undefined && m.px !== null && Number(m.px) > 0
+                    ? m.px
+                    : pts[Math.round(mi)])
+                var buy = String(m.side || "") === "buy"
+                ctx.beginPath()
+                if (buy) {
+                    ctx.moveTo(mx, my - 6)
+                    ctx.lineTo(mx - 4.5, my + 3)
+                    ctx.lineTo(mx + 4.5, my + 3)
+                } else {
+                    ctx.moveTo(mx, my + 6)
+                    ctx.lineTo(mx - 4.5, my - 3)
+                    ctx.lineTo(mx + 4.5, my - 3)
+                }
+                ctx.closePath()
+                ctx.fillStyle = buy ? "#8db89a" : "#c98989"
+                ctx.fill()
+            }
         }
     }
 
     onValuesChanged: plot.requestPaint()
+    onMarksChanged: plot.requestPaint()
     onYMaxChanged: plot.requestPaint()
+    onFromZeroChanged: plot.requestPaint()
     onWidthChanged: plot.requestPaint()
     onHeightChanged: plot.requestPaint()
 }

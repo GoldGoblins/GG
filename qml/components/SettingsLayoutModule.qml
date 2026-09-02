@@ -9,12 +9,14 @@ Item {
     property real chatWidthRatio: 0.31
     property int telemetryWidth: 168
     property int utilityHeight: 112
+    property bool desktopShell: false
 
     signal chatWidthRatioChangedByUser(real value)
     signal telemetryWidthChangedByUser(int value)
     signal utilityHeightChangedByUser(int value)
+    signal desktopShellChangedByUser(bool value)
 
-    implicitHeight: 248
+    implicitHeight: 328
 
     GgFrame {
         anchors.fill: parent
@@ -38,10 +40,10 @@ Item {
                 + "%"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
-        Slider {
+        GgSlider {
             id: chatSlider
             width: parent.width
             from: 0.24
@@ -61,10 +63,10 @@ Item {
                 + " px"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
-        Slider {
+        GgSlider {
             id: telemetrySlider
             width: parent.width
             from: 140
@@ -84,10 +86,10 @@ Item {
                 + " px"
             color: "#d8dee9"
             font.family: "monospace"
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
 
-        Slider {
+        GgSlider {
             id: utilitySlider
             width: parent.width
             from: 72
@@ -101,13 +103,30 @@ Item {
                 )
         }
 
+        GgSwitch {
+            id: desktopShellSwitch
+            text: "Interactive desktop"
+            checked: root.desktopShell
+            onToggled: root.desktopShellChangedByUser(desktopShellSwitch.checked)
+        }
+
+        Text {
+            width: parent.width
+            text: "Fills the work area under other windows, like a live wallpaper. "
+                + "SETTINGS stays in the header. Click DESKTOP there to return to a window. "
+                + "Turn off Plasma desktop icons if they steal clicks."
+            color: "#c8cdd4"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 12
+        }
+
         Text {
             width: parent.width
             text: "Center Workspace keeps the remaining width. "
                 + "Media / Utilities is a separate sibling surface."
-            color: "#8b949e"
+            color: "#c8cdd4"
             wrapMode: Text.WordWrap
-            font.pixelSize: 10
+            font.pixelSize: 12
         }
     }
 }
