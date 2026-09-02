@@ -122,6 +122,10 @@ def main() -> int:
         raise AssertionError("live media status path missing")
     if "_CLIAMP_POLL_TIMEOUT" not in host_src or "_catalog_memo" not in host_src:
         raise AssertionError("media live poll still rebuilds catalog / blocks on ipc")
+    if "start_live_pump" not in host_src or "live_status_json" not in host_src:
+        raise AssertionError("cliamp live ipc still runs on the GUI thread")
+    if "_live_pump_loop" not in host_src or "_cached_cliamp" not in host_src:
+        raise AssertionError("gui live status still waits on the cliamp socket")
     if "--buffer-ms" not in host_src:
         raise AssertionError("cliamp radio buffer missing")
     if "_maybe_resume_stream" not in host_src or "_cliamp_buffered" not in host_src:
@@ -203,6 +207,22 @@ def main() -> int:
         raise AssertionError("utility strip still 220ms-polls any playing backend")
     if "running: root.liveMeters" not in utility:
         raise AssertionError("utility strip still polls while idle")
+    if "function applyChrome(" not in utility:
+        raise AssertionError("utility strip cannot follow RADIO play from the workspace")
+    if "running: !root.liveMeters" not in utility:
+        raise AssertionError("utility strip never resyncs mode after a missed mediaStateChanged")
+    if "function refreshMeters(" not in utility:
+        raise AssertionError("meter paint still rewrites chrome statusJson")
+    if "interval: 33" in utility:
+        raise AssertionError("utility meters still fight the GUI thread at 33ms")
+    if "interval: 125" in utility:
+        raise AssertionError("spectrum meters still lag at 125ms")
+    if "spectrumSegs: 18" not in utility:
+        raise AssertionError("spectrum lost the stacked LED dots")
+    if "for (s = 0; s < segs; s++)" not in utility:
+        raise AssertionError("spectrum paints solid bars instead of LED dots")
+    if "root.ledColor(level)" in utility:
+        raise AssertionError("spectrum recolors whole bars instead of per-LED height")
     if "playing ? 1" in utility:
         raise AssertionError("live streams still paint a full gold progress bar")
     if 'objectName: "utilityTimeline"' not in utility:
@@ -224,8 +244,14 @@ def main() -> int:
         raise AssertionError("media host seek/clock missing")
     if "_CLIAMP_BUFFER_MS = 750" in host_src:
         raise AssertionError("cliamp stream buffer still 750ms")
+    if "_CLIAMP_BUFFER_MS = 3000" in host_src:
+        raise AssertionError("cliamp stream buffer still 3000ms")
     if "_LIVE_TTL" not in host_src:
         raise AssertionError("cliamp live status still uncached")
+    if "def publish_live" not in host_src:
+        raise AssertionError("play/mode still does not publish live meter JSON")
+    if "media_host.publish_live" not in play_src:
+        raise AssertionError("mediaStateChanged still fires before live JSON exists")
     embed_src = (PROJECT / "backend" / "media_embed.py").read_text(encoding="utf-8")
     if "self._geo" not in embed_src:
         raise AssertionError("media embed resizes the foreign window every tick")

@@ -7,7 +7,7 @@ Item {
     id: root
 
     property bool showOpenTabInInput: false
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     signal showOpenTabInInputChangedByUser(bool value)
     signal engineTargetChangedByUser(string value)
 

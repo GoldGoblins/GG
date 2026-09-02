@@ -268,13 +268,14 @@ def main() -> int:
         'objectName: "topBarWalletChip"',
         "body.width * root.alphaChatWidthRatio",
         "width: root.alphaTelemetryWidth",
-        'property string engineTarget: "LOCAL_QWEN"',
+        'property string engineTarget: "GROK_TUI"',
         '? "CONNECTED"',
         "parseSurfaceIntent(text)",
         "function beginGrokWorkerStream(",
         'objectName: "grokTuiHost"',
         "GrokTuiHole {",
         "GrokWorkStream {",
+        "Loader {",
         'rightLegend: "BRIDGE · CONNECTED"',
     ):
         require(
@@ -329,7 +330,7 @@ def main() -> int:
         '"LOCAL QWEN"',
         '"GROK WORKER"',
         '"GROK TUI"',
-        'property string engineTarget: "LOCAL_QWEN"',
+        'property string engineTarget: "GROK_TUI"',
         "signal engineTargetRequested(string value)",
         "People · close",
         "GG-AI-installator",
@@ -505,12 +506,13 @@ def main() -> int:
         "GROK TUI hole lost its host id.",
     )
     require(
-        "wantEngine: webHost.visible && webTab.isCurrent" in workspace_surface,
-        "WEB Chromium still starts before the WEB tab is shown.",
+        "ensureWebEngine" in workspace_surface
+        and 'source: active ? "WebPane.qml" : ""' in workspace_surface,
+        "WEB Chromium is still type-bound into workspace boot.",
     )
     require(
-        "wantEngine: siteHost.visible" in workspace_surface,
-        "SITE Chromium still starts before the SITE tab is shown.",
+        "WebPane {" not in workspace_surface,
+        "WEB Chromium still compiles with WorkspaceSurface.",
     )
 
     for marker in (

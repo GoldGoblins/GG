@@ -7,6 +7,10 @@ import copy
 import hashlib
 import json
 import os
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--disable-gpu --disable-extensions --disable-background-networking --disable-sync",
+)
 import stat
 import subprocess
 import shutil
@@ -18,10 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, QUrl, Signal, Slot
 from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
-from backend.web_surface import ensure_webengine
 from backend import shell_load
-
-ensure_webengine()
 
 from backend import local_ai_contract as contract
 from backend import autonomy_contract as autonomy_contract

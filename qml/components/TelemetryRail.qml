@@ -7,7 +7,7 @@ Item {
     property string actionAuthority: "NONE"
     property string networkAuthority: "NONE"
     property string modelState: "READY"
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     property string grokWalletJson: "{}"
     property string bridgeState: "CONNECTED"
     property string toolAuthority: "GREEN TYPED"

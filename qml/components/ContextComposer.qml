@@ -26,7 +26,7 @@ Item {
     property bool busy: false
     property string activeTaskId: ""
     property bool assignmentExpanded: false
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
     property bool showOpenTab: false

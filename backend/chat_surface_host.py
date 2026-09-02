@@ -9,6 +9,8 @@ import signal
 import struct
 import subprocess
 import termios
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from PySide6.QtCore import (
     QObject,
     QProcess,
     QSocketNotifier,
+    QThread,
     QTimer,
     Signal,
     Slot,
@@ -28,7 +31,7 @@ from backend import crypto_host
 from backend import libretro_host
 from backend import media_host
 from backend import tmog_contract
-from backend.grok_wallet import parse_pty_wallet, snapshot as grok_wallet_snapshot
+from backend.grok_wallet import snapshot as grok_wallet_snapshot
 from backend.grok_worker_contract import (
     DEV_GROK_HOME,
     GROK_BIN,
@@ -75,6 +78,41 @@ def _strip_ansi(text: str) -> str:
     return cleaned.replace("\r\n", "\n").replace("\r", "\n")
 
 
+class _EmuWorker(QThread):
+    framed = Signal(bytes, int, int, int, int, bytes)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._keep = True
+        self.setObjectName("gg-libretro")
+
+    def stop(self) -> None:
+        self._keep = False
+
+    def run(self) -> None:
+        while self._keep:
+            started = time.monotonic()
+            if libretro_host.loaded() and not media_host._paused:
+                libretro_host.run()
+                raw, width, height, pitch, pixel = libretro_host.frame()
+                pcm = bytes(libretro_host.audio_bytes())
+                if raw:
+                    self.framed.emit(
+                        raw,
+                        int(width),
+                        int(height),
+                        int(pitch),
+                        int(pixel),
+                        pcm,
+                    )
+            fps = max(1.0, float(libretro_host.fps() or 60.0))
+            remain = (1.0 / fps) - (time.monotonic() - started)
+            if remain > 0.0:
+                time.sleep(min(remain, 0.05))
+            elif self._keep:
+                time.sleep(0.001)
+
+
 class ChatSurfaceHost(QObject):
     chatTerminalOutput = Signal(str, str)
     chatTerminalExit = Signal(str, int)
@@ -118,9 +156,7 @@ class ChatSurfaceHost(QObject):
         self._qml_reload.setSingleShot(True)
         self._qml_reload.setInterval(250)
         self._qml_reload.timeout.connect(self._emit_qml_reload)
-        self._console_timer = QTimer(self)
-        self._console_timer.setInterval(16)
-        self._console_timer.timeout.connect(self._console_tick)
+        self._emu: _EmuWorker | None = None
         self._crypto_timer = QTimer(self)
         self._crypto_timer.setInterval(60000)
         self._crypto_timer.timeout.connect(self._crypto_idle_tick)
@@ -130,6 +166,11 @@ class ChatSurfaceHost(QObject):
         self._console_sink = None
         self._console_io = None
         self._frame_seq = 0
+        self._winch = QTimer(self)
+        self._winch.setSingleShot(True)
+        self._winch.setInterval(80)
+        self._winch.timeout.connect(self._apply_tui_winsize)
+        self._webengine_ready = False
 
     def set_qml_root(self, root: QObject | None) -> None:
         self._qml_root = root
@@ -150,8 +191,21 @@ class ChatSurfaceHost(QObject):
         hole = self._tui_hole()
         if hole is None:
             return
+        try:
+            hole.visibleChanged.connect(self._on_tui_hole_visible)
+        except Exception:
+            pass
+        if hole.isVisible():
+            self._ensure_tui_grid()
+
+    def _ensure_tui_grid(self) -> None:
+        hole = self._tui_hole()
+        if hole is None:
+            return
         grid = self._tui_grid
         if grid is not None and getattr(grid, "parentItem", lambda: None)() is hole:
+            if hole.isVisible():
+                grid.forceActiveFocus()
             return
         if grid is not None:
             stop = getattr(grid, "_stop_worker", None)
@@ -166,7 +220,6 @@ class ChatSurfaceHost(QObject):
         grid.dataProduced.connect(self.grokTuiWrite)
         grid.resized.connect(self.grokTuiResize)
         grid.ready.connect(self._on_native_tui_ready)
-        hole.visibleChanged.connect(self._on_tui_hole_visible)
         self._tui_grid = grid
         if hole.isVisible():
             grid.forceActiveFocus()
@@ -178,12 +231,14 @@ class ChatSurfaceHost(QObject):
 
     def _on_tui_hole_visible(self, *_args) -> None:
         hole = self._tui_hole()
-        grid = self._tui_grid
-        if hole is None or grid is None:
+        if hole is None:
             return
         if not hole.isVisible():
             return
-        grid.forceActiveFocus()
+        self._ensure_tui_grid()
+        grid = self._tui_grid
+        if grid is not None:
+            grid.forceActiveFocus()
         self.startGrokTui("ws.tui.grok")
 
     @Slot(result=str)
@@ -374,14 +429,28 @@ class ChatSurfaceHost(QObject):
     def _console_sync(self, payload: dict[str, Any]) -> None:
         if str(payload.get("backend") or "") == "libretro" and libretro_host.loaded():
             self._ensure_console_provider()
-            interval = max(8, int(round(1000.0 / max(1.0, libretro_host.fps()))))
-            self._console_timer.setInterval(interval)
             self._console_start_audio()
-            if not self._console_timer.isActive():
-                self._console_timer.start()
+            self._start_emu()
             return
-        self._console_timer.stop()
+        self._stop_emu()
         self._console_stop_audio()
+
+    def _start_emu(self) -> None:
+        worker = self._emu
+        if worker is not None and worker.isRunning():
+            return
+        worker = _EmuWorker()
+        worker.framed.connect(self._on_emu_frame)
+        self._emu = worker
+        worker.start()
+
+    def _stop_emu(self) -> None:
+        worker = self._emu
+        self._emu = None
+        if worker is None:
+            return
+        worker.stop()
+        worker.wait(80)
 
     def _console_start_audio(self) -> None:
         if self._console_sink is not None:
@@ -415,15 +484,15 @@ class ChatSurfaceHost(QObject):
             except Exception:
                 pass
 
-    def _console_tick(self) -> None:
-        if not libretro_host.loaded():
-            self._console_timer.stop()
-            self._console_stop_audio()
-            return
-        if media_host._paused:
-            return
-        libretro_host.run()
-        raw, width, height, pitch, pixel = libretro_host.frame()
+    def _on_emu_frame(
+        self,
+        raw: bytes,
+        width: int,
+        height: int,
+        pitch: int,
+        pixel: int,
+        pcm: bytes,
+    ) -> None:
         provider = self._console_provider
         if provider is not None and raw and width >= 8 and height >= 8:
             from PySide6.QtGui import QImage
@@ -439,7 +508,6 @@ class ChatSurfaceHost(QObject):
                 provider.image = image.copy()
                 self._frame_seq += 1
                 self.mediaFrameSeqChanged.emit()
-        pcm = libretro_host.audio_bytes()
         io = self._console_io
         if pcm and io is not None:
             try:
@@ -478,11 +546,12 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def mediaLiveStatus(self) -> str:
         try:
-            return self._media_status_json(True)
+            return media_host.live_status_json()
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
 
     def _media_changed(self, payload: dict[str, Any]) -> str:
+        media_host.publish_live(payload)
         self.mediaStateChanged.emit()
         return json.dumps(payload, separators=(",", ":"))
 
@@ -719,6 +788,13 @@ class ChatSurfaceHost(QObject):
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
     def _crypto_idle_tick(self) -> None:
+        threading.Thread(
+            target=self._crypto_idle_work,
+            name="gg-crypto-idle",
+            daemon=True,
+        ).start()
+
+    def _crypto_idle_work(self) -> None:
         try:
             from backend import crypto_trader
 
@@ -1097,8 +1173,11 @@ class ChatSurfaceHost(QObject):
             "timer": backup,
             "screen": screen,
         }
+        # Qt6 activated(QSocketDescriptor, Type) is 2-arg. A default
+        # `key=identity` after `_fd` is overwritten by Type.Read, the
+        # session lookup misses, and the notifier never disables — 80% GUI.
         notifier.activated.connect(
-            lambda _fd=None, key=identity: self._pty_readable(key)
+            lambda *_args, key=identity: self._pty_readable(key)
         )
         drain.timeout.connect(lambda key=identity: self._drain_pty(key))
         backup.timeout.connect(lambda key=identity: self._pty_readable(key))
@@ -1194,15 +1273,23 @@ class ChatSurfaceHost(QObject):
             watcher.addPath(str(path))
 
     def _on_qml_file(self, path: str) -> None:
-        if self._qml_watch is not None and Path(path).is_file():
+        target = Path(path)
+        if self._qml_watch is not None and target.is_file():
             self._qml_watch.addPath(path)
+        if target.suffix.lower() != ".qml":
+            return
         self._qml_reload.start()
 
     def _on_qml_dir(self, directory: str) -> None:
-        if self._qml_watch is not None:
-            self._qml_watch.addPath(directory)
-        self.watchQmlSources()
-        self._qml_reload.start()
+        folder = Path(directory)
+        watcher = self._qml_watch
+        if watcher is None:
+            return
+        watcher.addPath(directory)
+        if not folder.is_dir():
+            return
+        for child in folder.glob("*.qml"):
+            watcher.addPath(str(child))
 
     def _emit_qml_reload(self) -> None:
         from PySide6.QtQml import QQmlEngine
@@ -1318,13 +1405,33 @@ class ChatSurfaceHost(QObject):
     def grokTuiWrite(self, data: str) -> None:
         self.writeChatTerminal(GROK_TUI_TERMINAL_ID, str(data or ""))
 
+    @Slot()
+    def ensureWebEngine(self) -> bool:
+        if self._webengine_ready:
+            return True
+        from backend.web_surface import ensure_webengine
+
+        self._webengine_ready = bool(ensure_webengine())
+        return self._webengine_ready
+
     @Slot(int, int)
     def grokTuiResize(self, cols: int, rows: int) -> None:
         width = max(8, min(240, int(cols)))
         height = max(4, min(80, int(rows)))
-        self._pending_tui_size = (width, height)
+        pending = (width, height)
+        if self._pending_tui_size == pending and self._winch.isActive():
+            return
+        self._pending_tui_size = pending
+        self._winch.start()
+
+    def _apply_tui_winsize(self) -> None:
+        if self._pending_tui_size is None:
+            return
+        width, height = self._pending_tui_size
         session = self._sessions.get(GROK_TUI_TERMINAL_ID)
         if session is None:
+            return
+        if session.get("cols") == width and session.get("rows") == height:
             return
         winsize = struct.pack("HHHH", height, width, 0, 0)
         session["cols"] = width
@@ -1351,6 +1458,8 @@ class ChatSurfaceHost(QObject):
         key = str(terminal_id or "").strip()
         try:
             os.write(session["master"], payload.encode("utf-8"))
+        except BlockingIOError:
+            return False
         except OSError:
             return False
         return True
@@ -1433,15 +1542,15 @@ class ChatSurfaceHost(QObject):
             self._close(key)
 
     def _pty_readable(self, terminal_id: str) -> None:
+        if not isinstance(terminal_id, str):
+            return
         session = self._sessions.get(terminal_id)
         if session is None:
             return
         notifier = session.get("notifier")
         if notifier is not None:
             notifier.setEnabled(False)
-        drain = session.get("drain")
-        if drain is not None and not drain.isActive():
-            drain.start()
+        self._drain_pty(terminal_id)
 
     def _drain_pty(self, terminal_id: str) -> None:
         more = False
@@ -1490,11 +1599,6 @@ class ChatSurfaceHost(QObject):
                 grid = self._tui_grid
                 if grid is not None:
                     grid.feed_bytes(raw)
-                if b"K/" in raw or b"k/" in raw:
-                    decoded = raw.decode("utf-8", errors="replace")
-                    overlay = parse_pty_wallet(_strip_ansi(decoded))
-                    if overlay:
-                        self._wallet_pty.update(overlay)
             else:
                 text = raw.decode("utf-8", errors="replace")
                 screen = session.get("screen")

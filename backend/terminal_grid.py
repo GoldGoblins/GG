@@ -5,6 +5,7 @@ import codecs
 
 from PySide6.QtCore import (
     QObject,
+    QRect,
     QRectF,
     Qt,
     QThread,
@@ -38,8 +39,15 @@ from backend.mini_vt import (
 )
 
 
+_COLOR_CACHE: dict[tuple[int, int, int], QColor] = {}
+
+
 def _color(rgb: tuple[int, int, int]) -> QColor:
-    return QColor(rgb[0], rgb[1], rgb[2])
+    cached = _COLOR_CACHE.get(rgb)
+    if cached is None:
+        cached = QColor(rgb[0], rgb[1], rgb[2])
+        _COLOR_CACHE[rgb] = cached
+    return cached
 
 
 _VT_SNAP_MS = 33
@@ -138,6 +146,13 @@ class TerminalGrid(QQuickPaintedItem):
         self._font.setPixelSize(13)
         self._font.setStyleHint(QFont.StyleHint.Monospace)
         self._font.setFixedPitch(True)
+        self._font_bold = QFont(self._font)
+        self._font_bold.setBold(True)
+        self._font_italic = QFont(self._font)
+        self._font_italic.setItalic(True)
+        self._font_both = QFont(self._font)
+        self._font_both.setBold(True)
+        self._font_both.setItalic(True)
         self._cell_w = 8
         self._cell_h = 16
         self._ascent = 12
@@ -150,6 +165,7 @@ class TerminalGrid(QQuickPaintedItem):
         self.setAntialiasing(False)
         self.setOpaquePainting(True)
         self.setRenderTarget(QQuickPaintedItem.RenderTarget.Image)
+        self._dirty_union = QRect()
         self.setAcceptedMouseButtons(
             Qt.MouseButton.LeftButton
             | Qt.MouseButton.RightButton
@@ -163,11 +179,10 @@ class TerminalGrid(QQuickPaintedItem):
         self._blink = QTimer(self)
         self._blink.setInterval(530)
         self._blink.timeout.connect(self._toggle_cursor)
-        self._blink.start()
         self._coalesce = QTimer(self)
         self._coalesce.setSingleShot(True)
         self._coalesce.setInterval(_VT_SNAP_MS)
-        self._coalesce.timeout.connect(self.update)
+        self._coalesce.timeout.connect(self._flush_paint)
         self.widthChanged.connect(self._refit)
         self.heightChanged.connect(self._refit)
         self._host = _VtHost()
@@ -211,6 +226,11 @@ class TerminalGrid(QQuickPaintedItem):
             window = getattr(value, "window", None)
             if window is None:
                 self._stop_worker()
+        if change in (
+            QQuickItem.ItemChange.ItemVisibleHasChanged,
+            QQuickItem.ItemChange.ItemActiveFocusHasChanged,
+        ):
+            self._sync_blink()
         return super().itemChange(change, value)
 
     def _fill_parent(self) -> None:
@@ -236,17 +256,59 @@ class TerminalGrid(QQuickPaintedItem):
         self.ready.emit()
 
     def _toggle_cursor(self) -> None:
-        if not self.hasActiveFocus():
+        if not self.isVisible() or not self.hasActiveFocus():
             if not self._cursor_on:
                 self._cursor_on = True
                 self.update()
             return
         self._cursor_on = not self._cursor_on
-        self.update()
+        snap = self._snap
+        if snap is not None:
+            self._touch(self._row_rect(int(snap.get("r") or 0)))
+        else:
+            self._touch()
 
-    def _schedule(self) -> None:
+    def _sync_blink(self) -> None:
+        if self.isVisible() and self.hasActiveFocus():
+            if not self._blink.isActive():
+                self._blink.start()
+            return
+        if self._blink.isActive():
+            self._blink.stop()
+        if not self._cursor_on:
+            self._cursor_on = True
+            self.update()
+
+    def _touch(self, rect: QRect | None = None) -> None:
+        if rect is None or not rect.isValid():
+            self._dirty_union = QRect(
+                0, 0, max(1, int(self.width())), max(1, int(self.height()))
+            )
+        elif self._dirty_union.isNull():
+            self._dirty_union = QRect(rect)
+        else:
+            self._dirty_union = self._dirty_union.united(rect)
         if not self._coalesce.isActive():
             self._coalesce.start()
+
+    def _flush_paint(self) -> None:
+        rect = self._dirty_union
+        self._dirty_union = QRect()
+        if rect.isNull() or not rect.isValid():
+            self.update()
+            return
+        self.update(rect)
+
+    def _row_rect(self, row: int) -> QRect:
+        return QRect(
+            0,
+            int(row) * self._cell_h,
+            max(1, int(self.width())),
+            self._cell_h,
+        )
+
+    def _schedule(self) -> None:
+        self._touch()
 
     def _flush_replies(self) -> None:
         if not self._vt.out:
@@ -268,7 +330,7 @@ class TerminalGrid(QQuickPaintedItem):
             self._last_rows = rows
             self._resizeTo.emit(rows, cols)
             self.resized.emit(cols, rows)
-            self.update()
+            self._touch()
 
     @Slot(str)
     def feedB64(self, blob: str) -> None:
@@ -295,13 +357,23 @@ class TerminalGrid(QQuickPaintedItem):
     def _apply_snapshot(self, snap: object) -> None:
         if not isinstance(snap, dict):
             return
+        previous = self._snap
         self._snap = snap
         vt = self._vt
         vt.app_cursor = bool(snap.get("app_cursor"))
         vt.mouse_mode = int(snap.get("mouse_mode") or 0)
         vt.mouse_sgr = bool(snap.get("mouse_sgr"))
         vt.bracket_paste = bool(snap.get("bracket_paste"))
-        self._schedule()
+        new_buf = snap.get("buf") or []
+        old_buf = (previous or {}).get("buf") or []
+        if (not old_buf) or len(old_buf) != len(new_buf):
+            self._touch()
+            return
+        self._touch(self._row_rect(int((previous or {}).get("r") or 0)))
+        self._touch(self._row_rect(int(snap.get("r") or 0)))
+        for index, row in enumerate(new_buf):
+            if index >= len(old_buf) or old_buf[index] != row:
+                self._touch(self._row_rect(index))
 
     def feed_text(self, text: str) -> None:
         if not text:
@@ -312,9 +384,12 @@ class TerminalGrid(QQuickPaintedItem):
 
     def paint(self, painter: QPainter) -> None:
         painter.setFont(self._font)
-        painter.fillRect(self.contentsBoundingRect(), _color(DEFAULT_BG_RGB))
         cell_w = self._cell_w
         cell_h = self._cell_h
+        clip = painter.clipBoundingRect()
+        clip_top = clip.top()
+        clip_bottom = clip.bottom()
+        bg = _color(DEFAULT_BG_RGB)
         snap = self._snap
         if snap is not None:
             buf = snap.get("buf") or []
@@ -327,6 +402,13 @@ class TerminalGrid(QQuickPaintedItem):
             cursor_c = self._vt.c
             cursor_visible = self._vt.cursor_visible
         for y, row in enumerate(buf):
+            y0 = y * cell_h
+            if y0 + cell_h < clip_top or y0 > clip_bottom:
+                continue
+            painter.fillRect(
+                QRectF(0, y0, max(1.0, float(self.width())), cell_h),
+                bg,
+            )
             x = 0
             while x < len(row):
                 ch, fg, bg, flags = row[x]
@@ -360,11 +442,14 @@ class TerminalGrid(QQuickPaintedItem):
                     painter.fillRect(rect, _color(bg_rgb))
                 visible = "".join(part for part in text if part)
                 if visible and not (run_flags & HIDDEN) and visible.strip() != "":
-                    font = QFont(self._font)
-                    font.setBold(bool(run_flags & BOLD))
-                    font.setItalic(bool(run_flags & ITALIC))
-                    font.setStrikeOut(bool(run_flags & STRIKE))
-                    painter.setFont(font)
+                    if run_flags & BOLD and run_flags & ITALIC:
+                        painter.setFont(self._font_both)
+                    elif run_flags & BOLD:
+                        painter.setFont(self._font_bold)
+                    elif run_flags & ITALIC:
+                        painter.setFont(self._font_italic)
+                    else:
+                        painter.setFont(self._font)
                     painter.setPen(_color(fg_rgb))
                     painter.drawText(
                         int(rect.x()),
@@ -377,6 +462,13 @@ class TerminalGrid(QQuickPaintedItem):
                             int((y + 1) * cell_h - 2),
                             int(rect.x() + rect.width()),
                             int((y + 1) * cell_h - 2),
+                        )
+                    if run_flags & STRIKE:
+                        painter.drawLine(
+                            int(rect.x()),
+                            int(y * cell_h + self._ascent * 0.6),
+                            int(rect.x() + rect.width()),
+                            int(y * cell_h + self._ascent * 0.6),
                         )
                 x = nx
         rows = len(buf)

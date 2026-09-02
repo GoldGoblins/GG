@@ -304,7 +304,7 @@ Item {
     property bool showInnerEditorChrome: true
     property bool settingsOpen: false
     property bool chatBusy: false
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     property string hostKind: "CODE"
     property string cryptoWalletLabel: "WALLET · DISCONNECTED"
     property int liveEpoch: 0
@@ -586,6 +586,12 @@ Item {
     }
 
     function setHostKind(kind) {
+        if (
+            (kind === "WEB" || kind === "SITE")
+            && root.scratchHost()
+            && root.scratchHost().ensureWebEngine
+        )
+            root.scratchHost().ensureWebEngine()
         root.hostKind = kind
         if (kind === "CRYPTO" || kind === "TMOG" || kind === "MEDIA" || kind === "DRAW")
             return
@@ -2319,13 +2325,21 @@ Item {
                     }
                 }
 
-                WebPane {
+                Loader {
                     anchors.fill: parent
                     anchors.topMargin: 22
-                    pageUrl: root.webPageUrl
-                    siteOnly: true
-                    reloadNonce: root.sitePreviewNonce
-                    wantEngine: siteHost.visible
+                    active: siteHost.visible
+                    source: active ? "WebPane.qml" : ""
+                    onLoaded: {
+                        item.siteOnly = true
+                        item.pageUrl = Qt.binding(function() {
+                            return root.webPageUrl
+                        })
+                        item.reloadNonce = Qt.binding(function() {
+                            return root.sitePreviewNonce
+                        })
+                        item.wantEngine = siteHost.visible
+                    }
                 }
             }
 
@@ -2372,17 +2386,21 @@ Item {
                 }
             }
 
-            MediaSurface {
+            Loader {
                 id: mediaPane
                 objectName: "workspaceMediaPane"
                 z: 20
                 anchors.fill: parent
-                visible:
-                    !root.settingsOpen
-                    && root.hostKind === "MEDIA"
-                surfaceHost: root.scratchHost()
-                frameBorder: root.frameBorder
-                frameRadius: root.frameRadius
+                active: !root.settingsOpen && root.hostKind === "MEDIA"
+                visible: active
+                sourceComponent: Component {
+                    MediaSurface {
+                        objectName: "workspaceMediaPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
             }
 
             Loader {
@@ -2455,19 +2473,19 @@ Item {
                             Loader {
                                 width: parent.width
                                 height: parent.height - tabBrowseBar.height - 6
-                                active: webTab.isWebTab
-                                sourceComponent: Component {
-                                    WebPane {
-                                        anchors.fill: parent
-                                        pageUrl: webTab.sourcePath.length > 0
+                                active: webHost.visible && webTab.isWebTab && webTab.isCurrent
+                                source: active ? "WebPane.qml" : ""
+                                onLoaded: {
+                                    item.siteOnly = false
+                                    item.pageUrl = Qt.binding(function() {
+                                        return webTab.sourcePath.length > 0
                                             ? webTab.sourcePath
                                             : "about:blank"
-                                        siteOnly: false
-                                        wantEngine: webHost.visible && webTab.isCurrent
-                                        onNavigated: function(href) {
-                                            root.rememberBrowse(webTab.index, href)
-                                        }
-                                    }
+                                    })
+                                    item.wantEngine = webHost.visible && webTab.isCurrent
+                                    item.navigated.connect(function(href) {
+                                        root.rememberBrowse(webTab.index, href)
+                                    })
                                 }
                             }
                         }

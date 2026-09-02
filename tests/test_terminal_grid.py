@@ -45,6 +45,14 @@ def main() -> int:
     src = (PROJECT / "backend" / "terminal_grid.py").read_text(encoding="utf-8")
     if "class _VtHost" not in src or "QueuedConnection" not in src:
         raise AssertionError("TUI parse still runs on the GUI thread")
+    if "font.setBold" in src or "font.setItalic" in src:
+        raise AssertionError("TUI paint still mutates a new QFont per glyph run")
+    if "_font_bold" not in src:
+        raise AssertionError("TUI paint has no cached bold font")
+    if "self._blink.start()" in src.split("def _sync_blink")[0]:
+        raise AssertionError("TUI cursor blink still runs before the hole is focused")
+    if "def _flush_paint" not in src or "def _row_rect" not in src:
+        raise AssertionError("TUI still repaints the full grid on every cell change")
     if "QThread(self)" in src:
         raise AssertionError("VT QThread is still parented to the Quick item")
     if "def itemChange" not in src or "aboutToQuit" not in src:

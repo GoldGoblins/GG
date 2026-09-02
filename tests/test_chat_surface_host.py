@@ -123,6 +123,28 @@ def main() -> int:
         raise AssertionError("PTY output still parsed on every socket tick")
     if "_PTY_DRAIN_MS = 16" in src:
         raise AssertionError("PTY drain still at 16ms")
+    if "lambda _fd=None, key=identity" in src:
+        raise AssertionError(
+            "PTY notifier lambda still binds Qt6 Type.Read as terminal id"
+        )
+    if "lambda *_args, key=identity" not in src:
+        raise AssertionError(
+            "PTY notifier must swallow Qt6 activated extra args"
+        )
+    from PySide6.QtCore import QSocketNotifier
+
+    stolen: list[object] = []
+
+    def _capture(key: object) -> None:
+        stolen.append(key)
+
+    identity = "ws.tui.grok"
+    fixed = lambda *_args, key=identity: _capture(key)
+    fixed(object(), QSocketNotifier.Type.Read)
+    if stolen != [identity]:
+        raise AssertionError(
+            "Qt6 notifier args stole terminal id: " + repr(stolen)
+        )
     if "cached_quick_item" not in (
         PROJECT / "backend" / "grok_tui_embed.py"
     ).read_text(encoding="utf-8"):
@@ -137,6 +159,27 @@ def main() -> int:
         raise AssertionError("TUI reattach still deleteLater a running QThread")
     if "mediaLiveStatus" not in src:
         raise AssertionError("mediaLiveStatus slot missing")
+    if "live_status_json" not in src:
+        raise AssertionError("live media slot still dumps status on the GUI thread")
+    if "class _EmuWorker" not in src or "libretro_host.run()" not in src:
+        raise AssertionError("libretro still ticks on the GUI thread")
+    if "def _ensure_tui_grid" not in src:
+        raise AssertionError("GROK TUI grid still boots before the TUI hole is shown")
+    if "def ensureWebEngine" not in src:
+        raise AssertionError("Chromium still boots with the desktop process")
+    if "def _apply_tui_winsize" not in src:
+        raise AssertionError("TUI resize still SIGWINCH on every layout twitch")
+    if "BlockingIOError" not in src:
+        raise AssertionError("PTY write still blocks the GUI thread")
+    if "parse_pty_wallet(_strip_ansi" in src:
+        raise AssertionError("PTY drain still strips ANSI for wallet on the GUI thread")
+    if "self._console_timer" in src or "def _console_tick" in src:
+        raise AssertionError("16ms GUI console timer remains")
+    if "_crypto_idle_work" not in src or 'name="gg-crypto-idle"' not in src:
+        raise AssertionError("crypto idle tick still blocks the GUI thread")
+    qml_dir = src[src.index("def _on_qml_dir") : src.index("def _emit_qml_reload")]
+    if "_qml_reload.start()" in qml_dir or "watchQmlSources()" in qml_dir:
+        raise AssertionError("QML directory events still reload the whole shell")
     if "mediaStateChanged" not in src:
         raise AssertionError("mediaStateChanged signal missing")
     if "cryptoRailStatus" not in src:

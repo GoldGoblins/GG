@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,7 @@ _catalog_memo: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CATALOG_MEMO_TTL = 45.0
 _CLIAMP_POLL_TIMEOUT = 0.04
 _CLIAMP_BANDS_TIMEOUT = 0.03
-_CLIAMP_BUFFER_MS = 3000
+_CLIAMP_BUFFER_MS = 1000
 _CLIAMP_RESUME_GAP = 6.0
 _LIVE_TTL = 0.12
 _want_source = ""
@@ -67,6 +68,10 @@ _last_live_state: dict[str, Any] = {}
 _last_live_at = 0.0
 _qml_position = 0.0
 _qml_duration = 0.0
+_live_json = ""
+_live_lock = threading.Lock()
+_pump_thread: threading.Thread | None = None
+_GUI_LIVE_TTL = 0.25
 
 
 def _rc_path() -> Path:
@@ -192,6 +197,8 @@ def _cliamp_alive() -> bool:
         return False
     if _cliamp_proc is not None and _cliamp_proc.poll() is not None:
         return False
+    if _last_live_state and time.monotonic() - _last_live_at < 1.0:
+        return bool(_last_live_state.get("ok"))
     return bool(_cliamp_call({"cmd": "status"}, timeout=_CLIAMP_POLL_TIMEOUT).get("ok"))
 
 
@@ -231,6 +238,62 @@ def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any
     return parsed if isinstance(parsed, dict) else {}
 
 
+def start_live_pump() -> None:
+    global _pump_thread
+    thread = _pump_thread
+    if thread is not None and thread.is_alive():
+        return
+    thread = threading.Thread(
+        target=_live_pump_loop,
+        name="gg-media-live",
+        daemon=True,
+    )
+    _pump_thread = thread
+    thread.start()
+
+
+def live_status_json() -> str:
+    start_live_pump()
+    with _live_lock:
+        return _live_json
+
+
+def publish_live(payload: dict[str, Any] | None = None) -> str:
+    global _live_json
+    data = dict(payload) if payload else status_payload(live=True, pump=True)
+    data.pop("items", None)
+    data.pop("tools", None)
+    data.pop("cores", None)
+    data.pop("eq_presets", None)
+    data.pop("library_roots", None)
+    data["live"] = True
+    raw = json.dumps(data, separators=(",", ":"))
+    with _live_lock:
+        _live_json = raw
+    return raw
+
+
+def _live_pump_loop() -> None:
+    while True:
+        time.sleep(0.05)
+        try:
+            if _backend == "cliamp" and not _cliamp_buffered():
+                _ensure_cliamp()
+            publish_live()
+        except Exception:
+            continue
+
+
+def _cached_cliamp() -> dict[str, Any]:
+    now = time.monotonic()
+    if _last_live_state and now - _last_live_at < _GUI_LIVE_TTL:
+        live = dict(_last_live_state)
+        if _last_bands:
+            live["_bands"] = _last_bands
+        return live
+    return _cliamp_live(want_bands=True)
+
+
 def _cliamp_live(want_bands: bool) -> dict[str, Any]:
     global _last_bands, _last_bands_at, _last_live_state, _last_live_at
     now = time.monotonic()
@@ -245,7 +308,7 @@ def _cliamp_live(want_bands: bool) -> dict[str, Any]:
     if not live.get("ok"):
         return live
     state = str(live.get("state") or "")
-    if want_bands and state == "playing" and now - _last_bands_at >= 0.2:
+    if want_bands and state == "playing":
         spec = _cliamp_call({"cmd": "bands"}, timeout=_CLIAMP_BANDS_TIMEOUT)
         bands = spec.get("bands")
         if isinstance(bands, list):
@@ -438,6 +501,7 @@ def _play_qml(item: dict[str, Any]) -> dict[str, Any]:
 def _play_cliamp(source: str) -> None:
     global _backend, _paused, _kind, _want_source, _resume_at
     _ensure_cliamp()
+    start_live_pump()
     _want_source = str(source or "")
     _resume_at = 0.0
     loaded = _cliamp_call({"cmd": "url.load", "path": source}, timeout=20.0)
@@ -1017,7 +1081,7 @@ def start_fetch() -> dict[str, Any]:
     return payload
 
 
-def status_payload(live: bool = False) -> dict[str, Any]:
+def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
     prefs = load_prefs()
     mode = prefs["mode"]
     rows: list[dict[str, Any]] = [] if live else _catalog_rows(mode)
@@ -1033,7 +1097,13 @@ def status_payload(live: bool = False) -> dict[str, Any]:
     eq_bands: list[float] = []
     live_state: dict[str, Any] = {}
     if _backend == "cliamp":
-        live_state = _cliamp_live(want_bands=True)
+        if live:
+            start_live_pump()
+        live_state = (
+            _cliamp_live(want_bands=True)
+            if pump or not live
+            else _cached_cliamp()
+        )
         state = str(live_state.get("state") or "")
         playing = state == "playing"
         paused = state == "paused"

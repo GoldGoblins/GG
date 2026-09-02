@@ -19,7 +19,7 @@ def main() -> int:
     desktop_settings.SETTINGS_PATH = scratch / "settings-v1.json"
     try:
         loaded = desktop_settings.load_settings()
-        if loaded["engineTarget"] != "LOCAL_QWEN":
+        if loaded["engineTarget"] != "GROK_TUI":
             raise AssertionError("missing defaults")
         if loaded.get("desktopShell") is not False:
             raise AssertionError("desktop shell must default off")
@@ -67,7 +67,7 @@ def main() -> int:
         rejected = desktop_settings.normalize_settings(
             {"engineTarget": "OPEN_INTERNET"}
         )
-        if rejected["engineTarget"] != "LOCAL_QWEN":
+        if rejected["engineTarget"] != "GROK_TUI":
             raise AssertionError("unknown engine was accepted")
         class Root:
             def __init__(self) -> None:

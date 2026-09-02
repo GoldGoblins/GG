@@ -642,7 +642,7 @@ def main() -> int:
         assert marker in composer, marker
 
     for marker in (
-        'property string engineTarget: "LOCAL_QWEN"',
+        'property string engineTarget: "GROK_TUI"',
         "property string lastSelectedObjectId: \"\"",
         "if (objectId === root.lastSelectedObjectId)",
         "function beginGrokWorkerStream(",

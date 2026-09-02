@@ -21,7 +21,7 @@ ApplicationWindow {
     property bool bridgeBusy: false
     property bool followChatTail: true
     property string activeTaskId: ""
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     readonly property string networkAuthority: (
         root.engineTarget === "GROK_TUI"
         || root.engineTarget === "GROK_WORKER"
@@ -1368,132 +1368,151 @@ ApplicationWindow {
                                 required property var model
 
                                 width: streamColumn.width
-                                height: {
-                                    if (grokStream.visible)
-                                        return grokStream.implicitHeight
-                                    if (activityEvent.visible)
-                                        return activityEvent.implicitHeight
-                                    if (toolTerminal.visible)
-                                        return toolTerminal.implicitHeight
-                                    return speechNode.implicitHeight
-                                }
+                                height: Math.max(
+                                    grokLoader.height,
+                                    activityLoader.height,
+                                    toolLoader.height,
+                                    speechLoader.height
+                                )
 
-                                GrokWorkStream {
-                                    id: grokStream
-                                    x: 0
+                                Loader {
+                                    id: grokLoader
                                     width: Math.min(
                                         parent.width,
                                         parent.width * 0.92
                                     )
-                                    visible: root.isGrokStreamNode(
+                                    height: item ? item.implicitHeight : 0
+                                    active: root.isGrokStreamNode(
                                         streamDelegate.model.nodeKind
                                     )
-                                    height: visible ? implicitHeight : 0
-                                    authorLabel: streamDelegate.model.authorLabel
-                                    nodeKind: streamDelegate.model.nodeKind
-                                    stateLabel: streamDelegate.model.stateLabel
-                                    contextReference: streamDelegate.model.contextReference
-                                    taskId: streamDelegate.model.taskId || ""
-                                    workCardsJson: streamDelegate.model.workCardsJson || "[]"
-                                    livePulse: root.bridgeBusy
-                                        && streamDelegate.model.taskId === root.activeTaskId
-                                    onImplicitHeightChanged: {
-                                        if (root.followChatTail || root.bridgeBusy)
-                                            root.stickChatToLatest()
+                                    sourceComponent: Component {
+                                        GrokWorkStream {
+                                            width: grokLoader.width
+                                            authorLabel: streamDelegate.model.authorLabel
+                                            nodeKind: streamDelegate.model.nodeKind
+                                            stateLabel: streamDelegate.model.stateLabel
+                                            contextReference: streamDelegate.model.contextReference
+                                            taskId: streamDelegate.model.taskId || ""
+                                            workCardsJson: streamDelegate.model.workCardsJson || "[]"
+                                            livePulse: root.bridgeBusy
+                                                && streamDelegate.model.taskId === root.activeTaskId
+                                            onImplicitHeightChanged: {
+                                                if (root.followChatTail || root.bridgeBusy)
+                                                    root.stickChatToLatest()
+                                            }
+                                        }
                                     }
                                 }
 
-                                ChatActivityEvent {
-                                    id: activityEvent
-                                    x: 0
+                                Loader {
+                                    id: activityLoader
                                     width: Math.min(
                                         parent.width,
                                         parent.width * 0.92
                                     )
-                                    visible: root.isActivityNode(
+                                    height: item ? item.implicitHeight : 0
+                                    active: root.isActivityNode(
                                         streamDelegate.model.nodeKind
                                     )
-                                    height: visible ? implicitHeight : 0
-                                    authorLabel: streamDelegate.model.authorLabel
-                                    nodeKind: streamDelegate.model.nodeKind
-                                    bodyText: streamDelegate.model.bodyText
-                                    stateLabel: streamDelegate.model.stateLabel
-                                    contextReference: streamDelegate.model.contextReference
-                                    taskId: streamDelegate.model.taskId || ""
-                                    workStagesJson: streamDelegate.model.workStagesJson || ""
-                                    livePulse: root.bridgeBusy
-                                        && streamDelegate.model.taskId === root.activeTaskId
+                                    sourceComponent: Component {
+                                        ChatActivityEvent {
+                                            width: activityLoader.width
+                                            authorLabel: streamDelegate.model.authorLabel
+                                            nodeKind: streamDelegate.model.nodeKind
+                                            bodyText: streamDelegate.model.bodyText
+                                            stateLabel: streamDelegate.model.stateLabel
+                                            contextReference: streamDelegate.model.contextReference
+                                            taskId: streamDelegate.model.taskId || ""
+                                            workStagesJson: streamDelegate.model.workStagesJson || ""
+                                            livePulse: root.bridgeBusy
+                                                && streamDelegate.model.taskId === root.activeTaskId
+                                        }
+                                    }
                                 }
 
-                                WorkObject {
-                                    id: toolTerminal
-                                    x: 0
+                                Loader {
+                                    id: toolLoader
                                     width: Math.min(
                                         parent.width,
                                         parent.width * 0.92
                                     )
-                                    visible: root.isToolNode(streamDelegate.model.nodeKind)
-                                    objectType: {
-                                        var body = String(
-                                            streamDelegate.model.bodyText || ""
-                                        )
-                                        if (body.indexOf("READ ") === 0)
-                                            return "CODE"
-                                        return "TERMINAL"
+                                    height: item ? item.implicitHeight : 0
+                                    active: root.isToolNode(
+                                        streamDelegate.model.nodeKind
+                                    )
+                                    sourceComponent: Component {
+                                        WorkObject {
+                                            width: toolLoader.width
+                                            objectType: {
+                                                var body = String(
+                                                    streamDelegate.model.bodyText || ""
+                                                )
+                                                if (body.indexOf("READ ") === 0)
+                                                    return "CODE"
+                                                return "TERMINAL"
+                                            }
+                                            title: {
+                                                var body = String(
+                                                    streamDelegate.model.bodyText || ""
+                                                )
+                                                if (body.indexOf("READ ") === 0)
+                                                    return "read"
+                                                if (body.indexOf("SEARCH ") === 0)
+                                                    return "search"
+                                                if (
+                                                    body.indexOf("TEST ") === 0
+                                                    || body.indexOf("RUN ") === 0
+                                                )
+                                                    return "terminal"
+                                                return streamDelegate.model.taskId || "tool"
+                                            }
+                                            bodyText: streamDelegate.model.bodyText
+                                            provenanceClass: "REAL_UI_STATE"
+                                            activityState: streamDelegate.model.stateLabel
+                                            realPercentage: -1
+                                            contextReference: streamDelegate.model.contextReference
+                                        }
                                     }
-                                    title: {
-                                        var body = String(
-                                            streamDelegate.model.bodyText || ""
-                                        )
-                                        if (body.indexOf("READ ") === 0)
-                                            return "read"
-                                        if (body.indexOf("SEARCH ") === 0)
-                                            return "search"
-                                        if (
-                                            body.indexOf("TEST ") === 0
-                                            || body.indexOf("RUN ") === 0
-                                        )
-                                            return "terminal"
-                                        return streamDelegate.model.taskId || "tool"
-                                    }
-                                    bodyText: streamDelegate.model.bodyText
-                                    provenanceClass: "REAL_UI_STATE"
-                                    activityState: streamDelegate.model.stateLabel
-                                    realPercentage: -1
-                                    contextReference: streamDelegate.model.contextReference
                                 }
 
-                                ChatNode {
-                                    id: speechNode
-                                    visible: root.isUserChatNode(
+                                Loader {
+                                    id: speechLoader
+                                    width: parent.width
+                                    height: item ? item.implicitHeight : 0
+                                    active: root.isUserChatNode(
                                         streamDelegate.model.nodeKind
                                     )
-                                    || root.isAiSpeechNode(
-                                        streamDelegate.model.nodeKind
-                                    )
-                                    height: visible ? implicitHeight : 0
-                                    authorLabel: streamDelegate.model.authorLabel
-                                    nodeKind: streamDelegate.model.nodeKind
-                                    bodyText: streamDelegate.model.bodyText
-                                    contextReference: streamDelegate.model.contextReference
-                                    provenanceClass: streamDelegate.model.provenanceClass
-                                    stateLabel: streamDelegate.model.stateLabel
-                                    laneOffset: 0
-                                    taskId: streamDelegate.model.taskId || ""
-                                    workStagesJson: streamDelegate.model.workStagesJson || ""
-                                    maxBubbleWidth: Math.floor(
-                                        parent.width * (
-                                            root.isUserChatNode(
+                                        || root.isAiSpeechNode(
+                                            streamDelegate.model.nodeKind
+                                        )
+                                    sourceComponent: Component {
+                                        ChatNode {
+                                            authorLabel: streamDelegate.model.authorLabel
+                                            nodeKind: streamDelegate.model.nodeKind
+                                            bodyText: streamDelegate.model.bodyText
+                                            contextReference: streamDelegate.model.contextReference
+                                            provenanceClass: streamDelegate.model.provenanceClass
+                                            stateLabel: streamDelegate.model.stateLabel
+                                            laneOffset: 0
+                                            taskId: streamDelegate.model.taskId || ""
+                                            workStagesJson: streamDelegate.model.workStagesJson || ""
+                                            maxBubbleWidth: Math.floor(
+                                                streamDelegate.width * (
+                                                    root.isUserChatNode(
+                                                        streamDelegate.model.nodeKind
+                                                    ) ? 0.78 : 0.92
+                                                )
+                                            )
+                                            x: root.isUserChatNode(
                                                 streamDelegate.model.nodeKind
-                                            ) ? 0.78 : 0.92
-                                        )
-                                    )
-                                    x: root.isUserChatNode(streamDelegate.model.nodeKind)
-                                        ? parent.width - width
-                                        : 0
-                                    onImplicitHeightChanged: {
-                                        if (root.followChatTail || root.bridgeBusy)
-                                            root.stickChatToLatest()
+                                            )
+                                                ? streamDelegate.width - width
+                                                : 0
+                                            onImplicitHeightChanged: {
+                                                if (root.followChatTail || root.bridgeBusy)
+                                                    root.stickChatToLatest()
+                                            }
+                                        }
                                     }
                                 }
                             }

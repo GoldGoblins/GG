@@ -14,7 +14,7 @@ _COLOR = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
 DEFAULTS = {
     "schema": SCHEMA,
-    "engineTarget": "LOCAL_QWEN",
+    "engineTarget": "GROK_TUI",
     "chatWidthRatio": 0.31,
     "telemetryWidth": 168,
     "utilityHeight": 112,

@@ -91,4 +91,9 @@ def queue(entry: Path = ENTRY) -> list[str]:
         ordered.append(rel)
 
     walk(start)
-    return [path.as_posix() for path in ordered if path.suffix == ".qml"]
+    defer = {"qml/components/WebPane.qml"}
+    return [
+        path.as_posix()
+        for path in ordered
+        if path.suffix == ".qml" and path.as_posix() not in defer
+    ]

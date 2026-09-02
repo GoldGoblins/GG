@@ -34,14 +34,18 @@ Update (download new functions from git/GitHub)
 
 GitHub
 ------
-There is no GitHub remote on this machine yet (no `gh`, no origin).
-Create an empty GitHub repo, then from GoldGoblins or from this zip:
+Public repo: https://github.com/GoldGoblins/GG
 
-  git remote add origin https://github.com/YOU/gg-ai-desktop.git
-  git push -u origin main
-  ./update-gg-ai-desktop.sh --set-origin https://github.com/YOU/gg-ai-desktop.git
+  git clone https://github.com/GoldGoblins/GG.git
+  ./update-gg-ai-desktop.sh --set-origin https://github.com/GoldGoblins/GG.git
 
 Others clone that URL and run the launcher. New features land with update.
+
+2026-09-02 lag pass vs fd6e733: GROK TUI is the default chat from the
+first frame; the PTY no longer spins the GUI thread (~80 % CPU / 0.25-0.5 s
+key lag); spectrum is 18 LED dots not solid bars; radio buffer is 1 s;
+the bottom strip follows RADIO when you start a station in the workspace.
+Work remains: not fully AAA / lag-free yet.
 
 Optional environment
 --------------------
@@ -50,7 +54,7 @@ Optional environment
   GG_WORKSPACE    project folder GROK TUI opens in. Default: $PWD
   GG_AI_ORIGIN    git URL used by update-gg-ai-desktop.sh
 
-First start: choose GROK TUI at the bottom of the chat pane.
+First start: GROK TUI is the chat. QWEN and GROK WORKER are opt-in under the pane.
 Log in through the TUI if grok asks.
 
 Do not put GGUF model weights in the GitHub repo. GROK TUI only needs the

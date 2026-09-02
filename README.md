@@ -17,9 +17,29 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
-## Patch notes · 2026-09-02
+## Patch notes · 2026-09-02 · lag pass
 
-What GitHub had until this push (`7ca8453`, 27 Aug 2026):
+What GitHub had until this push (`fd6e733`, earlier 2026-09-02):
+
+- DRAW desk, interactive desktop, MEDIA/UTILITIES strip, CRYPTO, ledger chrome, shell load
+- GROK TUI on a native grid, but it was not guaranteed to be the chat from the first frame
+- Typing and clicks inside this program could lag 0.25–0.5 s while other apps stayed fine
+
+What this patch changes on top of that:
+
+**GROK TUI is the default chat.** Start the program and Grok is already in the terminal. QWEN and GROK WORKER are opt-in. Chromium/WebEngine does not boot with the process.
+
+**PTY no longer pegs the GUI thread.** Qt6 `QSocketNotifier.activated` was overwriting the terminal id with `Type.Read`, so the PTY never drained and the main thread spun ~80 % CPU. Keys and clicks waited on that loop.
+
+**Spectrum is LED dots again.** 120 columns × 18 stacked LEDs, color by height — not solid bars that recolor as a whole.
+
+**Radio.** Stream buffer is 1 s (3 s was audible lag; 750 ms underran). The bottom MEDIA/UTILITIES strip follows RADIO when you start a station in the workspace.
+
+Still open: the desk is not fully AAA or lag-free. Function first, visualization as a cheap overlay.
+
+## Patch notes · 2026-09-02 · DRAW / media strip
+
+What GitHub had until that push (`7ca8453`, 27 Aug 2026):
 
 - Workspace hosts CODE, TERMINAL, WEB, EXTERNAL, SITE, **MEDIA**, **CRYPTO**, **TMOG**
 - GROK TUI on a native terminal grid (not Chromium)

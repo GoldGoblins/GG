@@ -30,7 +30,6 @@ def main() -> int:
         "qml/components/CryptoChart.qml",
         "qml/components/MediaSurface.qml",
         "qml/components/DrawSurface.qml",
-        "qml/components/WebPane.qml",
         "qml/components/WorkObject.qml",
         "qml/components/SettingsSurface.qml",
     ):
@@ -40,6 +39,8 @@ def main() -> int:
         raise AssertionError("unrelated shell dump leaked into queue")
     if "qml/crypto-hole/lightweight-charts.min.js" in rows:
         raise AssertionError("chart vendor leaked into QML load queue")
+    if "qml/components/WebPane.qml" in rows:
+        raise AssertionError("Chromium WebPane still warms the shell queue")
     if len(rows) < 8:
         raise AssertionError("queue too small to be a real graph")
     if len(rows) != len(set(rows)):

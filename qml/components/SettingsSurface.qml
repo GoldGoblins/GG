@@ -18,7 +18,7 @@ Item {
     property bool showOpenTabInInput: false
     property bool showInnerEditorChrome: true
     property string hostKind: "CODE"
-    property string engineTarget: "LOCAL_QWEN"
+    property string engineTarget: "GROK_TUI"
     property int utilityHeight: 112
     property bool desktopShell: false
     readonly property string themeId: "obsidian-ledger-standard"
@@ -194,7 +194,7 @@ Item {
                         root.showOpenTabInInputChangedByUser(false)
                         root.showInnerEditorChromeChangedByUser(true)
                         root.hostKindChangedByUser("CODE")
-                        root.engineTargetChangedByUser("LOCAL_QWEN")
+                        root.engineTargetChangedByUser("GROK_TUI")
                         root.utilityHeightChangedByUser(112)
                         root.desktopShellChangedByUser(false)
                     }

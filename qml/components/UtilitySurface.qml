@@ -52,31 +52,78 @@ Item {
             return 0
         return Math.max(0, Math.min(1, root.position / root.duration))
     }
-    property var peakLevels: []
-    property var peakHold: []
+    property string meterClock: "00:00"
+    property string meterLength: "00:00"
     readonly property int spectrumBars: 120
     readonly property int spectrumSegs: 18
     readonly property int peakHoldTicks: 5
     readonly property bool liveMeters: root.playing || root.paused
     readonly property bool hasSpectrum: root.spectrum.length > 0
 
-    function refresh() {
+    function pullLiveRaw() {
         if (!root.surfaceHost)
-            return
+            return ""
         var raw = ""
         if (root.surfaceHost.mediaLiveStatus)
             raw = root.surfaceHost.mediaLiveStatus()
-        else if (root.surfaceHost.mediaStatus)
-            raw = root.surfaceHost.mediaStatus()
-        else
+        if (!raw || raw === "{}")
+            return ""
+        return raw
+    }
+
+    function chromeBlob(parsed) {
+        return JSON.stringify({
+            "mode": String(parsed.mode || "MUSIC"),
+            "playing": parsed.playing === true,
+            "paused": parsed.paused === true,
+            "now": parsed.now || {},
+            "volume": Number(parsed.volume || 0),
+            "duration": Number(parsed.duration || 0),
+            "eq_preset": String(parsed.eq_preset || "Flat"),
+            "eq_bands": parsed.eq_bands || [],
+            "player": String(parsed.player || ""),
+            "shuffle": parsed.shuffle === true,
+            "repeat": String(parsed.repeat || "off")
+        })
+    }
+
+    function applyChrome(parsed) {
+        var blob = root.chromeBlob(parsed)
+        if (blob !== root.statusJson)
+            root.statusJson = blob
+    }
+
+    function refresh() {
+        var raw = root.pullLiveRaw()
+        if (!raw)
             return
-        if (raw !== root.statusJson)
-            root.statusJson = raw
-        if (root.liveMeters || root.hasSpectrum) {
-            root.updatePeaks()
-            if (spectrumCanvas)
-                spectrumCanvas.requestPaint()
+        root.refreshMeters(raw)
+    }
+
+    function refreshMeters(raw) {
+        var text = raw || root.pullLiveRaw()
+        if (!text)
+            return
+        var parsed
+        try {
+            parsed = JSON.parse(text)
+        } catch (err) {
+            return
         }
+        root.applyChrome(parsed)
+        var spec = parsed.spectrum
+        if (!spec || spec.length === undefined)
+            spec = []
+        if (spectrumCanvas)
+            spectrumCanvas.levels = spec
+        var clock = String(parsed.clock || "00:00")
+        var length = String(parsed.length || "00:00")
+        if (clock !== root.meterClock)
+            root.meterClock = clock
+        if (length !== root.meterLength)
+            root.meterLength = length
+        if (spectrumCanvas)
+            spectrumCanvas.requestPaint()
     }
 
     function setMode(mode) {
@@ -168,7 +215,7 @@ Item {
     }
 
     function bandAt(index) {
-        var rows = root.spectrum
+        var rows = spectrumCanvas ? spectrumCanvas.levels : root.spectrum
         if (!rows || rows.length === 0)
             return 0
         if (index < rows.length)
@@ -188,39 +235,6 @@ Item {
         return "#e05050"
     }
 
-    function updatePeaks() {
-        var peaks = root.peakLevels.length === root.spectrumBars
-            ? root.peakLevels.slice()
-            : []
-        var hold = root.peakHold.length === root.spectrumBars
-            ? root.peakHold.slice()
-            : []
-        var i
-        while (peaks.length < root.spectrumBars)
-            peaks.push(0)
-        while (hold.length < root.spectrumBars)
-            hold.push(0)
-        var step = 1 / root.spectrumSegs
-        for (i = 0; i < root.spectrumBars; i++) {
-            var level = 0
-            if (root.playing)
-                level = Math.min(1, root.bandAt(i))
-            if (level >= peaks[i]) {
-                peaks[i] = level
-                hold[i] = root.peakHoldTicks
-            } else if (!root.playing) {
-                hold[i] = 0
-                peaks[i] = Math.max(0, peaks[i] - step * 2)
-            } else if (hold[i] > 0) {
-                hold[i] -= 1
-            } else {
-                peaks[i] = Math.max(level, peaks[i] - step)
-            }
-        }
-        root.peakLevels = peaks
-        root.peakHold = hold
-    }
-
     function eqAt(index) {
         var rows = root.eqBands
         if (!rows || index >= rows.length)
@@ -237,8 +251,15 @@ Item {
     }
 
     Timer {
-        interval: 220
+        interval: 50
         running: root.liveMeters
+        repeat: true
+        onTriggered: root.refreshMeters()
+    }
+
+    Timer {
+        interval: 400
+        running: !root.liveMeters
         repeat: true
         onTriggered: root.refresh()
     }
@@ -415,9 +436,7 @@ Item {
                             var who = root.nowArtist.length > 0
                                 ? root.nowArtist + " · "
                                 : ""
-                            var clock = String(root.status.clock || "00:00")
-                            var length = String(root.status.length || "00:00")
-                            return who + clock + " / " + length
+                            return who + root.meterClock + " / " + root.meterLength
                         }
                         color: "#c8cdd4"
                         font.family: "monospace"
@@ -465,6 +484,9 @@ Item {
                         objectName: "utilitySpectrum"
                         width: parent.width
                         height: 44
+                        property var levels: []
+                        property var peaks: []
+                        property var holds: []
                         onWidthChanged: requestPaint()
                         onHeightChanged: requestPaint()
                         onPaint: {
@@ -482,14 +504,43 @@ Item {
                             var blockH = Math.max(1, Math.floor((h - (segs - 1) * gapY) / segs))
                             var usedH = segs * blockH + (segs - 1) * gapY
                             var yBase = h - usedH
+                            var rows = spectrumCanvas.levels
+                            var peaks = spectrumCanvas.peaks
+                            var holds = spectrumCanvas.holds
+                            if (!peaks || peaks.length !== cols) {
+                                peaks = []
+                                holds = []
+                                var p
+                                for (p = 0; p < cols; p++) {
+                                    peaks.push(0)
+                                    holds.push(0)
+                                }
+                                spectrumCanvas.peaks = peaks
+                                spectrumCanvas.holds = holds
+                            }
                             var x = 0
                             var i
                             var s
+                            var step = 1 / Math.max(1, segs)
                             for (i = 0; i < cols; i++) {
                                 var level = 0
-                                if (root.playing)
-                                    level = Math.min(1, root.bandAt(i))
-                                var peak = Math.min(1, Number(root.peakLevels[i] || 0))
+                                if (root.playing && rows && i < rows.length)
+                                    level = Math.min(1, Number(rows[i] || 0))
+                                var peak = Number(peaks[i] || 0)
+                                var hold = Number(holds[i] || 0)
+                                if (level >= peak) {
+                                    peak = level
+                                    hold = root.peakHoldTicks
+                                } else if (!root.playing) {
+                                    hold = 0
+                                    peak = Math.max(0, peak - step * 2)
+                                } else if (hold > 0) {
+                                    hold -= 1
+                                } else {
+                                    peak = Math.max(level, peak - step)
+                                }
+                                peaks[i] = peak
+                                holds[i] = hold
                                 var lit = Math.round(level * segs)
                                 var peakSeg = Math.round(peak * segs) - 1
                                 if (peak > 0 && peakSeg < 0)
