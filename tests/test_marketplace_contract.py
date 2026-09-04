@@ -160,6 +160,69 @@ def main() -> int:
     if failed.get("listing_count") != 2:
         raise AssertionError("host error wiped catalog")
 
+    iron = marketplace_contract.list_element("Fe")
+    if iron["kind"] != "ELEMENT" or iron["material"] != "Fe":
+        raise AssertionError("element Fe")
+    if not str(iron.get("receipt") or "").startswith("paper:"):
+        raise AssertionError("paper receipt")
+    again = marketplace_contract.list_element("Fe")
+    if again["id"] != iron["id"]:
+        raise AssertionError("element remint")
+    bike = marketplace_contract.list_item(
+        {
+            "title": "Steel bicycle",
+            "kind": "OBJECT",
+            "category": "ITEM",
+            "material": "MIXED",
+            "composition": [
+                {
+                    "id": iron["id"],
+                    "kind": "ELEMENT",
+                    "symbol": "Fe",
+                    "title": "Iron",
+                    "mass_g": 8000,
+                }
+            ],
+            "price_sol": "2",
+        }
+    )
+    if bike["part_count"] != 1 or bike["kind"] != "OBJECT":
+        raise AssertionError("object composition")
+    scrap = marketplace_contract.list_item(
+        {
+            "title": "Scrap frame",
+            "category": "ITEM",
+            "material": "METAL",
+            "price_sol": "0.1",
+        }
+    )
+    reborn = marketplace_contract.rebirth_item(
+        {
+            "title": "New rack from scrap",
+            "previous_lives": [bike["id"], scrap["id"]],
+        }
+    )
+    if reborn["life_count"] != 2:
+        raise AssertionError("rebirth lives")
+    if "Fe" not in str(reborn.get("composition")):
+        raise AssertionError("rebirth composition lost Fe")
+    payload = marketplace_contract.status_payload()
+    if len(payload.get("elements") or []) < 10:
+        raise AssertionError("element table")
+    if "ELEMENT" not in (payload.get("kinds") or []):
+        raise AssertionError("kinds")
+
+    src = (PROJECT / "backend" / "chat_surface_host.py").read_text(encoding="utf-8")
+    if "marketplaceRebirth" not in src or "marketplaceListElement" not in src:
+        raise AssertionError("host rebirth/element slots missing")
+    qml = (PROJECT / "qml" / "components" / "MarketplaceSurface.qml").read_text(
+        encoding="utf-8"
+    )
+    if "ELEMENTS" not in qml or "LIVES" not in qml or "MINT RECEIPT" not in qml:
+        raise AssertionError("marketplace UX pages missing")
+    if 'leftLegend: "MARKETPLACE"' in qml:
+        raise AssertionError("nested marketplace frame")
+
     print("MARKETPLACE_CONTRACT_TEST=PASS")
     return 0
 

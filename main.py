@@ -34,9 +34,11 @@ from backend import action_execution_eligibility
 from backend import action_execution_safe_tool_adapter
 from backend import action_intent_contract
 from backend import action_task_continuity
+from backend import live_mandate_store
 from backend import participant_task_receiver
 from backend import idekompass_decision_ingress
 from backend import orchestrator_mandate_evaluation_adapter
+from backend import task_scoped_action_grant
 from backend import machine_graph
 from backend.live_aid.bridge import LiveAidService
 from backend.live_aid import qml_preflight_runner
@@ -4662,6 +4664,30 @@ def _build_workbench_machine_graph() -> machine_graph.MachineGraph:
         ('call-99', 'participant_task_receiver.finalize_participant_response', 'CHAT_BRIDGE', 'PARTICIPANT_TASK_RECEIVER'),
         ('call-100', 'initiative_proposal.derive_from_decision', 'IDEKOMPASS', 'INITIATIVE_PROPOSAL'),
         ('call-101', 'learning_memory.build_episodic_experience', 'ACTION_DONE_WHEN', 'LEARNING_MEMORY_PROMOTION'),
+        (
+            "call-102",
+            "live_mandate_store.put_pending",
+            "CHAT_BRIDGE",
+            "LIVE_MANDATE_STORE",
+        ),
+        (
+            "call-103",
+            "live_mandate_store.approve",
+            "CHAT_BRIDGE",
+            "LIVE_MANDATE_STORE",
+        ),
+        (
+            "call-104",
+            "live_mandate_store.reject",
+            "CHAT_BRIDGE",
+            "LIVE_MANDATE_STORE",
+        ),
+        (
+            "call-105",
+            "task_scoped_action_grant.issue_from_approved_record",
+            "CHAT_BRIDGE",
+            "TASK_SCOPED_ACTION_GRANT",
+        ),
     )
 
     process_edges = (
@@ -5279,6 +5305,8 @@ def _build_workbench_machine_graph() -> machine_graph.MachineGraph:
         ('SEMANTIC_CLOSURE', 'backend.semantic_closure', 'STATELESS'),
         ('INITIATIVE_PROPOSAL', 'backend.initiative_proposal', 'STATELESS'),
         ('LEARNING_MEMORY_PROMOTION', 'backend.learning_memory_promotion', 'STATELESS'),
+        ('LIVE_MANDATE_STORE', 'backend.live_mandate_store', 'LIVE_MANDATE_STORE'),
+        ('TASK_SCOPED_ACTION_GRANT', 'backend.task_scoped_action_grant', 'STATELESS'),
     )
 
     ports_by_node: dict[str, list[machine_graph.PortSpec]] = {
@@ -5628,6 +5656,7 @@ class ChatBridge(QObject):
         self._intent_capability_registry: object | None = None
         self._mandate_session_id = "mandate-session-" + uuid.uuid4().hex
         self._pending_mandates: dict[str, dict[str, object]] = {}
+        self._live_mandate_store: live_mandate_store.MandateStore | None = None
         self._autonomy_session_id = "session-" + uuid.uuid4().hex
         self._autonomy_tasks: dict[str, dict[str, object]] = {}
         self._autonomy_stdout_buffer = ""
@@ -5665,6 +5694,16 @@ class ChatBridge(QObject):
                 Path("/home/GG/.local/state/goldgoblins") / "workbench-control-v2",
                 legacy_root=(runtime / "gg-control-plane-v1"),
             )
+            mandate_root = (
+                Path("/home/GG/.local/state/goldgoblins")
+                / "gg-ai-desktop"
+                / "mandate-store"
+            )
+            self._live_mandate_store = live_mandate_store.MandateStore(
+                mandate_root
+            )
+            self._live_mandate_store.initialize()
+            self._publish_mandate_rail()
             self._recover_selfdev_records(runtime)
             self._block_unrecoverable_autonomy_records()
         except Exception as exc:
@@ -5836,6 +5875,25 @@ class ChatBridge(QObject):
                 )
             except Exception:
                 continue
+
+    def _publish_mandate_rail(
+        self,
+        pending: dict[str, object] | None = None,
+    ) -> None:
+        payload = live_mandate_store.rail_snapshot(
+            store=getattr(self, "_live_mandate_store", None),
+            pending=pending if isinstance(pending, dict) else None,
+        )
+        root = getattr(self, "_root", None)
+        setter = getattr(root, "setMandateRail", None) if root is not None else None
+        if callable(setter):
+            setter(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
 
     def _set_bridge_activity(self, busy: bool, task_id: str = "") -> None:
         setter = getattr(self._root, "setBridgeActivity", None)
@@ -6203,6 +6261,14 @@ class ChatBridge(QObject):
                 self._task_ledger,
                 pending,
             )
+            if getattr(self, "_live_mandate_store", None) is not None:
+                live_mandate_store.put_pending(
+                    self._live_mandate_store,
+                    pending,
+                )
+            publisher = getattr(self, "_publish_mandate_rail", None)
+            if callable(publisher):
+                publisher(pending)
         except Exception:
             self._pending_mandates.pop(
                 pending_id,
@@ -6374,6 +6440,19 @@ class ChatBridge(QObject):
 
             if parsed.get("action") == "REJECT":
                 pending["status"] = "REJECTED"
+                if getattr(self, "_live_mandate_store", None) is not None:
+                    live_mandate_store.reject(
+                        self._live_mandate_store,
+                        request_capture_sha256=str(
+                            pending["request_capture_sha256"]
+                        ),
+                        approval_scope_revision=str(
+                            pending["approval_scope_revision"]
+                        ),
+                    )
+                publisher = getattr(self, "_publish_mandate_rail", None)
+                if callable(publisher):
+                    publisher(pending)
                 persist_action_approval()
                 self._append(
                     "GG MANDATE",
@@ -6498,8 +6577,39 @@ class ChatBridge(QObject):
             pending["approver_id"] = approver_id
             pending["approval_receipt"] = copy.deepcopy(receipt)
             pending["mandate_assertion_sha256"] = assertion_sha
+            if getattr(self, "_live_mandate_store", None) is not None:
+                approved_record = live_mandate_store.approve(
+                    self._live_mandate_store,
+                    request_capture_sha256=str(
+                        pending["request_capture_sha256"]
+                    ),
+                    approval_scope_revision=str(
+                        pending["approval_scope_revision"]
+                    ),
+                    approver_id=approver_id,
+                    mandate_assertion_sha256=assertion_sha,
+                    evaluation_receipt=copy.deepcopy(receipt),
+                )
+                pending["task_scoped_grant"] = (
+                    task_scoped_action_grant.issue_from_approved_record(
+                        approved_record
+                    )
+                )
+            publisher = getattr(self, "_publish_mandate_rail", None)
+            if callable(publisher):
+                publisher(pending)
             persist_action_approval()
 
+            grant = pending.get("task_scoped_grant")
+            grant_line = (
+                "ACTION_AUTHORITY: TASK_SCOPED\n"
+                "GENERAL_ACTION_AUTHORITY: NONE\n"
+                "GRANT_SHA256: "
+                + str(grant.get("grant_sha256"))
+                + "\n"
+                if isinstance(grant, dict)
+                else "ACTION_AUTHORITY: NONE\n"
+            )
             self._append(
                 "GG MANDATE",
                 "VALID",
@@ -6509,8 +6619,9 @@ class ChatBridge(QObject):
                     "REASON: APPROVAL_SCOPE_MATCH\n"
                     "MANDATE_ASSERTION_SHA256: "
                     + assertion_sha
-                    + "\nACTION_AUTHORITY: NONE\n"
-                    "K7-L EXECUTION: NO\n"
+                    + "\n"
+                    + grant_line
+                    + "K7-L EXECUTION: NO\n"
                     "CAPABILITY EXECUTION: NO\n"
                     "D67 EXECUTION ELIGIBILITY: PASS\nSAFE TOOL PROFILE: READ · request staged only\nD68 EXECUTION: STARTING - exact staged READ"
                 ),

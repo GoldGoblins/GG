@@ -10,14 +10,19 @@ Item {
     property int frameRadius: 4
     property string statusJson: "{}"
     property string page: "CATALOG"
-    property string draftCategory: "MATERIAL"
+    property string draftKind: "OBJECT"
+    property string draftCategory: "ITEM"
     property string draftMaterial: "UNKNOWN"
+    property var draftParts: []
+    property var draftLives: []
+    property string searchQuery: ""
     property string formError: ""
     readonly property var nav: [
         "CATALOG",
-        "CATEGORIES",
-        "LIST",
-        "PROVENANCE",
+        "REGISTER",
+        "RECEIPT",
+        "ELEMENTS",
+        "LIVES",
         "ACTIVITY"
     ]
 
@@ -31,66 +36,41 @@ Item {
 
     readonly property var listings: {
         var rows = root.status.listings
-        if (rows && rows.length !== undefined)
+        if (!rows || rows.length === undefined)
+            return []
+        var q = String(root.searchQuery || "").toLowerCase()
+        if (!q)
             return rows
-        return []
+        var out = []
+        var i
+        for (i = 0; i < rows.length; i++) {
+            var row = rows[i] || {}
+            var hay = String(row.title || "") + " " + String(row.material || "")
+                + " " + String(row.kind || "") + " " + String(row.maker || "")
+            if (hay.toLowerCase().indexOf(q) >= 0)
+                out.push(row)
+        }
+        return out
     }
-    readonly property var categories: {
-        var rows = root.status.categories
-        if (rows && rows.length !== undefined && rows.length > 0)
-            return rows
-        return [
-            {"id": "MATERIAL", "label": "MATERIAL", "count": 0, "root_short": "empty"},
-            {"id": "ITEM", "label": "ITEM", "count": 0, "root_short": "empty"},
-            {"id": "ART", "label": "ART", "count": 0, "root_short": "empty"},
-            {"id": "COLLECTIBLE", "label": "COLLECTIBLE", "count": 0, "root_short": "empty"},
-            {"id": "DOCUMENT", "label": "DOCUMENT", "count": 0, "root_short": "empty"},
-            {"id": "TOOL", "label": "TOOL", "count": 0, "root_short": "empty"},
-            {"id": "COMPONENT", "label": "COMPONENT", "count": 0, "root_short": "empty"}
-        ]
-    }
-    readonly property var ledger: {
-        var rows = root.status.ledger
-        if (rows && rows.length !== undefined)
-            return rows
-        return []
-    }
-    readonly property var filters: {
-        var rows = root.status.filters
-        if (rows && rows.length !== undefined && rows.length > 0)
-            return rows
-        return [
-            "ALL",
-            "MATERIAL",
-            "ITEM",
-            "ART",
-            "COLLECTIBLE",
-            "DOCUMENT",
-            "TOOL",
-            "COMPONENT"
-        ]
-    }
-    readonly property var materials: {
-        var rows = root.status.materials
-        if (rows && rows.length !== undefined && rows.length > 0)
-            return rows
-        return [
-            "GOLD",
-            "SILVER",
-            "COPPER",
-            "WOOD",
-            "STONE",
-            "FABRIC",
-            "METAL",
-            "DIGITAL",
-            "MIXED",
-            "UNKNOWN"
-        ]
-    }
+    readonly property var categories: root.status.categories || []
+    readonly property var elements: root.status.elements || []
+    readonly property var lives: root.status.lives || []
+    readonly property var ledger: root.status.ledger || []
+    readonly property var filters: root.status.filters && root.status.filters.length
+        ? root.status.filters
+        : ["ALL", "ELEMENT", "OBJECT", "ITEM", "MATERIAL"]
+    readonly property var materials: root.status.materials && root.status.materials.length
+        ? root.status.materials
+        : ["UNKNOWN", "MIXED", "Fe", "Cu", "Au"]
+    readonly property var kinds: root.status.kinds && root.status.kinds.length
+        ? root.status.kinds
+        : ["ELEMENT", "SUBSTANCE", "OBJECT"]
     readonly property var wallet: root.status.wallet || {}
     readonly property var merkle: root.status.merkle || {}
     readonly property var selected: root.status.selected || null
     readonly property var proof: root.status.proof || null
+    readonly property var selectedParts: (root.selected && root.selected.composition) || []
+    readonly property var selectedLife: (root.selected && root.selected.lifecycle) || []
     readonly property string legend: String(root.status.legend || "TESTNET")
     readonly property string activeFilter: String(root.status.filter || "ALL")
     readonly property bool connected: root.wallet.connected === true
@@ -120,7 +100,50 @@ Item {
         if (!root.surfaceHost || !root.surfaceHost.marketplaceSelect)
             return
         root.applyRaw(root.surfaceHost.marketplaceSelect(listingId))
-        root.page = "PROVENANCE"
+        root.page = "RECEIPT"
+    }
+
+    function togglePart(row) {
+        var id = String((row || {}).id || "")
+        if (!id)
+            return
+        var next = []
+        var found = false
+        var i
+        for (i = 0; i < root.draftParts.length; i++) {
+            if (String(root.draftParts[i].id || "") === id)
+                found = true
+            else
+                next.push(root.draftParts[i])
+        }
+        if (!found) {
+            next.push({
+                "id": id,
+                "kind": String(row.kind || "ELEMENT"),
+                "symbol": String(row.material || row.symbol || ""),
+                "title": String(row.title || ""),
+                "mass_g": Number(row.mass_g || 0)
+            })
+        }
+        root.draftParts = next
+    }
+
+    function toggleLife(listingId) {
+        var id = String(listingId || "")
+        if (!id)
+            return
+        var next = []
+        var found = false
+        var i
+        for (i = 0; i < root.draftLives.length; i++) {
+            if (String(root.draftLives[i]) === id)
+                found = true
+            else
+                next.push(root.draftLives[i])
+        }
+        if (!found)
+            next.push(id)
+        root.draftLives = next
     }
 
     function submitList() {
@@ -130,11 +153,17 @@ Item {
             root.surfaceHost.marketplaceList(
                 JSON.stringify({
                     "title": titleField.text,
+                    "kind": root.draftKind,
                     "category": root.draftCategory,
                     "material": root.draftMaterial,
                     "mint": mintField.text,
                     "price_sol": priceField.text,
-                    "description": descField.text
+                    "description": descField.text,
+                    "maker": makerField.text,
+                    "origin": originField.text,
+                    "mass_g": massField.text,
+                    "composition": root.draftParts,
+                    "previous_lives": root.draftLives
                 })
             )
         )
@@ -143,7 +172,42 @@ Item {
             mintField.text = ""
             priceField.text = "0"
             descField.text = ""
-            root.page = "PROVENANCE"
+            makerField.text = ""
+            originField.text = ""
+            massField.text = "0"
+            root.draftParts = []
+            root.draftLives = []
+            root.page = "RECEIPT"
+        }
+    }
+
+    function registerElement(symbol) {
+        if (!root.surfaceHost || !root.surfaceHost.marketplaceListElement)
+            return
+        root.applyRaw(root.surfaceHost.marketplaceListElement(symbol))
+        if (!root.formError)
+            root.page = "RECEIPT"
+    }
+
+    function rebirthSelected() {
+        if (!root.surfaceHost || !root.surfaceHost.marketplaceRebirth)
+            return
+        if (root.draftLives.length < 1)
+            return
+        root.applyRaw(
+            root.surfaceHost.marketplaceRebirth(
+                JSON.stringify({
+                    "title": rebirthField.text,
+                    "previous_lives": root.draftLives,
+                    "category": "ITEM",
+                    "material": "MIXED"
+                })
+            )
+        )
+        if (!root.formError) {
+            rebirthField.text = ""
+            root.draftLives = []
+            root.page = "RECEIPT"
         }
     }
 
@@ -271,6 +335,13 @@ Item {
                 spacing: 6
                 visible: root.page === "CATALOG"
 
+                GgField {
+                    id: searchField
+                    width: Math.min(parent.width, 420)
+                    placeholderText: "search title, maker, material"
+                    onTextChanged: root.searchQuery = text
+                }
+
                 Flow {
                     width: parent.width
                     spacing: 10
@@ -293,10 +364,10 @@ Item {
                 }
 
                 Text {
-                    text: String(root.status.visible_count || 0)
-                        + " / "
+                    text: String(root.listings.length)
+                        + " shown · "
                         + String(root.status.listing_count || 0)
-                        + " listings · solana catalog"
+                        + " receipts · NFT = kvitto, not pixels"
                     color: "#a8b0b8"
                     font.family: "monospace"
                     font.pixelSize: 12
@@ -309,18 +380,18 @@ Item {
                 visible: root.page === "CATALOG"
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
-                contentHeight: catalogCol.height
+                contentHeight: catalogFlow.height
                 ScrollBar.vertical: GgScrollBar {}
 
-                Column {
-                    id: catalogCol
+                Flow {
+                    id: catalogFlow
                     width: parent.width
                     spacing: 8
 
                     Text {
                         visible: root.listings.length === 0
-                        width: parent.width
-                        text: "No listings yet. Open LIST and register a material or item. Each listing hashes into the Solana catalog merkle tree."
+                        width: catalogFlow.width
+                        text: "Inga kvitton ännu. REGISTER ett föremål eller ELEMENT ett grundämne. Ett kvitto är en paper-NFT på testnet."
                         color: "#a8b0b8"
                         font.family: "monospace"
                         font.pixelSize: 12
@@ -329,152 +400,66 @@ Item {
 
                     Repeater {
                         model: root.listings.length
-                        delegate: Rectangle {
+                        delegate: TmogCard {
                             required property int index
-                            width: catalogCol.width
-                            height: Math.max(52, listingCol.height + 12)
-                            color: root.selected && String(root.selected.id || "")
-                                   === String((root.listings[index] || {}).id || "")
-                                ? "#1a1a1a"
-                                : "#121212"
-                            border.width: 1
-                            border.color: "#2a2a2a"
-                            radius: 2
+                            width: Math.max(240, (catalogFlow.width - 8) / 2)
+                            height: 92
+                            leftLegend: String((root.listings[index] || {}).kind || "OBJECT")
+                            rightLegend: String((root.listings[index] || {}).status || "")
+                            borderColor: root.selected && String(root.selected.id || "")
+                                         === String((root.listings[index] || {}).id || "")
+                                ? "#8b949e" : "#3a3a3a"
 
                             Column {
-                                id: listingCol
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 2
-
-                                Row {
-                                    spacing: 10
-                                    Text {
-                                        text: String((root.listings[index] || {}).title || "")
-                                        color: "#e6e6e6"
-                                        font.family: "monospace"
-                                        font.pixelSize: 13
-                                        font.bold: true
-                                    }
-                                    Text {
-                                        text: String((root.listings[index] || {}).status || "")
-                                        color: root.statusColor((root.listings[index] || {}).status)
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                        font.bold: true
-                                    }
-                                    Text {
-                                        text: String((root.listings[index] || {}).price_sol || "0") + " SOL"
-                                        color: "#c8a97e"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                    }
-                                }
-                                Text {
-                                    width: listingCol.width
-                                    text: String((root.listings[index] || {}).category || "")
-                                        + " · "
-                                        + String((root.listings[index] || {}).material || "")
-                                        + " · mint "
-                                        + String((root.listings[index] || {}).mint_short || "UNBOUND")
-                                        + " · "
-                                        + String((root.listings[index] || {}).identity_short || "")
-                                    color: "#a8b0b8"
-                                    font.family: "monospace"
-                                    font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
-                                }
-                            }
-
-                            MouseArea {
                                 anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.selectRow(String((root.listings[index] || {}).id || ""))
-                            }
-                        }
-                    }
-                }
-            }
-
-            Flickable {
-                anchors.fill: parent
-                visible: root.page === "CATEGORIES"
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                contentHeight: catCol.height
-                ScrollBar.vertical: GgScrollBar {}
-
-                Column {
-                    id: catCol
-                    width: parent.width
-                    spacing: 8
-
-                    Text {
-                        width: parent.width
-                        text: "Category subtrees under "
-                            + String(root.merkle.domain || "MARKETPLACE")
-                            + " / "
-                            + String(root.merkle.scope || "solana.catalog")
-                            + ". Root "
-                            + root.shortHash(root.merkle.root_sha256)
-                        color: "#c8cdd4"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        wrapMode: Text.WordWrap
-                    }
-
-                    Repeater {
-                        model: root.categories.length
-                        delegate: Rectangle {
-                            required property int index
-                            width: catCol.width
-                            height: 44
-                            color: "#121212"
-                            border.width: 1
-                            border.color: "#2a2a2a"
-                            radius: 2
-
-                            Row {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 12
-
+                                spacing: 2
                                 Text {
-                                    width: 120
-                                    text: String((root.categories[index] || {}).label || "")
-                                    color: "#d8dee9"
+                                    width: parent.width
+                                    text: String((root.listings[index] || {}).title || "")
+                                    color: "#e6e6e6"
                                     font.family: "monospace"
-                                    font.pixelSize: 12
+                                    font.pixelSize: 13
                                     font.bold: true
+                                    elide: Text.ElideRight
                                 }
                                 Text {
-                                    width: 64
-                                    text: String((root.categories[index] || {}).count || 0)
+                                    width: parent.width
+                                    text: String((root.listings[index] || {}).material || "")
+                                        + " · "
+                                        + String((root.listings[index] || {}).part_count || 0)
+                                        + " parts · "
+                                        + String((root.listings[index] || {}).life_count || 0)
+                                        + " lives · "
+                                        + String((root.listings[index] || {}).price_sol || "0")
+                                        + " SOL"
                                     color: "#c8a97e"
                                     font.family: "monospace"
                                     font.pixelSize: 12
+                                    elide: Text.ElideRight
                                 }
                                 Text {
-                                    text: String((root.categories[index] || {}).root_short || "empty")
+                                    width: parent.width
+                                    text: String((root.listings[index] || {}).receipt || "")
                                     color: "#b6a6c8"
                                     font.family: "monospace"
                                     font.pixelSize: 12
+                                    elide: Text.ElideRight
                                 }
                             }
 
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.setFilter(String((root.categories[index] || {}).id || "ALL"))
-                                    root.page = "CATALOG"
+                                onClicked: function(mouse) {
+                                    var row = root.listings[index] || {}
+                                    if (mouse.modifiers & Qt.ControlModifier)
+                                        root.togglePart(row)
+                                    else if (mouse.modifiers & Qt.ShiftModifier)
+                                        root.toggleLife(String(row.id || ""))
+                                    else
+                                        root.selectRow(String(row.id || ""))
                                 }
+                                onPressAndHold: root.toggleLife(String((root.listings[index] || {}).id || ""))
                             }
                         }
                     }
@@ -483,7 +468,7 @@ Item {
 
             Flickable {
                 anchors.fill: parent
-                visible: root.page === "LIST"
+                visible: root.page === "REGISTER" || root.page === "LIST"
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 contentHeight: listCol.height
@@ -496,11 +481,44 @@ Item {
 
                     Text {
                         width: parent.width
-                        text: "Register a material or item. Optional mint binds it to a Solana NFT. Listing is paper/testnet until trade authority exists."
+                        text: "Blocket-enkelt: namnge föremålet, välj om det är grundämne, ämne eller sak. Kvittot mintas som paper-NFT. Sammansättning och tidigare liv kan fyllas i senare när fler producenter är med."
                         color: "#a8b0b8"
                         font.family: "monospace"
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
+                    }
+
+                    Text {
+                        text: "KIND"
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Flow {
+                        width: parent.width
+                        spacing: 10
+                        Repeater {
+                            model: root.kinds
+                            Text {
+                                required property string modelData
+                                text: modelData
+                                color: root.draftKind === modelData ? "#d8dee9" : "#5d6670"
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                font.bold: root.draftKind === modelData
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.draftKind = modelData
+                                        if (modelData === "ELEMENT")
+                                            root.draftCategory = "MATERIAL"
+                                        else if (modelData === "OBJECT")
+                                            root.draftCategory = "ITEM"
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Text {
@@ -512,7 +530,7 @@ Item {
                     GgField {
                         id: titleField
                         width: Math.min(listCol.width, 520)
-                        placeholderText: "item or material name"
+                        placeholderText: "cykel, guldörhänge, stålämne, Fe…"
                     }
 
                     Text {
@@ -540,7 +558,7 @@ Item {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: root.draftCategory = String(
-                                        (root.categories[index] || {}).id || "MATERIAL"
+                                        (root.categories[index] || {}).id || "ITEM"
                                     )
                                 }
                             }
@@ -548,7 +566,7 @@ Item {
                     }
 
                     Text {
-                        text: "MATERIAL"
+                        text: root.draftKind === "ELEMENT" ? "ELEMENT" : "MATERIAL"
                         color: "#a8b0b8"
                         font.family: "monospace"
                         font.pixelSize: 12
@@ -557,7 +575,7 @@ Item {
                         width: parent.width
                         spacing: 10
                         Repeater {
-                            model: root.materials
+                            model: root.draftKind === "ELEMENT" ? ["Fe", "Cu", "Au", "Ag", "C", "Al", "Si", "O", "H", "Pb", "Sn", "Zn", "Ti", "Ni", "Cr"] : root.materials
                             Text {
                                 required property string modelData
                                 text: modelData
@@ -574,29 +592,60 @@ Item {
                         }
                     }
 
-                    Text {
-                        text: "SOLANA MINT (optional)"
-                        color: "#a8b0b8"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                    }
-                    GgField {
-                        id: mintField
-                        width: Math.min(listCol.width, 520)
-                        placeholderText: "base58 mint pubkey"
+                    Row {
+                        spacing: 12
+                        Column {
+                            spacing: 4
+                            Text {
+                                text: "MASS g"
+                                color: "#a8b0b8"
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                            }
+                            GgField {
+                                id: massField
+                                width: 120
+                                text: "0"
+                            }
+                        }
+                        Column {
+                            spacing: 4
+                            Text {
+                                text: "PRICE SOL"
+                                color: "#a8b0b8"
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                            }
+                            GgField {
+                                id: priceField
+                                width: 120
+                                text: "0"
+                            }
+                        }
                     }
 
                     Text {
-                        text: "PRICE SOL"
+                        text: "MAKER"
                         color: "#a8b0b8"
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
                     GgField {
-                        id: priceField
-                        width: 160
-                        text: "0"
-                        placeholderText: "0"
+                        id: makerField
+                        width: Math.min(listCol.width, 520)
+                        placeholderText: "who made it"
+                    }
+
+                    Text {
+                        text: "ORIGIN"
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    GgField {
+                        id: originField
+                        width: Math.min(listCol.width, 520)
+                        placeholderText: "mine, mill, workshop, previous owner"
                     }
 
                     Text {
@@ -608,7 +657,43 @@ Item {
                     GgField {
                         id: descField
                         width: Math.min(listCol.width, 520)
-                        placeholderText: "what it is and where it came from"
+                        placeholderText: "what it is, what it is made of, where it came from"
+                    }
+
+                    Text {
+                        text: "SOLANA MINT (optional · empty = paper receipt)"
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    GgField {
+                        id: mintField
+                        width: Math.min(listCol.width, 520)
+                        placeholderText: "base58 mint or leave blank"
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: "COMPOSITION  " + String(root.draftParts.length) + " parts · click an ELEMENT receipt in CATALOG then here, or register elements first"
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        visible: root.draftParts.length > 0
+                        width: parent.width
+                        text: {
+                            var i
+                            var bits = []
+                            for (i = 0; i < root.draftParts.length; i++)
+                                bits.push(String(root.draftParts[i].symbol || root.draftParts[i].title || ""))
+                            return bits.join(" · ")
+                        }
+                        color: "#8db89a"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
                     }
 
                     Text {
@@ -622,7 +707,7 @@ Item {
                     }
 
                     GgButton {
-                        text: "LIST ITEM"
+                        text: "MINT RECEIPT"
                         onClicked: root.submitList()
                     }
                 }
@@ -630,7 +715,7 @@ Item {
 
             Flickable {
                 anchors.fill: parent
-                visible: root.page === "PROVENANCE"
+                visible: root.page === "RECEIPT" || root.page === "PROVENANCE"
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 contentHeight: proofCol.height
@@ -644,7 +729,7 @@ Item {
                     Text {
                         visible: root.selected === null
                         width: parent.width
-                        text: "Select a listing in CATALOG to see its merkle path."
+                        text: "Välj ett kvitto i CATALOG. Identity-hashen är kvittot. State-hashen rör sig när ägare byts."
                         color: "#a8b0b8"
                         font.family: "monospace"
                         font.pixelSize: 12
@@ -661,12 +746,16 @@ Item {
                     }
                     Text {
                         visible: root.selected !== null
-                        text: String((root.selected || {}).category || "")
+                        text: String((root.selected || {}).kind || "")
+                            + " · "
+                            + String((root.selected || {}).category || "")
                             + " · "
                             + String((root.selected || {}).material || "")
                             + " · "
                             + String((root.selected || {}).status || "")
                             + " · "
+                            + String((root.selected || {}).mass_g || 0)
+                            + " g · "
                             + String((root.selected || {}).price_sol || "0")
                             + " SOL"
                         color: "#c8cdd4"
@@ -681,6 +770,15 @@ Item {
                         font.family: "monospace"
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        visible: root.selected !== null
+                        width: parent.width
+                        text: "receipt   " + String((root.selected || {}).receipt || "")
+                        color: "#c8a97e"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
                     }
                     Text {
                         visible: root.selected !== null
@@ -703,18 +801,6 @@ Item {
                     Text {
                         visible: root.selected !== null
                         width: parent.width
-                        text: "category  "
-                            + String((root.proof || {}).category || "")
-                            + "  "
-                            + String((root.proof || {}).category_root || "")
-                        color: "#b6a6c8"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        wrapMode: Text.WrapAnywhere
-                    }
-                    Text {
-                        visible: root.selected !== null
-                        width: parent.width
                         text: "catalog   " + String((root.proof || {}).catalog_root || "")
                         color: "#b6a6c8"
                         font.family: "monospace"
@@ -724,12 +810,14 @@ Item {
                     Text {
                         visible: root.selected !== null
                         width: parent.width
-                        text: "mint      "
-                            + (String((root.selected || {}).mint || "") || "UNBOUND")
+                        text: "maker     "
+                            + (String((root.selected || {}).maker || "") || "—")
+                            + "   origin "
+                            + (String((root.selected || {}).origin || "") || "—")
                         color: "#c8cdd4"
                         font.family: "monospace"
                         font.pixelSize: 12
-                        wrapMode: Text.WrapAnywhere
+                        wrapMode: Text.WordWrap
                     }
                     Text {
                         visible: root.selected !== null
@@ -740,6 +828,54 @@ Item {
                         font.family: "monospace"
                         font.pixelSize: 12
                         wrapMode: Text.WrapAnywhere
+                    }
+
+                    Text {
+                        visible: root.selectedParts.length > 0
+                        text: "COMPOSITION"
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Repeater {
+                        model: root.selectedParts
+                        delegate: Text {
+                            required property var modelData
+                            width: proofCol.width
+                            text: String(modelData.symbol || "")
+                                + "  "
+                                + String(modelData.title || "")
+                                + "  "
+                                + String(modelData.mass_g || 0)
+                                + " g  "
+                                + String(modelData.id || "")
+                            color: "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
+                    Text {
+                        visible: root.selectedLife.length > 0
+                        text: "LIFECYCLE"
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Repeater {
+                        model: root.selectedLife
+                        delegate: Text {
+                            required property var modelData
+                            text: String(modelData.kind || "")
+                                + "  "
+                                + String(modelData.ts || "")
+                            color: "#c8a97e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                        }
                     }
 
                     Row {
@@ -754,10 +890,156 @@ Item {
                             text: "DELIST"
                             onClicked: root.delistSelected()
                         }
+                        GgButton {
+                            text: "USE AS PREVIOUS LIFE"
+                            onClicked: root.toggleLife(String((root.selected || {}).id || ""))
+                        }
                     }
 
                     Text {
-                        visible: root.formError.length > 0 && root.page === "PROVENANCE"
+                        visible: root.formError.length > 0 && (root.page === "RECEIPT" || root.page === "PROVENANCE")
+                        width: parent.width
+                        text: root.formError
+                        color: "#c98989"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+
+            Flickable {
+                anchors.fill: parent
+                visible: root.page === "ELEMENTS"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: elCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: elCol
+                    width: parent.width
+                    spacing: 8
+
+                    Text {
+                        width: parent.width
+                        text: "Grundämnen är egna kvitton. Ett föremål är en sammansättning. Klicka för att minta paper-NFT för ämnet."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Flow {
+                        width: parent.width
+                        spacing: 8
+                        Repeater {
+                            model: root.elements.length
+                            delegate: TmogCard {
+                                required property int index
+                                width: 92
+                                height: 56
+                                leftLegend: String((root.elements[index] || {}).symbol || "")
+                                rightLegend: (root.elements[index] || {}).listed ? "ON" : ""
+                                borderColor: (root.elements[index] || {}).listed ? "#8db89a" : "#3a3a3a"
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: String((root.elements[index] || {}).name || "")
+                                    color: "#c8cdd4"
+                                    font.family: "monospace"
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.registerElement(String((root.elements[index] || {}).symbol || ""))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Flickable {
+                anchors.fill: parent
+                visible: root.page === "LIVES"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: lifeCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: lifeCol
+                    width: parent.width
+                    spacing: 8
+
+                    Text {
+                        width: parent.width
+                        text: "Tidigare liv. Markera kvitton (hold i CATALOG eller USE AS PREVIOUS LIFE) och minta ett nytt föremål som bär deras material."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Text {
+                        text: "SELECTED OBJECT LIVES  "
+                            + String(root.lives.length)
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Repeater {
+                        model: root.lives
+                        delegate: Text {
+                            required property var modelData
+                            width: lifeCol.width
+                            text: String(modelData.title || "")
+                                + "  "
+                                + String(modelData.material || "")
+                                + "  "
+                                + String(modelData.status || "")
+                                + "  "
+                                + String(modelData.id || "")
+                            color: "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: root.selectRow(String(modelData.id || ""))
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "REBIRTH SET  " + String(root.draftLives.length)
+                        color: "#c8a97e"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        visible: root.draftLives.length > 0
+                        width: parent.width
+                        text: root.draftLives.join(" · ")
+                        color: "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    GgField {
+                        id: rebirthField
+                        width: Math.min(parent.width, 520)
+                        placeholderText: "new object title"
+                    }
+                    GgButton {
+                        text: "MINT REBORN OBJECT"
+                        onClicked: root.rebirthSelected()
+                    }
+                    Text {
+                        visible: root.formError.length > 0 && root.page === "LIVES"
                         width: parent.width
                         text: root.formError
                         color: "#c98989"
@@ -798,7 +1080,7 @@ Item {
                             readonly property var row: root.ledger[root.ledger.length - 1 - index] || {}
 
                             Text {
-                                width: 64
+                                width: 72
                                 text: String(row.kind || "")
                                 color: String(row.kind || "") === "BUY"
                                     ? "#8db89a"
@@ -810,7 +1092,7 @@ Item {
                                 font.bold: true
                             }
                             Text {
-                                width: parent.width - 74
+                                width: parent.width - 82
                                 text: String(row.listing_id || "")
                                     + "  "
                                     + String(row.txid || "PAPER")

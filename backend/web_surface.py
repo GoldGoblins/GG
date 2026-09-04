@@ -12,6 +12,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 SITE_ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site")
+IMPORT_DROP = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site-import")
+SKIP_IMPORT_NAMES = {
+    "wp-config.php",
+    "wp-config-sample.php",
+    "wp-config.one.com.bak",
+    ".env",
+    ".htpasswd",
+}
 ALLOWED_ORIGINS = (
     "https://goldgoblins.se",
     "https://www.goldgoblins.se",
@@ -379,7 +387,27 @@ def _safe_import_rel(name: str) -> str | None:
     parts = Path(rel).parts
     if ".." in parts or parts[:1] == ("/",):
         return None
-    return Path(*parts).as_posix()
+    posix = Path(*parts).as_posix()
+    base = Path(posix).name.lower()
+    if base in {item.lower() for item in SKIP_IMPORT_NAMES}:
+        return None
+    if base.startswith("wp-config") and base.endswith(".php"):
+        return None
+    return posix
+
+
+def ensure_import_drop() -> Path:
+    IMPORT_DROP.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return IMPORT_DROP
+
+
+def pending_import_zips() -> list[Path]:
+    root = ensure_import_drop()
+    return sorted(
+        path
+        for path in root.iterdir()
+        if path.is_file() and not path.is_symlink() and path.suffix.lower() == ".zip"
+    )
 
 
 def _backup_site_root() -> None:

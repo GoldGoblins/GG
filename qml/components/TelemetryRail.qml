@@ -5,6 +5,7 @@ Item {
     id: root
 
     property string actionAuthority: "NONE"
+    property string mandateLabel: "NONE"
     property string networkAuthority: "NONE"
     property string modelState: "READY"
     property string engineTarget: "GROK_TUI"
@@ -138,6 +139,19 @@ Item {
                             "k": "WRITE",
                             "v": root.writeAuthority,
                             "c": "#c8a97e"
+                        },
+                        {
+                            "k": "MANDATE",
+                            "v": root.mandateLabel,
+                            "c": (
+                                String(root.actionAuthority) === "TASK_SCOPED"
+                                ? "#c8a97e"
+                                : (
+                                    String(root.actionAuthority) === "WAITING"
+                                    ? "#c8a97e"
+                                    : "#a8b0b8"
+                                )
+                            )
                         },
                         {
                             "k": "NETWORK",

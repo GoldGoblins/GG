@@ -8,8 +8,22 @@ Item {
     property string activeTab: ""
     property color borderColor: "#6a6a6a"
     property color fill: "#141414"
+    property bool fitContent: false
+    property bool lamp: false
+    property bool lampOn: false
     default property alias body: inner.data
     signal tabChosen(string tabId)
+
+    implicitHeight: root.fitContent
+        ? Math.max(
+            48,
+            (inner.children.length > 0
+                ? inner.children[0].implicitHeight
+                : inner.childrenRect.height)
+                + inner.anchors.topMargin
+                + 12
+        )
+        : 80
 
     Rectangle {
         anchors.fill: parent
@@ -70,16 +84,27 @@ Item {
         anchors.top: parent.top
         anchors.topMargin: -7
         height: 20
-        width: leftTxt.implicitWidth + 10
+        width: leftTxt.implicitWidth + 10 + (root.lamp ? 14 : 0)
         color: root.fill
-        Text {
-            id: leftTxt
+        Row {
             anchors.centerIn: parent
-            text: root.leftLegend
-            color: "#d8dee9"
-            font.family: "monospace"
-            font.pixelSize: 12
-            font.bold: true
+            spacing: 6
+            Text {
+                id: leftTxt
+                text: root.leftLegend
+                color: "#d8dee9"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+            }
+            Rectangle {
+                visible: root.lamp
+                width: 8
+                height: 8
+                radius: 4
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.lampOn ? "#e05050" : "#2a1515"
+            }
         }
     }
 
@@ -104,10 +129,14 @@ Item {
 
     Item {
         id: inner
-        anchors.fill: parent
+        clip: true
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: root.fitContent ? undefined : parent.bottom
         anchors.leftMargin: 10
         anchors.rightMargin: 10
         anchors.topMargin: 16
-        anchors.bottomMargin: 8
+        anchors.bottomMargin: root.fitContent ? 0 : 8
     }
 }

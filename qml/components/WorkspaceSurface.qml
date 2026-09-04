@@ -45,6 +45,7 @@ Item {
     property string currentObjectType: ""
     property string currentObjectProvenance: ""
     property string currentObjectSourcePath: ""
+    property var liveWebPane: null
     readonly property string currentContextReference:
         root.currentObjectId.length > 0 ? "@current" : "@workspace"
 
@@ -960,6 +961,136 @@ Item {
         if (!next)
             return
         root.rememberBrowse(root.currentIndex, next)
+    }
+
+    function applyWebOperator(payload) {
+        var cmd = {}
+        try {
+            cmd = JSON.parse(String(payload || "{}"))
+        } catch (err) {
+            return
+        }
+        var host = root.scratchHost()
+        var action = String(cmd.action || "")
+        root.setHostKind("WEB")
+        if (action === "OPEN") {
+            root.goBrowse(String(cmd.url || ""))
+            if (host && host.webOperatorReport)
+                host.webOperatorReport(JSON.stringify({
+                    "schema": "gg.web-operator-result.v1",
+                    "command_id": cmd.command_id,
+                    "ok": true,
+                    "reason_code": "OPENED_WEB_TAB",
+                    "risk_class": cmd.risk_class || "YELLOW",
+                    "action": action,
+                    "url": String(cmd.url || ""),
+                    "title": "",
+                    "text": "",
+                    "links": [],
+                    "general_action_authority": "NONE",
+                    "visible_web_tab": true
+                }))
+            return
+        }
+        var pane = root.liveWebPane
+        if (!pane) {
+            if (host && host.webOperatorReport)
+                host.webOperatorReport(JSON.stringify({
+                    "schema": "gg.web-operator-result.v1",
+                    "command_id": cmd.command_id,
+                    "ok": false,
+                    "reason_code": "WEB_PANE_NOT_READY",
+                    "risk_class": cmd.risk_class || "GREEN",
+                    "action": action,
+                    "url": "",
+                    "title": "",
+                    "text": "",
+                    "links": [],
+                    "general_action_authority": "NONE",
+                    "visible_web_tab": true
+                }))
+            return
+        }
+        if (action === "RELOAD") {
+            pane.reload()
+            if (host && host.webOperatorReport)
+                host.webOperatorReport(JSON.stringify({
+                    "schema": "gg.web-operator-result.v1",
+                    "command_id": cmd.command_id,
+                    "ok": true,
+                    "reason_code": "RELOADED",
+                    "risk_class": "GREEN",
+                    "action": action,
+                    "url": pane.currentHref(),
+                    "title": "",
+                    "text": "",
+                    "links": [],
+                    "general_action_authority": "NONE",
+                    "visible_web_tab": true
+                }))
+            return
+        }
+        if (action === "BACK") {
+            pane.goBack()
+            if (host && host.webOperatorReport)
+                host.webOperatorReport(JSON.stringify({
+                    "schema": "gg.web-operator-result.v1",
+                    "command_id": cmd.command_id,
+                    "ok": true,
+                    "reason_code": "BACK",
+                    "risk_class": "GREEN",
+                    "action": action,
+                    "url": pane.currentHref(),
+                    "title": "",
+                    "text": "",
+                    "links": [],
+                    "general_action_authority": "NONE",
+                    "visible_web_tab": true
+                }))
+            return
+        }
+        var script = ""
+        if (action === "SNAPSHOT") {
+            script = "(function(){var t=document.body?document.body.innerText:'';if(t.length>8000)t=t.slice(0,8000);var links=[];var as=document.querySelectorAll('a[href]');var i;for(i=0;i<as.length&&i<40;i++){links.push({t:(as[i].innerText||'').trim().slice(0,80),h:as[i].href});}return JSON.stringify({url:location.href,title:document.title,text:t,links:links});})()"
+        } else if (action === "CLICK") {
+            script = "(function(){var el=document.querySelector(" + JSON.stringify(cmd.selector || "") + ");if(!el)return JSON.stringify({ok:false,reason:'MISS'});el.click();return JSON.stringify({ok:true,reason:'CLICKED',url:location.href,title:document.title});})()"
+        } else if (action === "TYPE") {
+            script = "(function(){var el=document.querySelector(" + JSON.stringify(cmd.selector || "") + ");if(!el)return JSON.stringify({ok:false,reason:'MISS'});var typ=String(el.type||'').toLowerCase();if(typ==='password')return JSON.stringify({ok:false,reason:'PASSWORD'});el.focus();el.value=" + JSON.stringify(cmd.text || "") + ";el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return JSON.stringify({ok:true,reason:'TYPED',url:location.href,title:document.title});})()"
+        } else {
+            return
+        }
+        pane.runPageScript(script, function(raw) {
+            var parsed = {}
+            try {
+                parsed = JSON.parse(String(raw || "{}"))
+            } catch (err2) {
+                parsed = {}
+            }
+            var ok = true
+            var reason = "SNAPSHOT"
+            if (action === "SNAPSHOT") {
+                ok = true
+                reason = "SNAPSHOT"
+            } else {
+                ok = parsed.ok === true
+                reason = String(parsed.reason || "FAIL")
+            }
+            if (host && host.webOperatorReport)
+                host.webOperatorReport(JSON.stringify({
+                    "schema": "gg.web-operator-result.v1",
+                    "command_id": cmd.command_id,
+                    "ok": ok,
+                    "reason_code": reason,
+                    "risk_class": cmd.risk_class || "GREEN",
+                    "action": action,
+                    "url": String(parsed.url || pane.currentHref()),
+                    "title": String(parsed.title || ""),
+                    "text": String(parsed.text || ""),
+                    "links": parsed.links || [],
+                    "general_action_authority": "NONE",
+                    "visible_web_tab": true
+                }))
+        })
     }
 
     function applySitePreviewUrl() {
@@ -2434,6 +2565,10 @@ Item {
                 objectName: "workspaceTmogPane"
                 z: 20
                 anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
                 active: !root.settingsOpen && root.hostKind === "TMOG"
                 visible: active
                 sourceComponent: Component {
@@ -2543,6 +2678,8 @@ Item {
                                             : "about:blank"
                                     })
                                     item.wantEngine = webHost.visible && webTab.isCurrent
+                                    if (webTab.isCurrent)
+                                        root.liveWebPane = item
                                     item.navigated.connect(function(href) {
                                         root.rememberBrowse(webTab.index, href)
                                     })

@@ -38,6 +38,9 @@ ApplicationWindow {
     property var liveAidBackend: null
     readonly property var workspace: workspaceLoader.item
     property string grokWalletJson: "{}"
+    property string mandateRailJson: "{}"
+    property string actionAuthority: "NONE"
+    property string mandateLabel: "NONE"
     property string cryptoStatusJson: "{}"
     onSurfaceHostChanged: {
         root.pullCryptoStatus()
@@ -161,6 +164,8 @@ ApplicationWindow {
         if (comp && comp.status === Component.Loading)
             return
         if (comp) {
+            if (comp.status === Component.Error)
+                root.appendShellLog(String(comp.errorString() || "component error"))
             try {
                 comp.statusChanged.disconnect(root.onShellCompFinished)
             } catch (err) {
@@ -440,6 +445,13 @@ ApplicationWindow {
             if (!root._shellQueue.length)
                 root._shellQueue = root.parseShellQueue()
             root.loadNextShellFile()
+        }
+        function onMandateRailChanged(payload) {
+            root.setMandateRail(payload)
+        }
+        function onWebOperatorCommand(payload) {
+            if (root.workspace && root.workspace.applyWebOperator)
+                root.workspace.applyWebOperator(payload)
         }
         function onChatSessionsChanged(payload) {
             root.chatSessionsJson = payload
@@ -1130,6 +1142,22 @@ ApplicationWindow {
         Qt.callLater(root.stickChatToLatest)
     }
 
+    function setMandateRail(payload) {
+        root.mandateRailJson = String(payload || "{}")
+        try {
+            var parsed = JSON.parse(root.mandateRailJson)
+            if (!parsed || typeof parsed !== "object")
+                parsed = {}
+            root.actionAuthority = String(
+                parsed.action_authority || "NONE"
+            )
+            root.mandateLabel = String(parsed.label || "NONE")
+        } catch (err) {
+            root.actionAuthority = "NONE"
+            root.mandateLabel = "NONE"
+        }
+    }
+
     function setBridgeActivity(busy, taskId) {
         root.bridgeBusy = busy
         root.activeTaskId = busy ? taskId : ""
@@ -1149,7 +1177,7 @@ ApplicationWindow {
         anchors.topMargin: 12
         height: 54
         leftLegend: "GG AI DESKTOP"
-        rightLegend: "AUTHORITY · NONE"
+        rightLegend: "AUTHORITY · " + root.actionAuthority
         backgroundColor: root.surface
         borderColor: root.frameBorder
         radius: root.frameRadius
@@ -1845,6 +1873,7 @@ ApplicationWindow {
                     frameBorder: root.frameBorder
                     frameRadius: root.frameRadius
                     showOpenTab: root.showOpenTabInInput
+                    surfaceHost: root.surfaceHost
                     onEngineTargetRequested: function(value) {
                         if (
                             value === "LOCAL_QWEN"
@@ -1941,8 +1970,10 @@ ApplicationWindow {
                     onStatusChanged: {
                         if (status === Loader.Ready)
                             root.finishShellLoad()
-                        if (status === Loader.Error)
+                        if (status === Loader.Error) {
                             root.shellLoadCurrent = "LOAD FAILED"
+                            root.appendShellLog(String(errorString() || "workspace"))
+                        }
                     }
                 }
 
@@ -1975,7 +2006,8 @@ ApplicationWindow {
                 width: root.alphaTelemetryWidth
                 height: body.height
                 compactMode: true
-                actionAuthority: "NONE"
+                actionAuthority: root.actionAuthority
+                mandateLabel: root.mandateLabel
                 networkAuthority: root.networkAuthority
                 modelState: root.bridgeBusy ? "BUSY" : "READY"
                 engineTarget: root.engineTarget

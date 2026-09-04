@@ -109,6 +109,20 @@ def main() -> int:
         raise AssertionError("live workspace watch missing")
     if "grokWalletChanged" not in src:
         raise AssertionError("wallet signal missing")
+    if "mandateRailChanged" not in src:
+        raise AssertionError("mandate rail signal missing")
+    if "webOperatorCommand" not in src:
+        raise AssertionError("web operator command signal missing")
+    if "webOperatorReport" not in src:
+        raise AssertionError("web operator report missing")
+    if "_arm_web_operator" not in src:
+        raise AssertionError("web operator watcher missing")
+    if "_poll_import_drop" not in src:
+        raise AssertionError("site-import drop watcher missing")
+    if "ensure_import_drop" not in src:
+        raise AssertionError("import drop root unused")
+    if "rail_snapshot" not in src:
+        raise AssertionError("mandate rail snapshot unused")
     if "grok_wallet" not in src:
         raise AssertionError("wallet module unused")
     if "chatSessionsChanged" not in src:
@@ -121,6 +135,8 @@ def main() -> int:
         raise AssertionError("wallet timer still too hot")
     if "_PTY_READ_BUDGET" not in src or "def _drain_pty" not in src:
         raise AssertionError("PTY output still parsed on every socket tick")
+    if "def chatIoActive" not in src or "_chat_io_at" not in src:
+        raise AssertionError("chat lamp has no PTY activity slot")
     if "_PTY_DRAIN_MS = 16" in src:
         raise AssertionError("PTY drain still at 16ms")
     if "lambda _fd=None, key=identity" in src:

@@ -4,6 +4,7 @@ import os
 import pwd
 import socket
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +28,9 @@ MAX_SCAN = 512
 MAX_CMDLINE = 160
 MAX_HISTORY = 48
 MAX_CORES = 32
-MAX_CONNS = 24
-MAX_MOUNTS = 12
-MAX_NAMES = 40
+MAX_CONNS = 48
+MAX_MOUNTS = 16
+MAX_NAMES = 64
 WINDOW_TOKENS = ("tmog", "task manager og")
 TCP_STATES = {
     "01": "ESTABLISHED",
@@ -56,14 +57,61 @@ PROC_STATES = {
 
 _prev_times: dict[int, tuple[float, int]] = {}
 _prev_mono = 0.0
-_prev_cpu: list[tuple[int, int]] = []
-_prev_net: tuple[float, int, int] = (0.0, 0, 0)
-_prev_disk: tuple[float, int, int] = (0.0, 0, 0)
+CPU_WINDOW = 0.4
+MIN_RATE_DT = 0.05
+IO_WINDOW = 0.1
+_cpu_win: deque[tuple[float, list[tuple[int, int]]]] = deque()
+_net_win: deque[tuple[float, int, int]] = deque()
+_disk_win: deque[tuple[float, int, int]] = deque()
+_last_cpu: list[float] = []
+_last_net = [0, 0]
+_last_disk = [0, 0]
+_prev_rapl: tuple[float, int] = (0.0, 0)
+_inode_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
+_gpu_busy_path: Path | None = None
+_gpu_busy_tried = False
+_RAPL_PATH = Path("/sys/class/powercap/intel-rapl:0/energy_uj")
+_MOUNT_SKIP = frozenset(
+    {
+        "proc",
+        "sysfs",
+        "devtmpfs",
+        "devpts",
+        "tmpfs",
+        "cgroup2",
+        "cgroup",
+        "overlay",
+        "squashfs",
+        "efivarfs",
+        "fusectl",
+        "debugfs",
+        "tracefs",
+        "bpf",
+        "configfs",
+        "pstore",
+        "securityfs",
+        "mqueue",
+        "hugetlbfs",
+        "autofs",
+        "nsfs",
+        "ramfs",
+        "rpc_pipefs",
+        "binfmt_misc",
+    }
+)
+_DESKTOP_ROOTS = (
+    Path.home(),
+    Path("/usr/share"),
+    Path("/usr/local/share"),
+    Path("/usr/lib"),
+    Path("/etc"),
+)
 _cpu_hist: list[float] = []
 _mem_hist: list[float] = []
 _net_hist: list[float] = []
 _disk_hist: list[float] = []
 _temp_hist: list[float] = []
+_energy_hist: list[float] = []
 _core_hist: list[list[float]] = []
 _last_proc: dict[int, dict[str, Any]] = {}
 _tombstones: dict[int, dict[str, Any]] = {}
@@ -224,19 +272,26 @@ def _cpu_times() -> list[tuple[int, int]]:
 
 
 def _cpu_pcts(now_rows: list[tuple[int, int]]) -> list[float]:
-    global _prev_cpu
+    global _last_cpu
+    now = time.monotonic()
+    _cpu_win.append((now, now_rows))
+    while len(_cpu_win) >= 2 and _cpu_win[1][0] <= now - CPU_WINDOW:
+        _cpu_win.popleft()
+    t0, prev_rows = _cpu_win[0]
+    dt = now - t0
     out: list[float] = []
     for index, current in enumerate(now_rows):
         total, idle = current
-        if index < len(_prev_cpu):
-            dt = total - _prev_cpu[index][0]
-            di = idle - _prev_cpu[index][1]
-            if dt > 0:
-                busy = max(0.0, min(100.0, (1.0 - di / dt) * 100.0))
-                out.append(round(busy, 1))
-                continue
-        out.append(0.0)
-    _prev_cpu = now_rows
+        sample = None
+        if dt >= MIN_RATE_DT and index < len(prev_rows):
+            tick_dt = total - prev_rows[index][0]
+            di = idle - prev_rows[index][1]
+            if tick_dt > 0:
+                sample = max(0.0, min(100.0, (1.0 - di / tick_dt) * 100.0))
+        if sample is None:
+            sample = _last_cpu[index] if index < len(_last_cpu) else 0.0
+        out.append(round(float(sample), 1))
+    _last_cpu = out
     return out
 
 
@@ -413,15 +468,24 @@ def _disk_bytes() -> tuple[int, int]:
     return read_s * 512, write_s * 512
 
 
-def _rate(prev: tuple[float, int, int], now: float, a: int, b: int) -> tuple[tuple[float, int, int], int, int]:
-    if prev[0] <= 0:
-        return (now, a, b), 0, 0
-    dt = now - prev[0]
-    if dt < 0.008:
-        return prev, 0, 0
-    ra = max(0, int((a - prev[1]) / dt))
-    rb = max(0, int((b - prev[2]) / dt))
-    return (now, a, b), ra, rb
+def _io_rate(
+    win: deque[tuple[float, int, int]],
+    now: float,
+    a: int,
+    b: int,
+    span: float,
+    held: list[int],
+) -> tuple[int, int]:
+    win.append((now, a, b))
+    while len(win) >= 2 and win[1][0] <= now - span:
+        win.popleft()
+    t0, a0, b0 = win[0]
+    dt = now - t0
+    if dt < MIN_RATE_DT:
+        return held[0], held[1]
+    held[0] = max(0, int(round((a - a0) / dt)))
+    held[1] = max(0, int(round((b - b0) / dt)))
+    return held[0], held[1]
 
 
 _UID_NAMES: dict[int, str] = {}
@@ -444,6 +508,13 @@ def _user_name(uid: int) -> str:
     return name
 
 
+def _os_name() -> str:
+    for line in _read_text(Path("/etc/os-release"), 2048).splitlines():
+        if line.startswith("PRETTY_NAME="):
+            return line.split("=", 1)[1].strip().strip('"')[:48]
+    return os.uname().sysname[:48]
+
+
 def _host_identity() -> dict[str, str]:
     global _HOST_IDENTITY
     if _HOST_IDENTITY is not None:
@@ -452,6 +523,7 @@ def _host_identity() -> dict[str, str]:
         "hostname": socket.gethostname()[:48],
         "kernel": os.uname().release[:48],
         "cpu_model": _cpu_model(),
+        "os": _os_name(),
     }
     return _HOST_IDENTITY
 
@@ -652,7 +724,7 @@ def _mounts() -> list[dict[str, Any]]:
         if len(parts) < 2:
             continue
         src, dest, fstype = parts[0], parts[1], parts[2]
-        if fstype in {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup2", "cgroup", "overlay", "squashfs"}:
+        if fstype in _MOUNT_SKIP:
             continue
         if not dest.startswith("/") or dest in seen:
             continue
@@ -681,27 +753,123 @@ def _mounts() -> list[dict[str, Any]]:
     return rows
 
 
+def _endpoint(ip: str, port: str) -> str:
+    host = str(ip or "")
+    if ":" in host:
+        return "[" + host + "]:" + str(port or "")
+    return host + ":" + str(port or "")
+
+
 def _hex_ip(value: str) -> str:
-    if len(value) != 8:
-        return value
+    raw = str(value or "").strip()
+    if len(raw) == 8:
+        try:
+            parts = [str(int(raw[i : i + 2], 16)) for i in (6, 4, 2, 0)]
+            return ".".join(parts)
+        except ValueError:
+            return raw
+    if len(raw) == 32:
+        return _hex_ip6(raw)
+    return raw
+
+
+def _hex_ip6(value: str) -> str:
+    chunks: list[str] = []
     try:
-        parts = [str(int(value[i : i + 2], 16)) for i in (6, 4, 2, 0)]
-        return ".".join(parts)
-    except ValueError:
+        for i in range(0, 32, 8):
+            word = value[i : i + 8]
+            le = word[6:8] + word[4:6] + word[2:4] + word[0:2]
+            chunks.append(le[:4])
+            chunks.append(le[4:8])
+    except (ValueError, IndexError):
         return value
+    groups = [item.lstrip("0") or "0" for item in chunks]
+    best_i = -1
+    best_n = 1
+    i = 0
+    while i < 8:
+        if groups[i] != "0":
+            i += 1
+            continue
+        j = i
+        while j < 8 and groups[j] == "0":
+            j += 1
+        if j - i > best_n:
+            best_i = i
+            best_n = j - i
+        i = j
+    if best_i >= 0:
+        head = ":".join(groups[:best_i])
+        tail = ":".join(groups[best_i + best_n :])
+        if head and tail:
+            return head + "::" + tail
+        if tail:
+            return "::" + tail
+        if head:
+            return head + "::"
+        return "::"
+    return ":".join(groups)
 
 
-def _connections() -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def _inode_owners() -> dict[str, dict[str, Any]]:
+    global _inode_cache
+    now = time.monotonic()
+    hit_t, hit = _inode_cache
+    if now - hit_t < 2.0:
+        return hit
+    mapping: dict[str, dict[str, Any]] = {}
+    scanned = 0
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        _inode_cache = (now, mapping)
+        return mapping
+    with entries:
+        for ent in entries:
+            if not ent.name.isdigit():
+                continue
+            pid = int(ent.name)
+            comm = ""
+            try:
+                with open(ent.path + "/comm", "r", encoding="utf-8", errors="replace") as fh:
+                    comm = fh.read(32).strip()[:24]
+            except OSError:
+                comm = ""
+            try:
+                fds = os.scandir(ent.path + "/fd")
+            except OSError:
+                continue
+            with fds:
+                for fd in fds:
+                    try:
+                        target = os.readlink(fd.path)
+                    except OSError:
+                        continue
+                    if not target.startswith("socket:["):
+                        continue
+                    inode = target[8:-1]
+                    if inode and inode not in mapping:
+                        mapping[inode] = {"pid": pid, "comm": comm}
+            scanned += 1
+            if scanned >= 220:
+                break
+    _inode_cache = (now, mapping)
+    return mapping
+
+
+def _connections() -> list[dict[str, Any]]:
+    owners = _inode_owners()
+    rows: list[dict[str, Any]] = []
     for path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
-        lines = _read_text(path, 65536).splitlines()[1:]
+        lines = _read_text(path, 131072).splitlines()[1:]
         for line in lines:
             parts = line.split()
-            if len(parts) < 4:
+            if len(parts) < 10:
                 continue
             local = parts[1]
             remote = parts[2]
             state = TCP_STATES.get(parts[3].upper(), parts[3])
+            inode = parts[9]
             lip, _, lport = local.partition(":")
             rip, _, rport = remote.partition(":")
             try:
@@ -709,11 +877,14 @@ def _connections() -> list[dict[str, str]]:
                 rp = str(int(rport, 16))
             except ValueError:
                 lp, rp = lport, rport
+            owner = owners.get(inode) or {}
             rows.append(
                 {
-                    "local": _hex_ip(lip) + ":" + lp,
-                    "remote": _hex_ip(rip) + ":" + rp,
+                    "local": _endpoint(_hex_ip(lip), lp),
+                    "remote": _endpoint(_hex_ip(rip), rp),
                     "state": state,
+                    "pid": int(owner.get("pid") or 0),
+                    "comm": str(owner.get("comm") or ""),
                 }
             )
             if len(rows) >= MAX_CONNS:
@@ -721,7 +892,26 @@ def _connections() -> list[dict[str, str]]:
     return rows
 
 
-def _energy() -> dict[str, Any]:
+def _rapl_watts(now: float) -> float | None:
+    global _prev_rapl
+    raw = _read_text(_RAPL_PATH, 32).strip()
+    if not raw:
+        return None
+    try:
+        uj = int(raw)
+    except ValueError:
+        return None
+    prev_t, prev_uj = _prev_rapl
+    _prev_rapl = (now, uj)
+    if prev_t <= 0 or now <= prev_t:
+        return None
+    watts = (uj - prev_uj) / (now - prev_t) / 1_000_000.0
+    if watts < 0 or watts > 400:
+        return None
+    return round(watts, 1)
+
+
+def _energy(now: float | None = None) -> dict[str, Any]:
     supply = Path("/sys/class/power_supply")
     payload = {
         "source": "",
@@ -732,7 +922,7 @@ def _energy() -> dict[str, Any]:
     try:
         nodes = sorted(supply.iterdir())
     except OSError:
-        return payload
+        nodes = []
     for node in nodes:
         kind = _read_text(node / "type", 32).strip().upper()
         if kind == "MAINS" or kind == "ADP":
@@ -756,9 +946,164 @@ def _energy() -> dict[str, Any]:
             payload["watts"] = round(int(micro) / 1_000_000.0, 1)
         except ValueError:
             continue
+    if payload["watts"] is None:
+        rapl = _rapl_watts(now if now is not None else time.monotonic())
+        if rapl is not None:
+            payload["watts"] = rapl
     if not payload["source"]:
         payload["source"] = "AC"
     return payload
+
+
+def _under_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _safe_listed_file(path: Path) -> Path | None:
+    try:
+        if path.is_symlink():
+            real = path.resolve()
+            if not any(_under_root(real, root) for root in _DESKTOP_ROOTS):
+                return None
+            if not real.is_file():
+                return None
+            return real
+        if path.is_file():
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def _parse_desktop(path: Path) -> dict[str, Any] | None:
+    text = _read_text(path, 4096)
+    if not text:
+        return None
+    name = path.stem[:48]
+    hidden = False
+    nodisplay = False
+    kind = "Application"
+    for line in text.splitlines():
+        if line.startswith("Name=") and "=" in line:
+            name = line.split("=", 1)[1].strip()[:48] or name
+        elif line.startswith("Hidden="):
+            hidden = line.split("=", 1)[1].strip().lower() == "true"
+        elif line.startswith("NoDisplay="):
+            nodisplay = line.split("=", 1)[1].strip().lower() == "true"
+        elif line.startswith("Type="):
+            kind = line.split("=", 1)[1].strip() or kind
+    if kind and kind != "Application":
+        return None
+    return {
+        "id": path.stem[:40],
+        "name": name,
+        "hidden": hidden,
+        "nodisplay": nodisplay,
+        "path": str(path)[:160],
+    }
+
+
+def _desktop_entries(folders: tuple[Path, ...], *, apps: bool) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for folder in folders:
+        try:
+            entries = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.endswith(".desktop"):
+                continue
+            real = _safe_listed_file(entry)
+            if real is None:
+                continue
+            parsed = _parse_desktop(real)
+            if parsed is None:
+                continue
+            key = str(parsed["id"])
+            if key in seen:
+                continue
+            if apps and (parsed["hidden"] or parsed["nodisplay"]):
+                continue
+            seen.add(key)
+            rows.append(parsed)
+            if len(rows) >= MAX_NAMES:
+                return rows
+    rows.sort(key=lambda item: str(item.get("name") or "").lower())
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("name") or "")
+        counts[key] = counts.get(key, 0) + 1
+    for row in rows:
+        key = str(row.get("name") or "")
+        if counts.get(key, 0) > 1:
+            row["name"] = key + "  " + str(row.get("id") or "")
+    return rows[:MAX_NAMES]
+
+
+def _startup_entries() -> list[dict[str, Any]]:
+    return _desktop_entries(
+        (Path.home() / ".config/autostart", Path("/etc/xdg/autostart")),
+        apps=False,
+    )
+
+
+def _app_entries() -> list[dict[str, Any]]:
+    return _desktop_entries(
+        (
+            Path.home() / ".local/share/applications",
+            Path("/usr/share/applications"),
+            Path("/usr/local/share/applications"),
+        ),
+        apps=True,
+    )
+
+
+def _service_entries() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(name: str, state: str, scope: str) -> None:
+        key = name + ":" + scope
+        if key in seen or not name:
+            return
+        seen.add(key)
+        rows.append(
+            {
+                "id": name[:48],
+                "name": name[:48],
+                "state": state,
+                "scope": scope,
+            }
+        )
+
+    slices = [Path("/sys/fs/cgroup/system.slice")]
+    uid = os.getuid()
+    slices.append(
+        Path(
+            f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+        )
+    )
+    slices.append(Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice"))
+    for folder in slices:
+        try:
+            entries = folder.iterdir()
+        except OSError:
+            continue
+        scope = "user" if "user.slice" in str(folder) else "system"
+        for entry in entries:
+            if not entry.name.endswith(".service"):
+                continue
+            add(entry.name[: -len(".service")], "running", scope)
+            if len(rows) >= MAX_NAMES:
+                rows.sort(key=lambda item: str(item.get("name") or "").lower())
+                return rows
+    rows.sort(key=lambda item: str(item.get("name") or "").lower())
+    return rows
 
 
 def _names_from_dir(folder: Path, suffix: str) -> list[str]:
@@ -768,7 +1113,8 @@ def _names_from_dir(folder: Path, suffix: str) -> list[str]:
     except OSError:
         return []
     for entry in entries:
-        if entry.is_symlink() or not entry.is_file():
+        real = _safe_listed_file(entry)
+        if real is None:
             continue
         if suffix and not entry.name.endswith(suffix):
             continue
@@ -799,8 +1145,26 @@ def _refresh_slow_meters(now: float, force: bool = False) -> None:
         _last_temp_c = float(temps[0]["c"])
 
 
+def _gpu_busy() -> float | None:
+    global _gpu_busy_path, _gpu_busy_tried
+    if not _gpu_busy_tried:
+        _gpu_busy_tried = True
+        drm = Path("/sys/class/drm")
+        if drm.is_dir():
+            for card in sorted(drm.glob("card*/device/gpu_busy_percent")):
+                _gpu_busy_path = card
+                break
+    if _gpu_busy_path is None:
+        return None
+    try:
+        raw = _gpu_busy_path.read_text(encoding="ascii").strip()
+        return float(raw or "0")
+    except (OSError, ValueError):
+        return None
+
+
 def pulse() -> dict[str, Any]:
-    global _prev_mono, _prev_net, _prev_disk
+    global _prev_mono
     now = time.monotonic()
     dt = now - _prev_mono if _prev_mono else 0.0
     mem = _meminfo()
@@ -808,10 +1172,13 @@ def pulse() -> dict[str, Any]:
     cpu_pcts = _cpu_pcts(_cpu_times())
     overall = cpu_pcts[0] if cpu_pcts else 0.0
     _refresh_slow_meters(now)
+    energy = _energy(now)
     rx, tx, iface = _net_bytes()
-    _prev_net, rx_bps, tx_bps = _rate(_prev_net, now, rx, tx)
+    rx_bps, tx_bps = _io_rate(_net_win, now, rx, tx, IO_WINDOW, _last_net)
     dread, dwrite = _disk_bytes()
-    _prev_disk, read_bps, write_bps = _rate(_prev_disk, now, dread, dwrite)
+    read_bps, write_bps = _io_rate(
+        _disk_win, now, dread, dwrite, IO_WINDOW, _last_disk
+    )
     _prev_mono = now
     mem_pct = (mem["used"] / mem["total"] * 100.0) if mem["total"] else 0.0
     return {
@@ -832,12 +1199,15 @@ def pulse() -> dict[str, Any]:
         "net_tx_bps": tx_bps,
         "disk_read_bps": read_bps,
         "disk_write_bps": write_bps,
+        "gpu_busy": _gpu_busy(),
+        "energy_w": energy.get("watts"),
+        "energy_source": energy.get("source") or "AC",
         "dt": round(dt, 4),
     }
 
 
 def snapshot(page: str = "") -> dict[str, Any]:
-    global _prev_mono, _prev_net, _prev_disk, _last_snap
+    global _prev_mono, _last_snap
     kind = str(page or "").strip().upper()
     full = kind == ""
     now = time.monotonic()
@@ -878,11 +1248,13 @@ def snapshot(page: str = "") -> dict[str, Any]:
             core_hist.append(list(_core_hist[index]))
     temps = _temps(1 if kind == "SUMMARY" else 3)
     temp_c = temps[0]["c"] if temps else 0.0
-    energy = _energy()
+    energy = _energy(now)
     rx, tx, iface = _net_bytes()
-    _prev_net, rx_bps, tx_bps = _rate(_prev_net, now, rx, tx)
+    rx_bps, tx_bps = _io_rate(_net_win, now, rx, tx, IO_WINDOW, _last_net)
     dread, dwrite = _disk_bytes()
-    _prev_disk, read_bps, write_bps = _rate(_prev_disk, now, dread, dwrite)
+    read_bps, write_bps = _io_rate(
+        _disk_win, now, dread, dwrite, IO_WINDOW, _last_disk
+    )
     procs: list[dict[str, Any]] = []
     users: dict[str, int] = {}
     if want_procs:
@@ -929,6 +1301,8 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "uptime_s": int(_uptime()),
         "hostname": ident["hostname"],
         "kernel": ident["kernel"],
+        "os": ident.get("os") or "",
+        "core_count": max(len(per_core), len(mhz)),
         "process_count": tasks["total"],
         "tasks_running": tasks["running"],
         "net_iface": iface,
@@ -947,25 +1321,14 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "net_hist": _push(_net_hist, (rx_bps + tx_bps) / 1024.0),
         "disk_hist": _push(_disk_hist, (read_bps + write_bps) / 1024.0),
         "temp_hist": _push(_temp_hist, temp_c),
+        "energy_hist": _push(_energy_hist, float(energy.get("watts") or 0.0)),
         "processes": procs,
         "users": user_rows,
         "mounts": _mounts() if want_mounts else [],
         "connections": _connections() if want_conns else [],
-        "startup": _cached_names(
-            "startup", Path.home() / ".config/autostart", ".desktop"
-        )
-        if want_names
-        else [],
-        "apps": _cached_names(
-            "apps", Path.home() / ".local/share/applications", ".desktop"
-        )
-        if want_names
-        else [],
-        "services": _cached_names(
-            "services", Path("/etc/systemd/system"), ".service"
-        )
-        if want_names
-        else [],
+        "startup": _startup_entries() if want_names else [],
+        "apps": _app_entries() if want_names else [],
+        "services": _service_entries() if want_names else [],
         "appimage": app,
         "appimage_found": bool(app),
         "page": kind or "FULL",

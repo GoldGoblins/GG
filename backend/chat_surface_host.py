@@ -119,6 +119,8 @@ class ChatSurfaceHost(QObject):
     chatTerminalExit = Signal(str, int)
     grokTuiChunk = Signal(str)
     grokWalletChanged = Signal(str)
+    mandateRailChanged = Signal(str)
+    webOperatorCommand = Signal(str)
     chatSessionsChanged = Signal(str)
     qmlLiveReload = Signal()
     workspaceFileChanged = Signal(str, str, str)
@@ -146,6 +148,8 @@ class ChatSurfaceHost(QObject):
         self._wallet_live_base: int | None = None
         self._wallet_last_turn: int | None = None
         self._wallet_json = ""
+        self._mandate_rail_json = ""
+        self._live_mandate_store = None
         self._sessions_json = ""
         self._pending_resume = ""
         self._wallet_timer = QTimer(self)
@@ -153,6 +157,8 @@ class ChatSurfaceHost(QObject):
         self._wallet_timer.timeout.connect(self._emit_wallet)
         self._wallet_timer.start()
         self._qml_watch: QFileSystemWatcher | None = None
+        self._web_op_watch: QFileSystemWatcher | None = None
+        self._imported_zips: set[str] = set()
         self._qml_reload = QTimer(self)
         self._qml_reload.setSingleShot(True)
         self._qml_reload.setInterval(250)
@@ -162,6 +168,9 @@ class ChatSurfaceHost(QObject):
         self._crypto_timer.setInterval(60000)
         self._crypto_timer.timeout.connect(self._crypto_idle_tick)
         self._crypto_timer.start()
+        self._tmog_pulse_at = 0.0
+        self._tmog_pulse_raw = ""
+        self._chat_io_at = 0.0
         self._console_provider = None
         self._console_provider_added = False
         self._console_sink = None
@@ -309,10 +318,29 @@ class ChatSurfaceHost(QObject):
 
     @Slot(result=str)
     def tmogPulse(self) -> str:
+        now = time.monotonic()
+        if self._tmog_pulse_raw and now - self._tmog_pulse_at < 0.012:
+            return self._tmog_pulse_raw
         try:
-            return json.dumps(tmog_contract.pulse(), separators=(",", ":"))
+            raw = json.dumps(tmog_contract.pulse(), separators=(",", ":"))
         except Exception as exc:
-            return json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
+            raw = json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
+        self._tmog_pulse_raw = raw
+        self._tmog_pulse_at = now
+        return raw
+
+    @Slot(result=bool)
+    def chatIoActive(self) -> bool:
+        return bool(self._chat_io_at) and (time.monotonic() - self._chat_io_at) < 0.28
+
+    @Slot(str)
+    def tmogCopy(self, text: str) -> None:
+        from PySide6.QtGui import QGuiApplication
+
+        clip = QGuiApplication.clipboard()
+        if clip is None:
+            return
+        clip.setText(str(text or "")[:4000])
 
     @Slot(result=bool)
     def startTmog(self) -> bool:
@@ -946,6 +974,24 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__})
 
+    @Slot(str, result=str)
+    def marketplaceListElement(self, symbol: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.list_element(symbol), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplaceRebirth(self, raw: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.rebirth_item(raw), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
     @Slot(result=str)
     def listSiteFiles(self) -> str:
         return web_surface.list_site_files()
@@ -1402,9 +1448,13 @@ class ChatSurfaceHost(QObject):
         site = web_surface.SITE_ROOT
         if site.is_dir():
             watcher.addPath(str(site))
+        drop = web_surface.ensure_import_drop()
+        watcher.addPath(str(drop))
         watcher.directoryChanged.connect(self._on_live_dir)
         watcher.fileChanged.connect(self._on_live_file)
         self._fs = watcher
+        self._arm_web_operator()
+        self._poll_import_drop()
 
     @Slot(str)
     def watchLivePath(self, path: str) -> None:
@@ -1470,8 +1520,28 @@ class ChatSurfaceHost(QObject):
         if self._fs is not None and target.is_file():
             self._fs.addPath(str(target))
 
+    def _poll_import_drop(self) -> None:
+        from backend import web_surface
+
+        for path in web_surface.pending_import_zips():
+            try:
+                key = path.name + ":" + str(path.stat().st_mtime_ns)
+            except OSError:
+                continue
+            if key in self._imported_zips:
+                continue
+            result = self.importSite(str(path))
+            self._imported_zips.add(key)
+            self.siteImportProgress.emit("DROP", 1, 1, result)
+
     def _on_live_dir(self, directory: str) -> None:
         folder = Path(directory)
+        try:
+            if folder.resolve() == web_surface.IMPORT_DROP.resolve():
+                self._poll_import_drop()
+                return
+        except (OSError, ValueError):
+            pass
         if not self._live_allowed(folder):
             return
         kind = self._kind_for(folder)
@@ -1564,7 +1634,73 @@ class ChatSurfaceHost(QObject):
         except (TypeError, ValueError):
             return None
 
+    def _arm_web_operator(self) -> None:
+        from backend import web_operator
+
+        web_operator.ensure_root()
+        if self._web_op_watch is not None:
+            self._poll_web_operator()
+            return
+        watcher = QFileSystemWatcher(self)
+        watcher.addPath(str(web_operator.ROOT))
+        watcher.directoryChanged.connect(self._on_web_operator_dir)
+        self._web_op_watch = watcher
+        self._poll_web_operator()
+
+    def _on_web_operator_dir(self, _directory: str) -> None:
+        self._poll_web_operator()
+
+    def _poll_web_operator(self) -> None:
+        from backend import web_operator
+
+        command = web_operator.take_command()
+        if command is None:
+            return
+        self.webOperatorCommand.emit(
+            json.dumps(command, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    @Slot(str)
+    def webOperatorReport(self, payload: str) -> None:
+        from backend import web_operator
+
+        try:
+            value = json.loads(str(payload or ""))
+        except json.JSONDecodeError:
+            return
+        if not isinstance(value, dict):
+            return
+        web_operator.write_result(value)
+
+    def _emit_mandate_rail(self) -> None:
+        try:
+            from backend import live_mandate_store
+
+            store = self._live_mandate_store
+            if store is None:
+                store = live_mandate_store.MandateStore(
+                    Path("/home/GG/.local/state/goldgoblins")
+                    / "gg-ai-desktop"
+                    / "mandate-store"
+                )
+                store.initialize()
+                self._live_mandate_store = store
+            payload = live_mandate_store.rail_snapshot(store=store)
+            text = json.dumps(payload, separators=(",", ":"))
+        except Exception:
+            text = (
+                '{"schema":"gg.mandate-rail.v1","action_authority":"NONE",'
+                '"capability_human_id":"","general_action_authority":"NONE",'
+                '"label":"NONE","mandate_status":"NONE","pending_id":"",'
+                '"risk_class":""}'
+            )
+        if text == self._mandate_rail_json:
+            return
+        self._mandate_rail_json = text
+        self.mandateRailChanged.emit(text)
+
     def _emit_wallet(self) -> None:
+        self._emit_mandate_rail()
         payload = grok_wallet_snapshot(
             pty_overlay=self._wallet_pty,
             live_base=self._wallet_live_base,
@@ -1680,6 +1816,7 @@ class ChatSurfaceHost(QObject):
             self._close(terminal_id)
             return False
         if chunks:
+            self._chat_io_at = time.monotonic()
             raw = b"".join(chunks)
             if terminal_id == GROK_TUI_TERMINAL_ID:
                 grid = self._tui_grid

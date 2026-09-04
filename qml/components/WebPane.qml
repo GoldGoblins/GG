@@ -46,6 +46,25 @@ Item {
             engineLoader.item.reload()
     }
 
+    function goBack() {
+        if (engineLoader.item)
+            engineLoader.item.goBack()
+    }
+
+    function currentHref() {
+        if (engineLoader.item)
+            return String(engineLoader.item.url || root.pageUrl || "")
+        return String(root.pageUrl || "")
+    }
+
+    function runPageScript(script, done) {
+        if (!engineLoader.item || !engineLoader.item.runJavaScript) {
+            done("")
+            return
+        }
+        engineLoader.item.runJavaScript(script, done)
+    }
+
     onReloadNonceChanged: root.reload()
 
     Loader {

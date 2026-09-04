@@ -17,6 +17,26 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-05 · mandate rail + visible WEB operator
+
+What GitHub had until this push (`269f430`, 4 Sep 2026): 60 Hz TMOG, live spectrum, FM dial, MARKETPLACE, GROK TUI default.
+
+What this patch adds on top of that:
+
+**Mandate rail.** AUTHORITY stays NONE. TOOLS stay GREEN TYPED, WRITE stays YELLOW CURRENT. A new **MANDATE** row shows NONE, WAIT, or TASK_SCOPED after `/approve-mandate`. Yellow/red work needs an explicit human yes; it is never a standing red tool belt.
+
+**Visible WEB operator.** Agent web actions (OPEN, SNAPSHOT, CLICK, TYPE, RELOAD, BACK) run in the workspace **WEB** tab, not a hidden browser. Password fields are blocked. You type one.com / wp-admin logins yourself in that pane.
+
+**Site import drop.** Drop a zip in the local `site-import/` folder; it unpacks into the local SITE copy and skips `wp-config.php`.
+
+**SFTP plan.** `sftp_operator` builds BatchMode get/put for `robots.txt` and `gg-site-completion.php` using `ssh-agent`. No password in config. Live PUT stays red until you unlock the agent.
+
+**MEDIA / UTILITIES chrome.** `MEDIA / UTILITIES` and `RADIO · NO RF` hang on the strip frame like the other GgFrames.
+
+**Screenshot.** `docs/gg-ai-desktop.png` is this drop: mandate row, WEB host, MEDIA/UTILITIES hanging legends, GROK TUI.
+
+Unchanged: GROK TUI as motor, no GGUF in git, `GENERAL_ACTION_AUTHORITY` NONE. Python host edits still need a desktop restart; QML often RELOAD.
+
 ## Patch notes · 2026-09-04 · 60 Hz TMOG + live spectrum
 
 What GitHub had until this push (`6bdf2a8`, 2 Sep 2026): GROK TUI default chat, PTY GUI-spin fix, 18-dot spectrum, 1 s radio buffer.

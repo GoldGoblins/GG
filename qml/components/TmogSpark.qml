@@ -79,25 +79,48 @@ Item {
                 return h - ((Number(val || 0) - minv) / (maxv - minv)) * (h - 8) - 4
             }
             var last = pts.length < 2 ? 2 : pts.length
-            ctx.beginPath()
-            ctx.moveTo(0, h)
-            for (i = 0; i < pts.length; i++) {
-                var px = (pts.length === 1 ? 1 : i / (last - 1)) * w
-                ctx.lineTo(px, yAt(pts[i]))
+            function xAt(index) {
+                return (pts.length === 1 ? 1 : index / (last - 1)) * w
             }
-            ctx.lineTo(w, h)
-            ctx.closePath()
+            function traceHills(startAtBase) {
+                var n = pts.length
+                var x0 = xAt(0)
+                var y0 = yAt(pts[0])
+                if (startAtBase) {
+                    ctx.moveTo(0, h)
+                    ctx.lineTo(x0, y0)
+                } else {
+                    ctx.moveTo(x0, y0)
+                }
+                if (n === 1) {
+                    if (startAtBase) {
+                        ctx.lineTo(w, h)
+                        ctx.closePath()
+                    }
+                    return
+                }
+                for (i = 1; i < n - 1; i++) {
+                    var xc = (xAt(i) + xAt(i + 1)) / 2
+                    var yc = (yAt(pts[i]) + yAt(pts[i + 1])) / 2
+                    ctx.quadraticCurveTo(xAt(i), yAt(pts[i]), xc, yc)
+                }
+                ctx.quadraticCurveTo(
+                    xAt(n - 1),
+                    yAt(pts[n - 1]),
+                    xAt(n - 1),
+                    yAt(pts[n - 1])
+                )
+                if (startAtBase) {
+                    ctx.lineTo(w, h)
+                    ctx.closePath()
+                }
+            }
+            ctx.beginPath()
+            traceHills(true)
             ctx.fillStyle = root.fill
             ctx.fill()
             ctx.beginPath()
-            for (i = 0; i < pts.length; i++) {
-                var sx = (pts.length === 1 ? 1 : i / (last - 1)) * w
-                var sy = yAt(pts[i])
-                if (i === 0)
-                    ctx.moveTo(sx, sy)
-                else
-                    ctx.lineTo(sx, sy)
-            }
+            traceHills(false)
             ctx.strokeStyle = root.stroke
             ctx.lineWidth = 1.6
             ctx.lineJoin = "round"

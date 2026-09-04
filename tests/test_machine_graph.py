@@ -1128,6 +1128,34 @@ class MachineGraphTests(
     "LEARNING_MEMORY_PROMOTION",
     W.action_execution_safe_tool_adapter.action_done_when.evaluate_action_done_when,
 ),
+            (
+                "call-102",
+                "live_mandate_store.put_pending",
+                "CHAT_BRIDGE",
+                "LIVE_MANDATE_STORE",
+                W.ChatBridge._capture_pending_mandate,
+            ),
+            (
+                "call-103",
+                "live_mandate_store.approve",
+                "CHAT_BRIDGE",
+                "LIVE_MANDATE_STORE",
+                W.ChatBridge._submit_mandate,
+            ),
+            (
+                "call-104",
+                "live_mandate_store.reject",
+                "CHAT_BRIDGE",
+                "LIVE_MANDATE_STORE",
+                W.ChatBridge._submit_mandate,
+            ),
+            (
+                "call-105",
+                "task_scoped_action_grant.issue_from_approved_record",
+                "CHAT_BRIDGE",
+                "TASK_SCOPED_ACTION_GRANT",
+                W.ChatBridge._submit_mandate,
+            ),
 (
                 "call-11",
                 "self._registry.active_working_set",
@@ -1778,8 +1806,8 @@ class MachineGraphTests(
         graph = W._build_workbench_machine_graph()
         graph.validate()
 
-        self.assertEqual(len(graph.nodes), 52)
-        self.assertEqual(len(graph.edges), 161)
+        self.assertEqual(len(graph.nodes), 54)
+        self.assertEqual(len(graph.edges), 165)
 
         nodes = {
             node.node_id: node
@@ -3769,7 +3797,7 @@ class MachineGraphTests(
             bridge.machine_graph_sha256(),
         )
         self.assertEqual(
-            161,
+            165,
             len(
                 bridge._machine_graph.edges
             ),

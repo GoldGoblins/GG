@@ -33,7 +33,23 @@ Item {
     property var liveTempHist: []
     property var liveDiskHist: []
     property var liveNetHist: []
+    property var liveEnergyHist: []
     property var liveCoreHists: []
+    property real liveEnergy: 0
+    property real liveEnergyYMax: 40
+    property var menuRow: ({})
+    property string menuKind: ""
+    property real netRxPos: 0
+    property real netRxVel: 0
+    property real netTxPos: 0
+    property real netTxVel: 0
+    property real diskRPos: 0
+    property real diskRVel: 0
+    property real diskWPos: 0
+    property real diskWVel: 0
+    property real liveNetYMax: 64
+    property real liveDiskYMax: 256
+    property bool diskLampOn: false
 
     readonly property var nav: [
         "SUMMARY",
@@ -106,6 +122,38 @@ Item {
         }
     }
 
+    function copyText(text) {
+        if (root.surfaceHost && root.surfaceHost.tmogCopy)
+            root.surfaceHost.tmogCopy(String(text || ""))
+    }
+
+    function armMenu(kind, row) {
+        root.menuKind = kind
+        root.menuRow = row || {}
+    }
+
+    function rowLabel(row) {
+        if (!row)
+            return ""
+        if (row.name)
+            return String(row.name)
+        if (row.comm)
+            return String(row.comm)
+        if (row.path)
+            return String(row.path)
+        if (row.local)
+            return String(row.local)
+        return ""
+    }
+
+    function shortName(value) {
+        var s = String(value || "")
+        var at = s.indexOf("@")
+        if (at > 0)
+            return s.slice(0, at)
+        return s
+    }
+
     function swallow() {
         if (!root.surfaceHost || !root.surfaceHost.startTmog)
             return
@@ -157,6 +205,8 @@ Item {
             return root.liveDiskHist
         if (name === "net_hist")
             return root.liveNetHist
+        if (name === "energy_hist")
+            return root.liveEnergyHist
         if (name === "core_hist")
             return root.liveCoreHists
         var rows = root.status[name]
@@ -193,6 +243,8 @@ Item {
             return root.liveNetRx
         if (name === "net_tx_bps")
             return root.liveNetTx
+        if (name === "energy_w")
+            return root.liveEnergy
         if (name === "disk_led")
             return Math.min(1, (root.liveDiskRead + root.liveDiskWrite) / (8 * 1024 * 1024))
         var v = root.status[name]
@@ -209,8 +261,39 @@ Item {
         return next
     }
 
+    function springFollow(pos, vel, target, dt) {
+        var goal = Math.max(0, Number(target || 0))
+        var rising = goal > pos
+        var omega = rising ? 18 : 9
+        var zeta = rising ? 0.88 : 0.8
+        var acc = -omega * omega * (pos - goal) - 2 * zeta * omega * vel
+        vel += acc * dt
+        pos += vel * dt
+        if (pos < 0) {
+            pos = 0
+            vel = 0
+        }
+        return [pos, vel]
+    }
+
     function applyPulse(payload) {
         var p = payload || {}
+        var dt = Number(p.dt || 0)
+        if (dt < 0.008 || dt > 0.05)
+            dt = 0.016
+        var sprung
+        sprung = root.springFollow(root.netRxPos, root.netRxVel, p.net_rx_bps, dt)
+        root.netRxPos = sprung[0]
+        root.netRxVel = sprung[1]
+        sprung = root.springFollow(root.netTxPos, root.netTxVel, p.net_tx_bps, dt)
+        root.netTxPos = sprung[0]
+        root.netTxVel = sprung[1]
+        sprung = root.springFollow(root.diskRPos, root.diskRVel, p.disk_read_bps, dt)
+        root.diskRPos = sprung[0]
+        root.diskRVel = sprung[1]
+        sprung = root.springFollow(root.diskWPos, root.diskWVel, p.disk_write_bps, dt)
+        root.diskWPos = sprung[0]
+        root.diskWVel = sprung[1]
         root.liveCpu = Number(p.cpu_busy || 0)
         root.liveMemUsed = Number(p.mem_used_kb || 0)
         root.liveMemTotal = Number(p.mem_total_kb || 0)
@@ -220,10 +303,10 @@ Item {
         root.liveLoad15 = Number(p.load15 || 0)
         root.liveMhz = Number(p.mhz || 0)
         root.liveMhzMax = Number(p.mhz_max || 0)
-        root.liveDiskRead = Number(p.disk_read_bps || 0)
-        root.liveDiskWrite = Number(p.disk_write_bps || 0)
-        root.liveNetRx = Number(p.net_rx_bps || 0)
-        root.liveNetTx = Number(p.net_tx_bps || 0)
+        root.liveDiskRead = root.diskRPos
+        root.liveDiskWrite = root.diskWPos
+        root.liveNetRx = root.netRxPos
+        root.liveNetTx = root.netTxPos
         root.liveCpuHist = root.pushHist(root.liveCpuHist, root.liveCpu)
         root.liveMemHist = root.pushHist(
             root.liveMemHist,
@@ -238,6 +321,26 @@ Item {
             root.liveNetHist,
             (root.liveNetRx + root.liveNetTx) / 1024.0
         )
+        if (p.energy_w !== undefined && p.energy_w !== null)
+            root.liveEnergy = Number(p.energy_w || 0)
+        root.liveEnergyHist = root.pushHist(root.liveEnergyHist, root.liveEnergy)
+        if (root.liveEnergy * 1.3 > root.liveEnergyYMax)
+            root.liveEnergyYMax = Math.max(40, root.liveEnergy * 1.3)
+        var netNow = (root.liveNetRx + root.liveNetTx) / 1024.0
+        var diskNow = (root.liveDiskRead + root.liveDiskWrite) / 1024.0
+        if (netNow * 1.2 > root.liveNetYMax)
+            root.liveNetYMax = netNow * 1.2
+        else
+            root.liveNetYMax += (Math.max(64, netNow * 1.2) - root.liveNetYMax) * 0.01
+        if (diskNow * 1.2 > root.liveDiskYMax)
+            root.liveDiskYMax = diskNow * 1.2
+        else
+            root.liveDiskYMax += (Math.max(256, diskNow * 1.2) - root.liveDiskYMax) * 0.01
+        var diskIo = Number(p.disk_read_bps || 0) + Number(p.disk_write_bps || 0)
+        if (diskIo < 1024)
+            root.diskLampOn = false
+        else
+            root.diskLampOn = (root.liveTicks % 6) < 3
         var cores = p.cores || []
         var rows = root.liveCoreHists && root.liveCoreHists.length
             ? root.liveCoreHists.slice()
@@ -285,19 +388,18 @@ Item {
 
     Item {
         anchors.fill: parent
-        anchors.leftMargin: 6
-        anchors.rightMargin: 6
-        anchors.topMargin: 4
-        anchors.bottomMargin: 6
+        anchors.leftMargin: 8
+        anchors.rightMargin: 12
+        anchors.topMargin: 8
+        anchors.bottomMargin: 10
 
-        Row {
-            anchors.fill: parent
-            spacing: 10
-
-                Column {
-                    id: navCol
-                    width: 108
-                    spacing: 3
+        Column {
+            id: navCol
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 108
+            spacing: 3
 
                     Repeater {
                         model: root.nav
@@ -335,16 +437,23 @@ Item {
                     }
                 }
 
-                Rectangle {
-                    width: 1
-                    height: parent.height
-                    color: "#2a2a2a"
-                }
+        Rectangle {
+            id: navSep
+            anchors.left: navCol.right
+            anchors.leftMargin: 8
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 1
+            color: "#2a2a2a"
+        }
 
-                Item {
-                    id: field
-                    width: parent.width - navCol.width - 11
-                    height: parent.height
+        Item {
+            id: field
+            anchors.left: navSep.right
+            anchors.leftMargin: 8
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
 
                     Loader {
                         anchors.fill: parent
@@ -619,6 +728,7 @@ Item {
                                         width: parent.width
                                         height: parent.height
                                         values: root.arr("disk_hist")
+                                        yMax: root.liveDiskYMax
                                         stroke: "#8db89a"
                                         fill: "#1c2a22"
                                     }
@@ -635,6 +745,7 @@ Item {
                                         width: parent.width
                                         height: parent.height
                                         values: root.arr("net_hist")
+                                        yMax: root.liveNetYMax
                                         stroke: "#8a8a8a"
                                         fill: "#1c1c1c"
                                     }
@@ -668,7 +779,7 @@ Item {
                                 model: [
                                     { "k": "CPU", "c": "#8db89a", "h": "cpu_hist" },
                                     { "k": "MEMORY", "c": "#b6a6c8", "h": "mem_hist" },
-                                    { "k": "ENERGY", "c": "#c8a97e", "h": "temp_hist" },
+                                    { "k": "ENERGY", "c": "#c8a97e", "h": "energy_hist" },
                                     { "k": "THERMALS", "c": "#c8a97e", "h": "temp_hist" },
                                     { "k": "DISK", "c": "#8db89a", "h": "disk_hist" },
                                     { "k": "NETWORK", "c": "#8a8a8a", "h": "net_hist" }
@@ -688,7 +799,15 @@ Item {
                                         fill: "#161616"
                                         yMax: modelData.k === "CPU" || modelData.k === "MEMORY"
                                             ? 100
-                                            : 0
+                                            : (modelData.k === "THERMALS"
+                                                ? 105
+                                                : (modelData.k === "ENERGY"
+                                                    ? root.liveEnergyYMax
+                                                    : (modelData.k === "DISK"
+                                                        ? root.liveDiskYMax
+                                                        : (modelData.k === "NETWORK"
+                                                            ? root.liveNetYMax
+                                                            : 0))))
                                     }
                                     MouseArea {
                                         anchors.fill: parent
@@ -715,10 +834,10 @@ Item {
                                         : (root.perfKey === "DISK"
                                             ? root.bps(root.n("disk_read_bps"))
                                             : (root.perfKey === "NETWORK"
-                                                ? root.bps(root.n("net_rx_bps"))
-                                                : (root.energy.watts == null
-                                                    ? "—"
-                                                    : String(root.energy.watts) + " W")))))
+                                                ? root.bps(root.n("net_rx_bps") + root.n("net_tx_bps"))
+                                                : (root.n("energy_w")
+                                                    ? String(root.n("energy_w")) + " W"
+                                                    : String(root.energy.source || "AC"))))))
 
                             Column {
                                 anchors.fill: parent
@@ -735,7 +854,11 @@ Item {
                                                 : 0)
                                             : (root.perfKey === "THERMALS"
                                                 ? Math.min(1, root.n("temp_c") / 105)
-                                                : 0.05))
+                                                : (root.perfKey === "ENERGY"
+                                                    ? (root.energy.battery_pct
+                                                        ? Number(root.energy.battery_pct) / 100
+                                                        : Math.min(1, root.n("energy_w") / Math.max(40, root.liveEnergyYMax)))
+                                                    : 0.05)))
                                     onColor: root.perfKey === "MEMORY"
                                         ? "#b6a6c8"
                                         : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
@@ -751,16 +874,26 @@ Item {
                                         : Math.max(120, parent.height * 0.55)
                                     values: root.perfKey === "MEMORY"
                                         ? root.arr("mem_hist")
-                                        : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
+                                        : (root.perfKey === "THERMALS"
                                             ? root.arr("temp_hist")
+                                            : (root.perfKey === "ENERGY"
+                                                ? root.arr("energy_hist")
                                             : (root.perfKey === "DISK"
                                                 ? root.arr("disk_hist")
                                                 : (root.perfKey === "NETWORK"
                                                     ? root.arr("net_hist")
-                                                    : root.arr("cpu_hist"))))
+                                                    : root.arr("cpu_hist")))))
                                     yMax: root.perfKey === "CPU" || root.perfKey === "MEMORY"
                                         ? 100
-                                        : (root.perfKey === "THERMALS" ? 105 : 0)
+                                        : (root.perfKey === "THERMALS"
+                                            ? 105
+                                            : (root.perfKey === "ENERGY"
+                                                ? root.liveEnergyYMax
+                                            : (root.perfKey === "DISK"
+                                                ? root.liveDiskYMax
+                                                : (root.perfKey === "NETWORK"
+                                                    ? root.liveNetYMax
+                                                    : 0))))
                                     stroke: root.perfKey === "MEMORY"
                                         ? "#b6a6c8"
                                         : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
@@ -810,7 +943,7 @@ Item {
                                     font.pixelSize: 12
                                     text: root.perfKey === "CPU"
                                         ? (root.status.cpu_model || "")
-                                            + "\n" + root.arr("cores").length + " logical   "
+                                            + "\n" + String(root.status.core_count || root.arr("cores").length) + " logical   "
                                             + root.n("mhz") + " MHz   up "
                                             + root.clock(root.n("uptime_s"))
                                             + "   threads " + String(root.n("process_count"))
@@ -833,9 +966,9 @@ Item {
                                                             + "   ↓ " + root.bps(root.n("net_rx_bps"))
                                                             + "   ↑ " + root.bps(root.n("net_tx_bps"))
                                                         : String(root.energy.source || "AC")
-                                                            + (root.energy.watts == null
-                                                                ? "   power unavailable"
-                                                                : "   " + String(root.energy.watts) + " W")))))
+                                                            + (root.n("energy_w")
+                                                                ? "   " + String(root.n("energy_w")) + " W package"
+                                                                : "   desktop · no battery")))))
                                 }
                             }
                         }
@@ -851,22 +984,9 @@ Item {
 
                     Component {
                         id: listPage
-                    Flickable {
-                        anchors.fill: parent
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
-                        contentWidth: width
-                        contentHeight: listBody.height
-                        flickableDirection: Flickable.VerticalFlick
-
-                        Column {
-                            id: listBody
-                            width: parent.width
-                            spacing: 8
-
+                        Item {
                             TmogCard {
-                                width: parent.width
-                                height: Math.max(180, root.processes.length * 16 + 36)
+                                anchors.fill: parent
                                 visible: root.page === "PROCESSES"
                                 leftLegend: "PROCESSES"
                                 rightLegend: String(root.n("process_count"))
@@ -875,107 +995,194 @@ Item {
                                             ? (" · " + String(root.n("tombstones")) + " GONE")
                                             : ""
                                     )
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    Text {
-                                        width: parent.width
-                                        text: "NAME            PID     STATUS      USER        CPU    RSS     THR"
-                                        color: "#a8b0b8"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                    }
-                                    Repeater {
-                                        model: root.processes
-                                        delegate: Text {
-                                            required property var modelData
-                                            width: listBody.width - 8
-                                            text: String(modelData.comm || "").padEnd(14, " ").slice(0, 14)
-                                                + " " + String(modelData.pid).padStart(6, " ")
-                                                + "  " + String(modelData.status || "").padEnd(11, " ").slice(0, 11)
-                                                + " " + String(modelData.user || "").padEnd(10, " ").slice(0, 10)
-                                                + " " + String(modelData.cpu_pct).padStart(5, " ") + "%"
-                                                + " " + root.kib(modelData.rss_kb).padStart(7, " ")
-                                                + " " + String(modelData.threads).padStart(4, " ")
-                                            color: modelData.tombstone
-                                                ? "#c98989"
-                                                : (
-                                                    Number(modelData.pid) === root.selectedPid
-                                                        ? "#e6edf3"
-                                                        : "#c8cdd4"
-                                                )
-                                            font.family: "monospace"
-                                            font.pixelSize: 12
-                                            elide: Text.ElideRight
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: root.selectedPid = Number(modelData.pid)
-                                            }
-                                        }
-                                    }
-                                    Text {
-                                        width: parent.width
-                                        visible: root.selected !== null
-                                        text: root.selected
-                                            ? "#" + root.selected.pid + "  "
-                                                + (root.selected.cmdline || "")
-                                            : ""
-                                        color: "#c8a97e"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                        wrapMode: Text.WrapAnywhere
-                                    }
-                                }
-                            }
-
-                            TmogCard {
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: procCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: procCol
                                 width: parent.width
-                                height: 160
-                                visible: root.page === "SYSTEM"
-                                leftLegend: "SYSTEM"
+                                spacing: 2
                                 Text {
                                     width: parent.width
-                                    text: "HOST  " + (root.status.hostname || "—")
-                                        + "\nKERNEL  " + (root.status.kernel || "—")
-                                        + "\nCPU  " + (root.status.cpu_model || "—")
-                                        + "\nCORES  " + root.arr("cores").length
-                                        + "\nUP  " + root.clock(root.n("uptime_s"))
-                                    color: "#d8dee9"
+                                    text: "NAME            PID     STATUS      USER        CPU    RSS     THR"
+                                    color: "#a8b0b8"
                                     font.family: "monospace"
                                     font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
                                 }
+                                Repeater {
+                                    model: root.processes
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        selected: Number(modelData.pid) === root.selectedPid
+                                        textColor: modelData.tombstone ? "#c98989" : "#c8cdd4"
+                                        text: String(modelData.comm || "").padEnd(14, " ").slice(0, 14)
+                                            + " " + String(modelData.pid).padStart(6, " ")
+                                            + "  " + String(modelData.status || "").padEnd(11, " ").slice(0, 11)
+                                            + " " + String(modelData.user || "").padEnd(10, " ").slice(0, 10)
+                                            + " " + String(modelData.cpu_pct).padStart(5, " ") + "%"
+                                            + " " + root.kib(modelData.rss_kb).padStart(7, " ")
+                                            + " " + String(modelData.threads).padStart(4, " ")
+                                        onChosen: root.selectedPid = Number(modelData.pid)
+                                        onMenuRequested: {
+                                            root.selectedPid = Number(modelData.pid)
+                                            root.armMenu("proc", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
+                                }
+                                Text {
+                                    width: parent.width
+                                    visible: root.selected !== null
+                                    text: root.selected
+                                        ? "#" + root.selected.pid + "  "
+                                            + (root.selected.cmdline || "")
+                                        : ""
+                                    color: "#c8a97e"
+                                    font.family: "monospace"
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WrapAnywhere
+                                }
+                            }
+                            }
                             }
 
-                            Repeater {
-                                model: root.page === "USERS" ? root.arr("users") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    text: String(modelData.name) + "   " + String(modelData.procs)
-                                    color: "#d8dee9"
-                                    font.family: "monospace"
-                                    font.pixelSize: 12
-                                }
-                            }
-                            Repeater {
-                                model: root.page === "CONNECTIONS" ? root.arr("connections") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    width: listBody.width
-                                    text: String(modelData.state) + "  "
-                                        + String(modelData.local) + " → " + String(modelData.remote)
-                                    color: "#c8cdd4"
-                                    font.family: "monospace"
-                                    font.pixelSize: 12
-                                    elide: Text.ElideRight
-                                }
-                            }
                             TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "SYSTEM"
+                                leftLegend: "SYSTEM"
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: sysCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: sysCol
                                 width: parent.width
-                                height: 28
+                            Text {
+                                width: parent.width
+                                text: "HOST     " + (root.status.hostname || "—")
+                                    + "\nOS       " + (root.status.os || "—")
+                                    + "\nKERNEL   " + (root.status.kernel || "—")
+                                    + "\nCPU      " + (root.status.cpu_model || "—")
+                                    + "\nCORES    " + String(root.status.core_count || 0)
+                                    + "   " + String(root.n("mhz")) + " MHz"
+                                    + "\nMEM      " + root.kib(root.n("mem_used_kb"))
+                                    + " / " + root.kib(root.n("mem_total_kb"))
+                                    + "\nLOAD     " + String(root.n("load1"))
+                                    + "  " + String(root.n("load5"))
+                                    + "  " + String(root.n("load15"))
+                                    + "\nTASKS    " + String(root.n("tasks_running"))
+                                    + " running / " + String(root.n("process_count"))
+                                    + "\nNET      " + String(root.status.net_iface || "—")
+                                    + "\nUP       " + root.clock(root.n("uptime_s"))
+                                color: "#d8dee9"
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
+                            }
+                            }
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "USERS"
+                                leftLegend: "USERS"
+                                rightLegend: String(root.arr("users").length)
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: userCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: userCol
+                                width: parent.width
+                                spacing: 2
+                                Text {
+                                    text: "USER            PROCS"
+                                    color: "#a8b0b8"
+                                    font.family: "monospace"
+                                    font.pixelSize: 12
+                                }
+                                Repeater {
+                                    model: root.arr("users")
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        text: String(modelData.name || "").padEnd(16, " ")
+                                            + "  " + String(modelData.procs)
+                                        onMenuRequested: {
+                                            root.armMenu("user", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "CONNECTIONS"
+                                leftLegend: "CONNECTIONS"
+                                rightLegend: String(root.arr("connections").length)
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: connCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: connCol
+                                width: parent.width
+                                spacing: 2
+                                Repeater {
+                                    model: root.arr("connections")
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        text: String(modelData.state || "").padEnd(11, " ").slice(0, 11)
+                                            + "  " + String(modelData.comm || "—").padEnd(12, " ").slice(0, 12)
+                                            + "  " + String(modelData.local)
+                                            + "  →  " + String(modelData.remote)
+                                        onMenuRequested: {
+                                            root.armMenu("conn", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
                                 visible: root.page === "DISK"
-                                leftLegend: "BLINKENDISK"
+                                leftLegend: "DISK"
+                                lamp: true
+                                lampOn: root.diskLampOn
                                 rightLegend: root.bps(root.n("disk_read_bps") + root.n("disk_write_bps"))
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: diskCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: diskCol
+                                width: parent.width
+                                spacing: 8
                                 Rectangle {
                                     width: parent.width
                                     height: 8
@@ -988,71 +1195,293 @@ Item {
                                         radius: 2
                                     }
                                 }
-                            }
-                            Repeater {
-                                model: root.page === "DISK" ? root.arr("mounts") : []
-                                delegate: TmogCard {
-                                    required property var modelData
-                                    width: listBody.width
-                                    height: 52
-                                    leftLegend: String(modelData.path)
-                                    rightLegend: String(modelData.fstype)
-                                    TmogMeter {
+                                Repeater {
+                                    model: root.arr("mounts")
+                                    delegate: Item {
+                                        required property var modelData
                                         width: parent.width
-                                        ratio: Number(modelData.total)
-                                            ? Number(modelData.used) / Number(modelData.total)
-                                            : 0
-                                        onColor: "#8db89a"
+                                        height: 40
+                                        Text {
+                                            text: String(modelData.path || "")
+                                                + "   " + root.kib(Number(modelData.used || 0) / 1024)
+                                                + " / " + root.kib(Number(modelData.total || 0) / 1024)
+                                                + "   " + String(modelData.fstype || "")
+                                            color: "#c8cdd4"
+                                            font.family: "monospace"
+                                            font.pixelSize: 12
+                                            elide: Text.ElideRight
+                                            width: parent.width
+                                        }
+                                        TmogMeter {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.bottom: parent.bottom
+                                            height: 14
+                                            ratio: Number(modelData.total)
+                                                ? Number(modelData.used) / Number(modelData.total)
+                                                : 0
+                                            onColor: "#8db89a"
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            acceptedButtons: Qt.RightButton
+                                            onClicked: {
+                                                root.armMenu("mount", modelData)
+                                                tmogMenu.popup()
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            Repeater {
-                                model: root.page === "FREQ" ? root.arr("cores") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    text: "CPU " + modelData.id + "  "
-                                        + modelData.mhz + " MHz  " + modelData.pct + "%"
-                                    color: "#8db89a"
-                                    font.family: "monospace"
-                                    font.pixelSize: 12
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "FREQ"
+                                leftLegend: "FREQ"
+                                rightLegend: String(root.arr("cores").length)
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: freqCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: freqCol
+                                width: parent.width
+                                spacing: 8
+                                Repeater {
+                                    model: root.arr("cores")
+                                    delegate: Item {
+                                        required property var modelData
+                                        width: parent.width
+                                        height: 28
+                                        Text {
+                                            text: "CPU " + modelData.id
+                                                + "   " + modelData.mhz + " MHz   "
+                                                + modelData.pct + "%"
+                                            color: "#c8cdd4"
+                                            font.family: "monospace"
+                                            font.pixelSize: 12
+                                        }
+                                        TmogMeter {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.bottom: parent.bottom
+                                            height: 12
+                                            ratio: Math.min(1, Number(modelData.pct || 0) / 100)
+                                            onColor: "#8db89a"
+                                            segments: 24
+                                        }
+                                    }
                                 }
                             }
-                            Repeater {
-                                model: root.page === "STARTUP" ? root.arr("startup") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    text: String(modelData)
-                                    color: "#d8dee9"
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "STARTUP"
+                                leftLegend: "STARTUP"
+                                rightLegend: String(root.arr("startup").length)
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: startCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: startCol
+                                width: parent.width
+                                spacing: 2
+                                Text {
+                                    visible: root.arr("startup").length === 0
+                                    text: "no autostart entries"
+                                    color: "#a8b0b8"
                                     font.family: "monospace"
                                     font.pixelSize: 12
+                                }
+                                Repeater {
+                                    model: root.arr("startup")
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        text: String(modelData.name || modelData.id || "")
+                                            + (modelData.hidden ? "  hidden" : "")
+                                        onMenuRequested: {
+                                            root.armMenu("app", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
                                 }
                             }
-                            Repeater {
-                                model: root.page === "APPS" ? root.arr("apps") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    text: String(modelData)
-                                    color: "#c8cdd4"
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "APPS"
+                                leftLegend: "APPS"
+                                rightLegend: String(root.arr("apps").length)
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: appCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: appCol
+                                width: parent.width
+                                spacing: 2
+                                Text {
+                                    visible: root.arr("apps").length === 0
+                                    text: "no desktop applications found"
+                                    color: "#a8b0b8"
                                     font.family: "monospace"
                                     font.pixelSize: 12
+                                }
+                                Repeater {
+                                    model: root.arr("apps")
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        text: String(modelData.name || modelData.id || "")
+                                        onMenuRequested: {
+                                            root.armMenu("app", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
                                 }
                             }
-                            Repeater {
-                                model: root.page === "SERVICES" ? root.arr("services") : []
-                                delegate: Text {
-                                    required property var modelData
-                                    text: String(modelData)
-                                    color: "#c8cdd4"
+                            }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "SERVICES"
+                                leftLegend: "SERVICES"
+                                rightLegend: String(root.arr("services").length) + " running"
+                            Flickable {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                contentWidth: width
+                                contentHeight: svcCol.height
+                                flickableDirection: Flickable.VerticalFlick
+                            Column {
+                                id: svcCol
+                                width: parent.width
+                                spacing: 2
+                                Text {
+                                    visible: root.arr("services").length === 0
+                                    text: "no running units in cgroup"
+                                    color: "#a8b0b8"
                                     font.family: "monospace"
                                     font.pixelSize: 12
                                 }
+                                Repeater {
+                                    model: root.arr("services")
+                                    delegate: TmogRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        text: String(modelData.scope || "").padEnd(7, " ")
+                                            + "  " + String(modelData.state || "").padEnd(8, " ")
+                                            + "  " + root.shortName(modelData.name || modelData.id || "")
+                                        onMenuRequested: {
+                                            root.armMenu("svc", modelData)
+                                            tmogMenu.popup()
+                                        }
+                                    }
+                                }
+                            }
                             }
                         }
-                    }
                     }
                 }
             }
         }
+
+    Menu {
+        id: tmogMenu
+        padding: 4
+        overlap: 0
+        font.family: "monospace"
+        font.pixelSize: 12
+        background: Rectangle {
+            color: "#161616"
+            border.width: 1
+            border.color: "#6a6a6a"
+            radius: 2
+            implicitWidth: 168
+        }
+        delegate: MenuItem {
+            id: item
+            visible: true
+            implicitHeight: item.visible ? 24 : 0
+            leftPadding: 10
+            rightPadding: 10
+            font.family: "monospace"
+            font.pixelSize: 12
+            contentItem: Text {
+                text: item.text
+                font.family: "monospace"
+                font.pixelSize: 12
+                color: item.highlighted ? "#e6e6e6" : "#c8cdd4"
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: item.highlighted ? "#1c1c1c" : "transparent"
+                radius: 1
+            }
+        }
+        MenuItem {
+            text: "Copy PID"
+            visible: root.menuKind === "proc"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.pid || ""))
+        }
+        MenuItem {
+            text: "Copy name"
+            visible: root.menuKind === "proc" || root.menuKind === "app"
+                || root.menuKind === "svc" || root.menuKind === "user"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(root.rowLabel(root.menuRow))
+        }
+        MenuItem {
+            text: "Copy command"
+            visible: root.menuKind === "proc"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.cmdline || root.menuRow.comm || ""))
+        }
+        MenuItem {
+            text: "Copy local"
+            visible: root.menuKind === "conn"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.local || ""))
+        }
+        MenuItem {
+            text: "Copy remote"
+            visible: root.menuKind === "conn"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.remote || ""))
+        }
+        MenuItem {
+            text: "Copy path"
+            visible: root.menuKind === "mount" || root.menuKind === "app"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.path || root.menuRow.src || ""))
+        }
+        MenuItem {
+            text: "Copy id"
+            visible: root.menuKind === "svc" || root.menuKind === "app"
+            height: visible ? implicitHeight : 0
+            onTriggered: root.copyText(String(root.menuRow.id || ""))
+        }
+    }
 
     Item {
         id: hole

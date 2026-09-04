@@ -79,6 +79,7 @@ def _run(web_surface) -> int:
         archive.writestr("index.html", "<h1>imported-gg</h1>\n")
         archive.writestr("../escape.html", "no\n")
         archive.writestr("snippets/hero.html", "<section>hero</section>\n")
+        archive.writestr("wp-config.php", "<?php // secret\n")
     notes: list[tuple[str, int, int, str]] = []
     result = web_surface.import_site_tree(
         str(payload),
@@ -98,6 +99,8 @@ def _run(web_surface) -> int:
         raise AssertionError("zip escape leaked")
     if "hero" not in web_surface.read_site_file("snippets/hero.html"):
         raise AssertionError("imported snippet missing")
+    if web_surface.read_site_file("wp-config.php"):
+        raise AssertionError("wp-config leaked through import")
     print("WEB_SURFACE_TEST=PASS")
     print("NETWORK_AUTHORITY=NONE")
     print("WEB=USER_BROWSE_HTTP_HTTPS")

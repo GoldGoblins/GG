@@ -21,9 +21,9 @@ from backend.domain_merkle import (
 )
 
 
-SCHEMA = "gg.ai-desktop.marketplace-status.v1"
-LISTING_SCHEMA = "gg.ai-desktop.marketplace-listing.v1"
-LEDGER_SCHEMA = "gg.ai-desktop.marketplace-ledger.v1"
+SCHEMA = "gg.ai-desktop.marketplace-status.v2"
+LISTING_SCHEMA = "gg.ai-desktop.marketplace-listing.v2"
+LEDGER_SCHEMA = "gg.ai-desktop.marketplace-ledger.v2"
 STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/marketplace")
 CATALOG_NAME = "catalog.json"
 LEDGER_NAME = "ledger.jsonl"
@@ -44,6 +44,34 @@ CATEGORIES = (
     "TOOL",
     "COMPONENT",
 )
+KINDS = (
+    "ELEMENT",
+    "SUBSTANCE",
+    "OBJECT",
+)
+ELEMENTS = (
+    ("H", "Hydrogen"),
+    ("C", "Carbon"),
+    ("N", "Nitrogen"),
+    ("O", "Oxygen"),
+    ("Na", "Sodium"),
+    ("Mg", "Magnesium"),
+    ("Al", "Aluminium"),
+    ("Si", "Silicon"),
+    ("P", "Phosphorus"),
+    ("S", "Sulfur"),
+    ("Ti", "Titanium"),
+    ("Cr", "Chromium"),
+    ("Fe", "Iron"),
+    ("Ni", "Nickel"),
+    ("Cu", "Copper"),
+    ("Zn", "Zinc"),
+    ("Ag", "Silver"),
+    ("Sn", "Tin"),
+    ("Au", "Gold"),
+    ("Pb", "Lead"),
+)
+ELEMENT_SYMBOLS = frozenset(symbol for symbol, _name in ELEMENTS)
 MATERIALS = (
     "GOLD",
     "SILVER",
@@ -55,9 +83,12 @@ MATERIALS = (
     "DIGITAL",
     "MIXED",
     "UNKNOWN",
-)
+) + tuple(sorted(ELEMENT_SYMBOLS))
+MAX_COMPOSITION = 24
+MAX_LIVES = 12
+MAX_MASS = 1_000_000_000.0
 STATUSES = ("DRAFT", "LISTED", "DELISTED", "SOLD")
-FILTERS = ("ALL",) + CATEGORIES
+FILTERS = ("ALL",) + CATEGORIES + KINDS
 SOL_LAMPORTS = 1_000_000_000
 MAX_PRICE_SOL = 1_000_000
 
@@ -121,13 +152,73 @@ def _clip(value: str, maximum: int) -> str:
     return text
 
 
+def _norm_composition(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw[:MAX_COMPOSITION]:
+        if not isinstance(item, dict):
+            continue
+        part_id = str(item.get("id") or "")[:80]
+        symbol = str(item.get("symbol") or item.get("material") or "").strip()
+        title = _clip(str(item.get("title") or symbol or part_id), MAX_TITLE)
+        kind = str(item.get("kind") or "ELEMENT").strip().upper()
+        if kind not in KINDS:
+            kind = "ELEMENT"
+        try:
+            mass = float(item.get("mass_g") or 0)
+        except (TypeError, ValueError):
+            mass = 0.0
+        if mass < 0 or mass > MAX_MASS:
+            mass = 0.0
+        rows.append(
+            {
+                "id": part_id,
+                "kind": kind,
+                "symbol": symbol[:8],
+                "title": title,
+                "mass_g": round(mass, 4),
+            }
+        )
+    return rows
+
+
+def _norm_lives(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw[:MAX_LIVES]:
+        listing_id = str(item if not isinstance(item, dict) else item.get("id") or "")
+        listing_id = listing_id.strip()[:80]
+        if not listing_id or listing_id in seen:
+            continue
+        seen.add(listing_id)
+        out.append(listing_id)
+    return out
+
+
+def infer_kind(category: str, material: str) -> str:
+    if material in ELEMENT_SYMBOLS or category == "MATERIAL":
+        if material in ELEMENT_SYMBOLS:
+            return "ELEMENT"
+        return "SUBSTANCE"
+    return "OBJECT"
+
+
 def identity_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": LISTING_SCHEMA,
         "title": str(row.get("title") or ""),
+        "kind": str(row.get("kind") or ""),
         "category": str(row.get("category") or ""),
         "material": str(row.get("material") or ""),
         "description": str(row.get("description") or ""),
+        "maker": str(row.get("maker") or ""),
+        "origin": str(row.get("origin") or ""),
+        "mass_g": float(row.get("mass_g") or 0),
+        "composition": _norm_composition(row.get("composition")),
+        "previous_lives": _norm_lives(row.get("previous_lives")),
         "mint": str(row.get("mint") or ""),
         "price_lamports": int(row.get("price_lamports") or 0),
         "listed_at": int(row.get("listed_at") or 0),
@@ -142,6 +233,7 @@ def state_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload["network"] = str(row.get("network") or "testnet")
     payload["mode"] = str(row.get("mode") or "TESTNET")
     payload["identity_sha256"] = str(row.get("identity_sha256") or "")
+    payload["lifecycle"] = list(row.get("lifecycle") or [])[-40:]
     return payload
 
 
@@ -346,10 +438,39 @@ def parse_listing(raw: str | dict[str, Any]) -> dict[str, Any]:
     category = str(payload.get("category") or "").strip().upper()
     if category not in CATEGORIES:
         raise ValueError("MARKETPLACE_CATEGORY")
-    material = str(payload.get("material") or "UNKNOWN").strip().upper()
+    raw_mat = str(payload.get("material") or "UNKNOWN").strip()
+    symbol_by_up = {symbol.upper(): symbol for symbol in ELEMENT_SYMBOLS}
+    if raw_mat.upper() in symbol_by_up:
+        material = symbol_by_up[raw_mat.upper()]
+    else:
+        material = raw_mat.upper()
     if material not in MATERIALS:
         raise ValueError("MARKETPLACE_MATERIAL")
     description = _clip(str(payload.get("description") or ""), MAX_DESCRIPTION)
+    maker = _clip(str(payload.get("maker") or ""), 80)
+    origin = _clip(str(payload.get("origin") or ""), 80)
+    try:
+        mass_g = float(payload.get("mass_g") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MARKETPLACE_MASS") from exc
+    if mass_g < 0 or mass_g > MAX_MASS:
+        raise ValueError("MARKETPLACE_MASS")
+    kind = str(payload.get("kind") or "").strip().upper()
+    if not kind:
+        kind = infer_kind(category, material)
+    if kind not in KINDS:
+        raise ValueError("MARKETPLACE_KIND")
+    if kind == "ELEMENT" and material not in ELEMENT_SYMBOLS:
+        if material in {"GOLD"}:
+            material = "Au"
+        elif material in {"SILVER"}:
+            material = "Ag"
+        elif material in {"COPPER"}:
+            material = "Cu"
+        else:
+            kind = "SUBSTANCE"
+    composition = _norm_composition(payload.get("composition"))
+    previous_lives = _norm_lives(payload.get("previous_lives"))
     mint_raw = str(payload.get("mint") or "").strip()
     mint = validate_pubkey(mint_raw) if mint_raw else ""
     price = parse_sol_price(
@@ -357,9 +478,15 @@ def parse_listing(raw: str | dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "title": title,
+        "kind": kind,
         "category": category,
         "material": material,
         "description": description,
+        "maker": maker,
+        "origin": origin,
+        "mass_g": round(mass_g, 4),
+        "composition": composition,
+        "previous_lives": previous_lives,
         "mint": mint,
         "price_lamports": price,
     }
@@ -367,11 +494,21 @@ def parse_listing(raw: str | dict[str, Any]) -> dict[str, Any]:
 
 def decorate_listing(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
+    out["kind"] = str(out.get("kind") or infer_kind(
+        str(out.get("category") or ""),
+        str(out.get("material") or ""),
+    ))
+    out["composition"] = _norm_composition(out.get("composition"))
+    out["previous_lives"] = _norm_lives(out.get("previous_lives"))
     out["price_sol"] = format_sol(int(out.get("price_lamports") or 0))
     out["owner_short"] = short_pubkey(str(out.get("owner") or ""))
-    out["mint_short"] = short_pubkey(str(out.get("mint") or "")) or "UNBOUND"
+    mint = str(out.get("mint") or "")
+    out["mint_short"] = short_pubkey(mint) or (mint[:12] if mint else "UNBOUND")
     out["identity_short"] = str(out.get("identity_sha256") or "")[:12]
     out["state_short"] = str(out.get("state_sha256") or "")[:12]
+    out["receipt"] = "paper:" + str(out.get("identity_sha256") or "")[:32]
+    out["part_count"] = len(out["composition"])
+    out["life_count"] = len(out["previous_lives"])
     return out
 
 
@@ -414,15 +551,24 @@ def list_item(raw: str | dict[str, Any]) -> dict[str, Any]:
         raise ValueError("MARKETPLACE_DUPLICATE")
     if len(catalog) >= MAX_LISTINGS:
         raise ValueError("MARKETPLACE_FULL")
+    paper_mint = parsed.get("mint") or ("paper:" + identity[:32])
     row = {
         **seed,
         "id": listing_id,
+        "mint": paper_mint,
         "owner": owner,
         "status": "LISTED",
         "network": chain,
         "mode": "TESTNET",
         "identity_sha256": identity,
         "state_sha256": "",
+        "lifecycle": [
+            {
+                "kind": "MINTED",
+                "ts": listed_at,
+                "note": "paper receipt",
+            }
+        ],
     }
     row["state_sha256"] = hash_state(row)
     catalog.append(row)
@@ -457,6 +603,9 @@ def _mutate(listing_id: str, status: str, owner: str | None = None) -> dict[str,
     if owner is not None:
         found["owner"] = owner
     found["status"] = status
+    events = list(found.get("lifecycle") or [])
+    events.append({"kind": status, "ts": int(time.time())})
+    found["lifecycle"] = events[-40:]
     found["state_sha256"] = hash_state(found)
     save_catalog(catalog)
     save_prefs(selected=wanted)
@@ -525,6 +674,133 @@ def set_filter(category: str) -> dict[str, Any]:
     return save_prefs(filter_name=category)
 
 
+def list_element(symbol: str) -> dict[str, Any]:
+    wanted = str(symbol or "").strip()
+    name = dict(ELEMENTS).get(wanted)
+    if not name:
+        raise ValueError("MARKETPLACE_ELEMENT")
+    catalog = load_catalog()
+    for row in catalog:
+        if str(row.get("kind") or "") == "ELEMENT" and str(row.get("material") or "") == wanted:
+            save_prefs(selected=str(row.get("id") or ""))
+            return decorate_listing(row)
+    return list_item(
+        {
+            "title": name,
+            "kind": "ELEMENT",
+            "category": "MATERIAL",
+            "material": wanted,
+            "description": "Element receipt · " + wanted + " · " + name,
+            "price_sol": "0",
+        }
+    )
+
+
+def rebirth_item(raw: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        payload = raw
+    else:
+        try:
+            payload = json.loads(str(raw or ""))
+        except json.JSONDecodeError as exc:
+            raise ValueError("MARKETPLACE_JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("MARKETPLACE_JSON")
+    from_ids = _norm_lives(payload.get("previous_lives") or payload.get("from_ids"))
+    if not from_ids:
+        raise ValueError("MARKETPLACE_LIVES")
+    catalog = load_catalog()
+    by_id = {str(row.get("id") or ""): row for row in catalog}
+    sources = [by_id[item] for item in from_ids if item in by_id]
+    if len(sources) != len(from_ids):
+        raise ValueError("MARKETPLACE_MISSING")
+    composition: list[dict[str, Any]] = []
+    for src in sources:
+        parts = _norm_composition(src.get("composition"))
+        if parts:
+            composition.extend(parts)
+        else:
+            composition.append(
+                {
+                    "id": str(src.get("id") or ""),
+                    "kind": str(src.get("kind") or "OBJECT"),
+                    "symbol": str(src.get("material") or ""),
+                    "title": str(src.get("title") or ""),
+                    "mass_g": float(src.get("mass_g") or 0),
+                }
+            )
+    mass = sum(float(part.get("mass_g") or 0) for part in composition)
+    title = _clip(str(payload.get("title") or ""), MAX_TITLE)
+    if not title:
+        title = "Reborn · " + " + ".join(str(src.get("title") or "") for src in sources[:3])
+    born = list_item(
+        {
+            "title": title,
+            "kind": "OBJECT",
+            "category": str(payload.get("category") or "ITEM"),
+            "material": str(payload.get("material") or "MIXED"),
+            "description": _clip(str(payload.get("description") or ""), MAX_DESCRIPTION)
+            or "Reborn object. Materials carry previous lives.",
+            "maker": str(payload.get("maker") or ""),
+            "origin": str(payload.get("origin") or "rebirth"),
+            "mass_g": mass,
+            "composition": composition[:MAX_COMPOSITION],
+            "previous_lives": from_ids,
+            "price_sol": payload.get("price_sol") or "0",
+        }
+    )
+    append_ledger(
+        {
+            "kind": "REBIRTH",
+            "listing_id": born.get("id"),
+            "from_ids": from_ids,
+            "identity_sha256": born.get("identity_sha256"),
+            "state_sha256": born.get("state_sha256"),
+            "txid": "PAPER",
+            "mode": "TESTNET",
+        }
+    )
+    return born
+
+
+def resolve_lives(
+    listings: list[dict[str, Any]],
+    listing: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not listing:
+        return []
+    by_id = {str(row.get("id") or ""): row for row in listings}
+    rows: list[dict[str, Any]] = []
+    for listing_id in _norm_lives(listing.get("previous_lives")):
+        src = by_id.get(listing_id)
+        if src is None:
+            rows.append({"id": listing_id, "title": "gone", "status": "MISSING"})
+            continue
+        rows.append(decorate_listing(src))
+    return rows
+
+
+def element_rows(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    listed = {
+        str(row.get("material") or ""): decorate_listing(row)
+        for row in listings
+        if str(row.get("kind") or "") == "ELEMENT"
+    }
+    out: list[dict[str, Any]] = []
+    for symbol, name in ELEMENTS:
+        hit = listed.get(symbol)
+        out.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "listed": bool(hit),
+                "listing_id": str((hit or {}).get("id") or ""),
+                "receipt": str((hit or {}).get("receipt") or ""),
+            }
+        )
+    return out
+
+
 def select_listing(listing_id: str) -> dict[str, Any]:
     return save_prefs(selected=listing_id)
 
@@ -540,7 +816,9 @@ def status_payload() -> dict[str, Any]:
     visible = [
         decorate_listing(row)
         for row in listings
-        if filt == "ALL" or str(row.get("category") or "") == filt
+        if filt == "ALL"
+        or str(row.get("category") or "") == filt
+        or str(row.get("kind") or "") == filt
     ]
     selected = next(
         (row for row in visible if row.get("id") == selected_id),
@@ -562,8 +840,11 @@ def status_payload() -> dict[str, Any]:
         "chain": "solana",
         "filter": filt,
         "filters": list(FILTERS),
+        "kinds": list(KINDS),
         "categories": category_rows(listings, merkle),
         "materials": list(MATERIALS),
+        "elements": element_rows(listings),
+        "lives": resolve_lives(listings, selected),
         "listings": visible,
         "listing_count": len(listings),
         "visible_count": len(visible),
@@ -585,5 +866,5 @@ def status_payload() -> dict[str, Any]:
         },
         "ledger": read_ledger()[-80:],
         "authority": "NONE",
-        "note": "Paper catalog on Solana identities. Mainnet trade stays locked.",
+        "note": "NFT is a paper receipt for a physical object or element. Mainnet trade stays locked.",
     }

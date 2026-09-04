@@ -53,3 +53,19 @@ def select_listing(listing_id: str) -> dict[str, Any]:
 def set_filter(category: str) -> dict[str, Any]:
     marketplace_contract.set_filter(category)
     return _ok()
+
+
+def list_element(symbol: str) -> dict[str, Any]:
+    try:
+        marketplace_contract.list_element(symbol)
+        return _ok()
+    except ValueError as exc:
+        return _fail(exc)
+
+
+def rebirth_item(raw: str) -> dict[str, Any]:
+    try:
+        marketplace_contract.rebirth_item(raw)
+        return _ok()
+    except ValueError as exc:
+        return _fail(exc)

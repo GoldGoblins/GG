@@ -72,6 +72,16 @@ Item {
     readonly property bool liveMeters:
         root.playing || root.paused || root.buffering
     readonly property bool hasSpectrum: root.spectrum.length > 0
+    readonly property string frameRightLegend: {
+        var head = root.buffering
+            ? "BUFFER · " + root.mode
+            : (root.playing ? "LIVE · " + root.mode : root.mode)
+        if (root.liveFreq > 0)
+            head += " · " + root.liveFreq.toFixed(1) + " MHz"
+        if (root.mode === "RADIO")
+            head += " · " + root.liveRfLabel
+        return head
+    }
 
     function pullLiveRaw() {
         if (!root.surfaceHost)
@@ -317,54 +327,60 @@ Item {
             radius: root.frameRadius
         }
 
-        Item {
-            id: utilHeader
+        Rectangle {
             anchors.left: parent.left
-            anchors.right: parent.right
+            anchors.leftMargin: 12
             anchors.top: parent.top
-            anchors.leftMargin: 10
-            anchors.rightMargin: 10
-            anchors.topMargin: 6
-            height: 16
+            anchors.topMargin: -8
+            height: 18
+            width: utilLeftLegend.implicitWidth + 12
+            color: "#161616"
+            radius: 3
+            z: 2
 
             Text {
-                anchors.left: parent.left
-                height: 16
-                verticalAlignment: Text.AlignVCenter
+                id: utilLeftLegend
+                anchors.centerIn: parent
                 text: "MEDIA / UTILITIES"
                 color: "#e6edf3"
                 font.family: "monospace"
                 font.pixelSize: 12
                 font.bold: true
-            }
-            Text {
-                anchors.right: parent.right
-                height: 16
                 verticalAlignment: Text.AlignVCenter
-                text: {
-                    var head = root.buffering
-                        ? "BUFFER · " + root.mode
-                        : (root.playing ? "LIVE · " + root.mode : root.mode)
-                    if (root.liveFreq > 0)
-                        head += " · " + root.liveFreq.toFixed(1) + " MHz"
-                    if (root.mode === "RADIO")
-                        head += " · " + root.liveRfLabel
-                    return head
-                }
+            }
+        }
+
+        Rectangle {
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            anchors.top: parent.top
+            anchors.topMargin: -8
+            height: 18
+            width: utilRightLegend.implicitWidth + 12
+            color: "#161616"
+            radius: 3
+            z: 2
+
+            Text {
+                id: utilRightLegend
+                anchors.centerIn: parent
+                text: root.frameRightLegend
                 color: "#c8cdd4"
                 font.family: "monospace"
                 font.pixelSize: 12
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
             }
         }
 
         Item {
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: utilHeader.bottom
+            anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.leftMargin: 10
             anchors.rightMargin: 10
-            anchors.topMargin: 6
+            anchors.topMargin: 10
             anchors.bottomMargin: 8
 
             Row {

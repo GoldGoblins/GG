@@ -366,6 +366,9 @@ def main() -> int:
         'text: "QWEN"',
         'text: "GROK"',
         'text: "GROK TUI"',
+        'objectName: "chatDiskLamp"',
+        'objectName: "chatLampRail"',
+        "chatIoActive",
         "anchors.bottom: engineFooter.top",
         "implicitHeight: root.engineTarget === \"GROK_TUI\"",
         "leftLegend: root.showOpenTab",
@@ -540,7 +543,8 @@ def main() -> int:
     )
     require(
         "ensureWebEngine" in workspace_surface
-        and 'source: active ? "WebPane.qml" : ""' in workspace_surface,
+        and 'source: active ? "WebPane.qml" : ""' in workspace_surface
+        and "function applyWebOperator(" in workspace_surface,
         "WEB Chromium is still type-bound into workspace boot.",
     )
     require(
@@ -1067,6 +1071,7 @@ def main() -> int:
 
     for marker in (
         'property string actionAuthority: "NONE"',
+        'property string mandateLabel: "NONE"',
         'property string networkAuthority: "NONE"',
         'property string modelState: "READY"',
         'property string bridgeState: "CONNECTED"',

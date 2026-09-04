@@ -30,6 +30,18 @@ Item {
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
     property bool showOpenTab: false
+    property var surfaceHost: null
+    property bool diskLampOn: false
+    property bool netLampOn: false
+    property bool cpuLampOn: false
+    property bool gpuLampOn: false
+    property bool chatLampOn: false
+    property bool gpuLampPresent: false
+    property int diskLampTick: 0
+
+    function lampBlink(active, phase) {
+        return active && ((root.diskLampTick + phase) % 6) < 3
+    }
 
     implicitHeight: root.engineTarget === "GROK_TUI"
         ? 28
@@ -499,6 +511,119 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.engineTargetRequested("GROK_TUI")
+            }
+        }
+    }
+
+    Row {
+        objectName: "chatLampRail"
+        anchors.right: parent.right
+        anchors.rightMargin: 14
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 10
+        spacing: 6
+
+        Rectangle {
+            width: 8
+            height: 8
+            radius: 4
+            color: root.cpuLampOn ? "#8db89a" : "#2a1515"
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 400
+                ToolTip.text: "CPU"
+            }
+        }
+        Rectangle {
+            visible: root.gpuLampPresent
+            width: 8
+            height: 8
+            radius: 4
+            color: root.gpuLampOn ? "#b6a6c8" : "#2a1515"
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 400
+                ToolTip.text: "GPU"
+            }
+        }
+        Rectangle {
+            width: 8
+            height: 8
+            radius: 4
+            color: root.netLampOn ? "#c8a97e" : "#2a1515"
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 400
+                ToolTip.text: "NET"
+            }
+        }
+        Rectangle {
+            objectName: "chatDiskLamp"
+            width: 8
+            height: 8
+            radius: 4
+            color: root.diskLampOn ? "#e05050" : "#2a1515"
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 400
+                ToolTip.text: "DISK"
+            }
+        }
+        Rectangle {
+            width: 8
+            height: 8
+            radius: 4
+            color: root.chatLampOn ? "#d8dee9" : "#2a1515"
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 400
+                ToolTip.text: "CHAT"
+            }
+        }
+    }
+
+    Timer {
+        interval: 16
+        running: root.visible && root.surfaceHost
+        repeat: true
+        onTriggered: {
+            if (!root.surfaceHost || !root.surfaceHost.tmogPulse)
+                return
+            try {
+                var p = JSON.parse(root.surfaceHost.tmogPulse() || "{}")
+                var diskIo = Number(p.disk_read_bps || 0) + Number(p.disk_write_bps || 0)
+                var netIo = Number(p.net_rx_bps || 0) + Number(p.net_tx_bps || 0)
+                var cpu = Number(p.cpu_busy || 0)
+                var gpu = p.gpu_busy
+                root.gpuLampPresent = gpu !== undefined && gpu !== null
+                root.diskLampTick += 1
+                root.cpuLampOn = root.lampBlink(cpu >= 12, 4)
+                root.gpuLampOn = root.lampBlink(
+                    root.gpuLampPresent && Number(gpu) >= 5,
+                    1
+                )
+                root.netLampOn = root.lampBlink(netIo >= 1024, 2)
+                root.diskLampOn = root.lampBlink(diskIo >= 1024, 0)
+                var tui = false
+                if (root.surfaceHost.chatIoActive)
+                    tui = root.surfaceHost.chatIoActive()
+                root.chatLampOn = root.lampBlink(root.busy || tui, 3)
+            } catch (err) {
+                root.cpuLampOn = false
+                root.gpuLampOn = false
+                root.netLampOn = false
+                root.diskLampOn = false
+                root.chatLampOn = false
             }
         }
     }
