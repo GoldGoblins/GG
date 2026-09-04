@@ -42,7 +42,7 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA", "DRAW"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "MEDIA", "DRAW"]
 
                 delegate: Text {
                     required property string modelData

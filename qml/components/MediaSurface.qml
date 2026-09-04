@@ -13,6 +13,8 @@ Item {
     property string lastPlayUrl: ""
     property string playerError: ""
     property bool playerReady: false
+    property string pendingPlayId: ""
+    property bool searchBusy: false
     property real _clockStamp: 0
     signal nowPlayingChanged(string label)
 
@@ -45,6 +47,10 @@ Item {
     readonly property bool listCollapsed:
         root.screenOn
         && root.mode === "GAME"
+    readonly property bool streamBuffering: root.status.buffering === true
+    readonly property string bufferingId: String(
+        root.status.buffering_id || root.pendingPlayId || root.now.id || ""
+    )
 
     function applyStatus(raw) {
         var text = String(raw || "")
@@ -54,6 +60,10 @@ Item {
         root.rememberCatalog()
         var title = String((root.status.now || {}).title || root.status.legend || "MEDIA")
         root.nowPlayingChanged(title)
+        if (root.status.playing === true || root.status.paused === true)
+            root.pendingPlayId = ""
+        if (root.status.buffering !== true && root.status.playing === true)
+            root.pendingPlayId = ""
     }
 
     function refresh() {
@@ -90,6 +100,7 @@ Item {
     function playItem(itemId) {
         if (!root.surfaceHost)
             return
+        root.pendingPlayId = String(itemId || "")
         root.statusJson = root.surfaceHost.mediaPlay(itemId)
         root.refresh()
     }
@@ -123,7 +134,9 @@ Item {
     function search(query) {
         if (!root.surfaceHost || !root.surfaceHost.mediaSearch)
             return
+        root.searchBusy = true
         root.statusJson = root.surfaceHost.mediaSearch(query)
+        root.searchBusy = false
         root.refresh()
     }
 
@@ -222,7 +235,7 @@ Item {
     }
 
     Timer {
-        interval: 5000
+        interval: root.streamBuffering || root.pendingPlayId.length > 0 ? 80 : 5000
         running: root.visible
         repeat: true
         onTriggered: root.refreshLive()
@@ -349,12 +362,21 @@ Item {
                         objectName: "workspaceMediaSearch"
                         anchors.fill: parent
                         anchors.leftMargin: 8
-                        anchors.rightMargin: 8
+                        anchors.rightMargin: 22
                         color: "#e6e6e6"
                         font.family: "monospace"
                         font.pixelSize: 12
                         clip: true
                         onAccepted: root.search(searchBox.text)
+                    }
+
+                    BufferMark {
+                        objectName: "mediaSearchBuffer"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        active: root.searchBusy
+                        cell: 5
                     }
 
                     Text {
@@ -435,23 +457,61 @@ Item {
                     spacing: 2
                     model: root.items
 
-                    delegate: Text {
+                    delegate: Item {
                         required property var modelData
                         width: catalogList.width
                         height: 16
-                        verticalAlignment: Text.AlignVCenter
-                        text: {
-                            var row = modelData
-                            var mark = String(root.now.id || "") === String(row.id) ? "▶ " : "  "
-                            var extra = row.system_label ? (" · " + row.system_label) : ""
-                            return mark + String(row.title || row.source || "") + extra
+
+                        readonly property bool rowActive:
+                            String(root.now.id || "") === String(modelData.id)
+                        readonly property bool rowBuffering:
+                            (root.streamBuffering || root.pendingPlayId.length > 0)
+                            && (
+                                String(modelData.id) === root.bufferingId
+                                || String(modelData.id) === root.pendingPlayId
+                                || String(modelData.source || "")
+                                    === String(root.status.buffering_source || "")
+                            )
+
+                        Row {
+                            anchors.fill: parent
+                            spacing: 6
+
+                            Text {
+                                width: Math.max(
+                                    24,
+                                    parent.width
+                                        - (rowMark.visible ? rowMark.width + 6 : 0)
+                                )
+                                height: 16
+                                verticalAlignment: Text.AlignVCenter
+                                text: {
+                                    var row = modelData
+                                    var mark = parent.parent.rowActive ? "▶ " : "  "
+                                    var extra = row.system_label
+                                        ? (" · " + row.system_label)
+                                        : ""
+                                    return mark
+                                        + String(row.title || row.source || "")
+                                        + extra
+                                }
+                                color: parent.parent.rowActive
+                                    ? "#d8dee9"
+                                    : "#8b949e"
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                elide: Text.ElideMiddle
+                            }
+
+                            BufferMark {
+                                id: rowMark
+                                objectName: "mediaItemBuffer"
+                                anchors.verticalCenter: parent.verticalCenter
+                                active: parent.parent.rowBuffering
+                                cell: 5
+                            }
                         }
-                        color: String(root.now.id || "") === String(modelData.id)
-                            ? "#d8dee9"
-                            : "#8b949e"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        elide: Text.ElideMiddle
+
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
@@ -576,6 +636,19 @@ Item {
                         font.family: "monospace"
                         font.pixelSize: 18
                         font.bold: true
+                    }
+
+                    BufferMark {
+                        objectName: "mediaHoleBuffer"
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        active: root.qmlVideo && (
+                            holePlayer.mediaStatus === MediaPlayer.LoadingMedia
+                            || holePlayer.mediaStatus === MediaPlayer.BufferingMedia
+                            || holePlayer.mediaStatus === MediaPlayer.StalledMedia
+                        )
+                        cell: 6
                     }
 
                     Text {

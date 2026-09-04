@@ -17,6 +17,7 @@ def main() -> int:
         APPIMAGE_NAMES,
         SCHEMA,
         format_kib,
+        pulse,
         resolve_appimage,
         snapshot,
     )
@@ -55,9 +56,22 @@ def main() -> int:
         raise AssertionError("performance page still walks the process table")
     if light.get("connections"):
         raise AssertionError("performance page still parses tcp tables")
+    if not light.get("core_hist"):
+        raise AssertionError("performance dropped per-core history")
+    if not light.get("cores"):
+        raise AssertionError("performance dropped per-core rows")
     summary = snapshot("SUMMARY")
     if not summary.get("processes"):
         raise AssertionError("summary page dropped top processes")
+    if summary.get("core_hist"):
+        raise AssertionError("summary still ships per-core history")
+    if summary.get("cores"):
+        raise AssertionError("summary still ships per-core rows")
+    if any(
+        str(row.get("chip") or "").lower().startswith("nvme")
+        for row in (summary.get("temps") or [])
+    ):
+        raise AssertionError("summary still reads slow nvme hwmon")
     if int(payload.get("process_count") or 0) < 1:
         raise AssertionError("host process count empty")
     if int(payload.get("mem_total_kb") or 0) < 1:
@@ -76,6 +90,13 @@ def main() -> int:
         break
     if "disk_led" not in payload:
         raise AssertionError("blinkendisk missing")
+    beat = pulse()
+    if beat.get("schema") != SCHEMA:
+        raise AssertionError("pulse schema")
+    if beat.get("processes"):
+        raise AssertionError("60Hz pulse still walks the process table")
+    if "cpu_busy" not in beat or "mem_used_kb" not in beat:
+        raise AssertionError("pulse dropped live meters")
     if "GiB" not in format_kib(2_097_152) and "MiB" not in format_kib(2048):
         raise AssertionError("kib format")
 
@@ -91,6 +112,8 @@ def main() -> int:
     src = (PROJECT / "backend" / "chat_surface_host.py").read_text(encoding="utf-8")
     if "tmogSnapshot" not in src or "startTmog" not in src:
         raise AssertionError("host tmog slots missing")
+    if "tmogPulse" not in src:
+        raise AssertionError("host tmog 60Hz pulse missing")
     embed_src = (PROJECT / "backend" / "tmog_embed.py").read_text(encoding="utf-8")
     if "bash -c" in embed_src or "/bin/sh" in embed_src:
         raise AssertionError("generic shell in tmog embed")
@@ -103,6 +126,9 @@ def main() -> int:
     blob = json.loads(host.tmogSnapshot())
     if blob.get("schema") != SCHEMA:
         raise AssertionError("host snapshot schema")
+    live = json.loads(host.tmogPulse())
+    if live.get("schema") != SCHEMA or "cpu_busy" not in live:
+        raise AssertionError("host pulse schema")
     if host.startTmog():
         raise AssertionError("startTmog without qml root must fail closed")
 
@@ -113,8 +139,20 @@ def main() -> int:
         raise AssertionError("tmog hole missing")
     if "interval: 1000" in qml:
         raise AssertionError("tmog still snapshots every second")
+    if "interval: 2000" in qml:
+        raise AssertionError("tmog meters still jump every two seconds")
+    if "interval: 16" not in qml:
+        raise AssertionError("tmog dropped 60Hz live meters")
+    if "tmogPulse" not in qml:
+        raise AssertionError("tmog UI is not driven by the 60Hz pulse")
     if "tmogSnapshot(root.page)" not in qml:
         raise AssertionError("tmog still dumps every page on each tick")
+    if "sourceComponent: summaryPage" not in qml:
+        raise AssertionError("summary page is still kept alive off-screen")
+    if "sourceComponent: performancePage" not in qml:
+        raise AssertionError("performance page is still kept alive off-screen")
+    if "sourceComponent: listPage" not in qml:
+        raise AssertionError("list pages are still kept alive off-screen")
     if 'leftLegend: "TMOG"' in qml:
         raise AssertionError("tmog pane still nests a TMOG GgFrame inside the workspace frame")
     for page in (
@@ -141,6 +179,14 @@ def main() -> int:
         raise AssertionError("spark marks missing")
     if "property bool fromZero: true" not in spark:
         raise AssertionError("spark fromZero default must stay true for meters")
+    if "renderStrategy: Canvas.Immediate" not in spark:
+        raise AssertionError("spark still waits on the scene-graph buffer")
+    if "function redraw" not in spark:
+        raise AssertionError("spark still paints while hidden")
+    if "antialiasing: false" in spark:
+        raise AssertionError("spark lines are still aliased dots")
+    if 'lineJoin = "round"' not in spark:
+        raise AssertionError("spark stroke is still unjoined")
 
     print("TMOG_CONTRACT_TEST=PASS")
     return 0

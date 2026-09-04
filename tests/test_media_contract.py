@@ -35,6 +35,44 @@ def main() -> int:
         raise AssertionError("cliamp/torlink probe missing")
     if "RADIO_API" not in src or "IPTV_PLAYLISTS" not in src:
         raise AssertionError("live radio/tv catalogs missing")
+    if "sort_radio_rows" not in src or "sort_title_rows" not in src:
+        raise AssertionError("radio/tv catalogs are not sorted")
+    if "RADIO_BROWSER_COUNTRIES" not in src:
+        raise AssertionError("radio catalog still fetches only one country slice")
+    if "countries/fi.m3u" not in src:
+        raise AssertionError("TV catalog still missing Finland IPTV")
+    if "IPTV_PER_SOURCE = 80" in src:
+        raise AssertionError("TV catalog still capped at 80 channels per source")
+    radio_order = media_contract.sort_radio_rows(
+        [
+            {"title": "Bandit Rock"},
+            {"title": "SR P4 Göteborg"},
+            {"title": "Ålsta Radio"},
+            {"title": "SR P1"},
+            {"title": "Mix Megapol"},
+            {"title": "SR P3"},
+            {"title": "SR P2"},
+            {"title": "Sveriges Radio P1 Extra"},
+        ]
+    )
+    radio_titles = [str(row["title"]) for row in radio_order]
+    if radio_titles[:4] != ["SR P1", "Sveriges Radio P1 Extra", "SR P2", "SR P3"]:
+        raise AssertionError("radio SR pin order " + str(radio_titles))
+    if radio_titles[4] != "SR P4 Göteborg":
+        raise AssertionError("radio P4 not after P3 " + str(radio_titles))
+    if radio_titles[5:] != ["Bandit Rock", "Mix Megapol", "Ålsta Radio"]:
+        raise AssertionError("radio A-Ö tail " + str(radio_titles[5:]))
+    tv_order = media_contract.sort_title_rows(
+        [
+            {"title": "SVT2"},
+            {"title": "Öppet arkiv"},
+            {"title": "BBC One"},
+            {"title": "SVT1"},
+        ]
+    )
+    tv_titles = [str(row["title"]) for row in tv_order]
+    if tv_titles != ["BBC One", "SVT1", "SVT2", "Öppet arkiv"]:
+        raise AssertionError("tv A-Ö order " + str(tv_titles))
     if "HOMEBREW_API" not in src or "hackrom" not in src:
         raise AssertionError("homebrew hub missing")
     if "materialize_homebrew" not in src or "materialize_homebrew" not in host_src:
@@ -108,7 +146,9 @@ def main() -> int:
         raise AssertionError("spectrum " + str(spec))
     stretched = media_contract.normalize_spectrum([1.0, 0.2], 5)
     if len(stretched) != 5 or stretched[0] != 1.0 or stretched[-1] != 0.2:
-        raise AssertionError("log resample " + str(stretched))
+        raise AssertionError("spectrum resample " + str(stretched))
+    if stretched[1] == 1.0:
+        raise AssertionError("spectrum still repeats bins into fat blocks " + str(stretched))
     if stretched[2] == 0.0:
         raise AssertionError("hz padded with zeros " + str(stretched))
     if media_contract.SPECTRUM_BARS != 120:
@@ -132,6 +172,12 @@ def main() -> int:
         raise AssertionError("radio stream watchdog / buffered daemon missing")
     if "_CLIAMP_RESUME_GAP" not in host_src:
         raise AssertionError("radio resume backoff missing")
+    if '"buffering"' not in host_src or "buffering_id" not in host_src:
+        raise AssertionError("radio buffering flag missing from status")
+    if 'name="gg-cliamp-play"' not in host_src or "def _play_cliamp_load(" not in host_src:
+        raise AssertionError("radio url.load still blocks the GUI thread")
+    if "deadline = time.monotonic() + 5.0" in host_src:
+        raise AssertionError("radio play still busy-waits for playing state")
     live = media_host.status_payload(live=True)
     if live.get("items") is not None:
         raise AssertionError("live status still ships the catalog")
@@ -188,6 +234,24 @@ def main() -> int:
         raise AssertionError("media catalog is rebuilt on every live poll")
     if "mediaLiveStatus" not in qml:
         raise AssertionError("media pane does not use live status")
+    if "BufferMark" not in qml or "streamBuffering" not in qml:
+        raise AssertionError("media catalog has no per-item buffer mark")
+    util = (PROJECT / "qml" / "components" / "UtilitySurface.qml").read_text(
+        encoding="utf-8"
+    )
+    if "utilitySpectrumBuffer" in util or "utilityPlayBuffer" in util:
+        raise AssertionError("utility strip still stacks three buffer marks")
+    if "utilityNowBuffer" not in util:
+        raise AssertionError("now line lost its buffer mark")
+    if 'text: "SPECTRUM"' in util:
+        raise AssertionError("SPECTRUM label still steals meter width")
+    if "root.status.player" in util:
+        raise AssertionError("CLIAMP label still steals meter width")
+    mark = (PROJECT / "qml" / "components" / "BufferMark.qml").read_text(
+        encoding="utf-8"
+    )
+    if "objectName: \"bufferMark\"" not in mark:
+        raise AssertionError("BufferMark component missing")
     if "qmlVideo ? 250" in qml:
         raise AssertionError("qml video still live-polls at 250ms")
     if "playbackState" not in qml:
@@ -217,8 +281,38 @@ def main() -> int:
         raise AssertionError("utility meters still fight the GUI thread at 33ms")
     if "interval: 125" in utility:
         raise AssertionError("spectrum meters still lag at 125ms")
+    if "interval: 50" in utility:
+        raise AssertionError("spectrum still ticks at 20Hz")
+    if "interval: 16" in utility:
+        raise AssertionError("spectrum still capped at 60Hz")
+    if "interval: 8" not in utility:
+        raise AssertionError("spectrum dropped 125Hz live meters")
+    if "_refresh_bands" not in host_src:
+        raise AssertionError("spectrum still waits on status ipc before FFT")
+    if "utilityFreqBand" not in utility:
+        raise AssertionError("FM frequency band missing")
+    if "mediaTuneMhz" not in utility:
+        raise AssertionError("frequency band is not tunable")
+    if "renderStrategy: Canvas.Immediate" not in utility:
+        raise AssertionError("spectrum still waits on the scene-graph buffer")
+    if "fm_mhz" not in src:
+        raise AssertionError("radio presets have no FM dial mapping")
+    if "probe_rf_frontend" not in src:
+        raise AssertionError("RF frontend probe missing")
+    rf = media_contract.probe_rf_frontend()
+    if str(rf.get("kind") or "") not in {"NONE", "RTL_SDR", "V4L_FM"}:
+        raise AssertionError("rf probe kind " + str(rf))
+    near = media_contract.nearest_radio_preset(99.3)
+    if not near or str(near.get("title") or "") != "SR P3":
+        raise AssertionError("tune 99.3 did not snap to P3")
+    if media_contract.freq_for_now({"title": "SR P1"}) != 92.4:
+        raise AssertionError("P1 FM mapping")
     if "spectrumSegs: 18" not in utility:
         raise AssertionError("spectrum lost the stacked LED dots")
+    if "spectrumAttack" not in utility or "spectrumRelease" not in utility:
+        raise AssertionError("spectrum still snaps between FFT shapes instead of bouncing")
+    if "property var shown" not in utility:
+        raise AssertionError("spectrum has no smoothed column state")
     if "for (s = 0; s < segs; s++)" not in utility:
         raise AssertionError("spectrum paints solid bars instead of LED dots")
     if "root.ledColor(level)" in utility:
@@ -236,6 +330,10 @@ def main() -> int:
     )
     if "def mediaLiveStatus" not in play_src:
         raise AssertionError("mediaLiveStatus slot missing")
+    if "def mediaTuneMhz" not in play_src:
+        raise AssertionError("mediaTuneMhz slot missing")
+    if "def tune_mhz" not in host_src:
+        raise AssertionError("media host tune_mhz missing")
     if "mediaStateChanged" not in play_src:
         raise AssertionError("mediaStateChanged signal missing")
     if "def mediaSeek" not in play_src or "def mediaReportClock" not in play_src:

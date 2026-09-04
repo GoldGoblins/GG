@@ -104,6 +104,15 @@ Item {
         }
     }
 
+    BufferMark {
+        objectName: "webPaneBuffer"
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 8
+        active: root.loadState === "LOADING"
+        cell: 6
+    }
+
     Text {
         visible: root.loadState === "FAIL" || root.loadState === "BLOCKED"
         anchors.centerIn: parent

@@ -169,6 +169,8 @@ def main() -> int:
         raise AssertionError("Chromium still boots with the desktop process")
     if "def _apply_tui_winsize" not in src:
         raise AssertionError("TUI resize still SIGWINCH on every layout twitch")
+    if "session.get(\"cols\") is None" not in src:
+        raise AssertionError("first TUI winsize still waits on the debounce timer")
     if "BlockingIOError" not in src:
         raise AssertionError("PTY write still blocks the GUI thread")
     if "parse_pty_wallet(_strip_ansi" in src:
@@ -200,8 +202,23 @@ def main() -> int:
         raise AssertionError("crypto lab start/stop missing")
     if "tmogSnapshot" not in src or "startTmog" not in src:
         raise AssertionError("tmog host slots missing")
+    if "marketplaceStatus" not in src or "marketplaceList" not in src:
+        raise AssertionError("marketplace host slots missing")
+    if "marketplacePaperBuy" not in src or "marketplaceDelist" not in src:
+        raise AssertionError("marketplace trade slots missing")
     if "shellLoadQueue" not in src:
         raise AssertionError("shell load queue slot missing")
+    if "def hydrateDesktop" not in src:
+        raise AssertionError("desktop hydrate slot missing")
+    attach_root = src[
+        src.index("def set_qml_root") : src.index("def _tui_hole")
+    ]
+    if "QTimer.singleShot(0, self._emit_wallet)" not in attach_root:
+        raise AssertionError("first wallet/chats emit still waits for the 15s timer")
+    if "self._emit_wallet()" not in src[src.index("def hydrateDesktop"): src.index("def _tui_hole")]:
+        raise AssertionError("hydrateDesktop does not push wallet/chats")
+    if not hasattr(host, "hydrateDesktop"):
+        raise AssertionError("hydrateDesktop missing on host")
     import json as _json
     from backend.shell_load import queue as shell_queue
     queued = _json.loads(host.shellLoadQueue())

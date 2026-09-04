@@ -390,6 +390,13 @@ Item {
             Row {
                 anchors.right: parent.right
                 spacing: 12
+                BufferMark {
+                    objectName: "cryptoBuffer"
+                    anchors.verticalCenter: parent.verticalCenter
+                    active: root.backtestRunning
+                        || String(root.lab.label || "") === "LAB STARTING"
+                    cell: 5
+                }
                 Text {
                     text: "TESTNET"
                     color: root.legend === "TESTNET" ? "#d8dee9" : "#a8b0b8"

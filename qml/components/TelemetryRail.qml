@@ -178,6 +178,7 @@ Item {
             width: parent.width
             leftLegend: "MODEL"
             rightLegend: root.modelState
+            busy: root.modelState === "BUSY"
             backgroundColor: "#161616"
             borderColor: root.frameBorder
             radius: root.frameRadius
@@ -288,6 +289,7 @@ Item {
             width: parent.width
             leftLegend: "BRIDGE"
             rightLegend: root.bridgeState
+            busy: root.bridgeState === "BUSY"
             backgroundColor: "#161616"
             borderColor: root.frameBorder
             radius: root.frameRadius

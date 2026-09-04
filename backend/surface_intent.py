@@ -27,6 +27,10 @@ _TMOG = re.compile(
     r"\b(tmog|task\s*manager)\b",
     re.IGNORECASE,
 )
+_MARKETPLACE = re.compile(
+    r"\b(marketplace|nft|handelsplats(?:en)?|marknad(?:en)?)\b",
+    re.IGNORECASE,
+)
 _MEDIA = re.compile(
     r"\b(media|musik(?:en)?|radio(?:n)?|tv(?:n)?|teve|emulator(?:n)?|spel(?:en)?|game|cliamp|torlink|fetch)\b",
     re.IGNORECASE,
@@ -47,6 +51,10 @@ _BARE = {
     "sajt": "SITE",
     "hemsida": "SITE",
     "tmog": "TMOG",
+    "marketplace": "MARKETPLACE",
+    "nft": "MARKETPLACE",
+    "handelsplats": "MARKETPLACE",
+    "marknad": "MARKETPLACE",
     "media": "MEDIA",
     "musik": "MEDIA",
     "radio": "MEDIA",
@@ -80,6 +88,8 @@ def parse_surface_intent(text: str) -> str:
         return "SITE"
     if _TMOG.search(value):
         return "TMOG"
+    if _MARKETPLACE.search(value):
+        return "MARKETPLACE"
     if _MEDIA.search(value):
         return "MEDIA"
     if _DRAW.search(value):

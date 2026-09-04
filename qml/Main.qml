@@ -67,6 +67,9 @@ ApplicationWindow {
     readonly property int alphaBottomStripMargin: 8
 
     property int shellNonce: 0
+    property bool _shellHydrated: false
+    property bool _utilityBound: false
+    property bool _workspaceBound: false
 
     function workspaceUrl() {
         return Qt.resolvedUrl("components/WorkspaceSurface.qml")
@@ -85,6 +88,9 @@ ApplicationWindow {
         root._shellQueue = []
         root._shellQueueIndex = 0
         root._shellComp = null
+        root._shellHydrated = false
+        root._utilityBound = false
+        root._workspaceBound = false
         workspaceLoader.source = ""
         utilitySurface.source = ""
     }
@@ -179,8 +185,9 @@ ApplicationWindow {
     }
 
     function bindUtility(item) {
-        if (!item)
+        if (!item || root._utilityBound)
             return
+        root._utilityBound = true
         item.surfaceHost = Qt.binding(function() {
             return root.surfaceHost
         })
@@ -203,8 +210,9 @@ ApplicationWindow {
     }
 
     function bindWorkspace(item) {
-        if (!item)
+        if (!item || root._workspaceBound)
             return
+        root._workspaceBound = true
         item.showDemoFixtures = Qt.binding(function() {
             return root.alphaShowDemoFixtures
         })
@@ -326,10 +334,66 @@ ApplicationWindow {
     }
 
     function finishShellLoad() {
-        if (workspaceLoader.status === Loader.Ready && workspaceLoader.item) {
-            root.bindWorkspace(workspaceLoader.item)
-            root.shellLoading = false
+        if (root._shellHydrated)
+            return
+        if (workspaceLoader.status !== Loader.Ready || !workspaceLoader.item)
+            return
+        if (
+            utilitySurface.status === Loader.Loading
+            || utilitySurface.status === Loader.Null
+        )
+            return
+        root.bindWorkspace(workspaceLoader.item)
+        if (utilitySurface.item)
+            root.bindUtility(utilitySurface.item)
+        root.hydrateDesktopShell()
+        root._shellHydrated = true
+        root.shellLoading = false
+    }
+
+    function applyCryptoWalletLabel() {
+        var label = "WALLET · DISCONNECTED"
+        try {
+            var parsed = JSON.parse(root.cryptoStatusJson || "{}")
+            var w = parsed.wallet || {}
+            if (w.label)
+                label = String(w.label)
+            else {
+                var key = String(w.pubkey || "")
+                if (key.length >= 8)
+                    label = "WALLET · " + key.slice(0, 4) + "…" + key.slice(-4)
+                else if (key.length > 0)
+                    label = "WALLET · " + key
+            }
+        } catch (err) {
         }
+        if (workspace)
+            workspace.cryptoWalletLabel = label
+    }
+
+    function hydrateDesktopShell() {
+        root.shellLoadLabel = "HYDRATING..."
+        root.appendShellLog("hydrate · tui")
+        root.appendShellLog("hydrate · wallet")
+        root.appendShellLog("hydrate · chats")
+        root.appendShellLog("hydrate · crypto")
+        root.appendShellLog("hydrate · snippets")
+        root.appendShellLog("hydrate · media")
+        root.shellLoadCurrent = "desktop state"
+        var raw = ""
+        if (root.surfaceHost && root.surfaceHost.hydrateDesktop)
+            raw = root.surfaceHost.hydrateDesktop()
+        if (raw)
+            root.cryptoStatusJson = raw
+        else
+            root.pullCryptoStatus()
+        root.applyCryptoWalletLabel()
+        if (workspace && workspace.refreshSiteFiles)
+            workspace.refreshSiteFiles()
+        if (workspace && workspace.applyCryptoWalletLabel)
+            workspace.applyCryptoWalletLabel()
+        if (utilitySurface.item && utilitySurface.item.refresh)
+            utilitySurface.item.refresh()
     }
 
     Component.onCompleted: Qt.callLater(function() {
@@ -417,6 +481,7 @@ ApplicationWindow {
         if (raw === root.cryptoStatusJson)
             return
         root.cryptoStatusJson = raw
+        root.applyCryptoWalletLabel()
     }
 
     Timer {
@@ -1222,13 +1287,40 @@ ApplicationWindow {
 
                 Text {
                     objectName: "topBarWalletChip"
-                    text: workspace
-                        ? workspace.cryptoWalletLabel
-                        : "WALLET · DISCONNECTED"
-                    color: !workspace
-                        || workspace.cryptoWalletLabel.indexOf("DISCONNECTED") >= 0
-                        ? "#c8cdd4"
-                        : root.green
+                    text: {
+                        if (workspace) {
+                            var live = String(workspace.cryptoWalletLabel || "")
+                            if (
+                                live.length > 0
+                                && live.indexOf("DISCONNECTED") < 0
+                            )
+                                return live
+                        }
+                        try {
+                            var parsed = JSON.parse(
+                                root.cryptoStatusJson || "{}"
+                            )
+                            var w = parsed.wallet || {}
+                            if (w.label)
+                                return String(w.label)
+                            var key = String(w.pubkey || "")
+                            if (key.length >= 8)
+                                return "WALLET · "
+                                    + key.slice(0, 4)
+                                    + "…"
+                                    + key.slice(-4)
+                            if (key.length > 0)
+                                return "WALLET · " + key
+                        } catch (err) {
+                        }
+                        return "WALLET · DISCONNECTED"
+                    }
+                    color: {
+                        var chip = text
+                        return String(chip).indexOf("DISCONNECTED") >= 0
+                            ? "#c8cdd4"
+                            : root.green
+                    }
                     font.family: "monospace"
                     font.pixelSize: 13
                     MouseArea {
@@ -1276,6 +1368,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     leftLegend: "CHAT · UNIVERSAL OPERATIONAL STREAM"
                     rightLegend: "BRIDGE · CONNECTED"
+                    busy: root.bridgeBusy
                     backgroundColor: root.surface
                     borderColor: root.frameBorder
                     radius: root.frameRadius
@@ -1289,10 +1382,10 @@ ApplicationWindow {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.bottom: composer.top
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
-                    anchors.topMargin: 14
-                    anchors.bottomMargin: 4
+                    anchors.leftMargin: chatChrome.padding
+                    anchors.rightMargin: chatChrome.padding
+                    anchors.topMargin: chatChrome.topChrome
+                    anchors.bottomMargin: 0
                     surfaceHost: root.surfaceHost
                 }
 
@@ -1314,9 +1407,14 @@ ApplicationWindow {
                         height,
                         streamWrap.height
                     )
+                    enabled: visible
                     flickableDirection: Flickable.VerticalFlick
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: GgScrollBar {}
+                    ScrollBar.vertical: GgScrollBar {
+                        policy: chatFlick.visible
+                            ? ScrollBar.AsNeeded
+                            : ScrollBar.AlwaysOff
+                    }
                     onContentHeightChanged: {
                         if (root.followChatTail || root.bridgeBusy)
                             root.stickChatToLatest()
@@ -1857,7 +1955,17 @@ ApplicationWindow {
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
                     height: utilitySurface.implicitHeight
-                    onLoaded: root.bindUtility(utilitySurface.item)
+                    onLoaded: {
+                        root.bindUtility(utilitySurface.item)
+                        root.finishShellLoad()
+                    }
+                    onStatusChanged: {
+                        if (
+                            status === Loader.Ready
+                            || status === Loader.Error
+                        )
+                            root.finishShellLoad()
+                    }
                 }
             }
 
@@ -1974,6 +2082,13 @@ ApplicationWindow {
                 color: root.textMuted
                 font.family: "monospace"
                 font.pixelSize: 12
+            }
+
+            BufferMark {
+                objectName: "shellLoadBuffer"
+                anchors.horizontalCenter: parent.horizontalCenter
+                active: root.shellLoading
+                cell: 6
             }
         }
     }

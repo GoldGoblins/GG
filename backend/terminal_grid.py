@@ -153,8 +153,10 @@ class TerminalGrid(QQuickPaintedItem):
         self._font_both = QFont(self._font)
         self._font_both.setBold(True)
         self._font_both.setItalic(True)
-        self._cell_w = 8
-        self._cell_h = 16
+        self._base_cell_w = 8
+        self._base_cell_h = 16
+        self._cell_w = 8.0
+        self._cell_h = 16.0
         self._ascent = 12
         self._cursor_on = True
         self._last_cols = 0
@@ -237,22 +239,43 @@ class TerminalGrid(QQuickPaintedItem):
         parent = self.parentItem()
         if parent is None:
             return
-        self.setX(2)
-        self.setY(2)
-        self.setWidth(max(0.0, float(parent.width()) - 4.0))
-        self.setHeight(max(0.0, float(parent.height()) - 4.0))
+        self.setX(0)
+        self.setY(0)
+        self.setWidth(max(0.0, float(parent.width())))
+        self.setHeight(max(0.0, float(parent.height())))
 
     def _measure(self) -> None:
-        metrics = QFontMetrics(self._font)
-        self._cell_w = max(6, metrics.horizontalAdvance("M"))
-        self._cell_h = max(10, metrics.height())
-        self._ascent = metrics.ascent()
+        cell_w = 6
+        cell_h = 10
+        ascent = 8
+        for font in (
+            self._font,
+            self._font_bold,
+            self._font_italic,
+            self._font_both,
+        ):
+            metrics = QFontMetrics(font)
+            cell_w = max(
+                cell_w,
+                metrics.horizontalAdvance("M"),
+                metrics.averageCharWidth(),
+            )
+            cell_h = max(cell_h, metrics.height())
+            ascent = max(ascent, metrics.ascent())
+        self._base_cell_w = cell_w
+        self._base_cell_h = cell_h
+        self._cell_w = float(cell_w)
+        self._cell_h = float(cell_h)
+        self._ascent = ascent
 
     def _emit_ready(self) -> None:
         if self._ready_emitted:
             return
-        self._ready_emitted = True
         self._refit()
+        if self._last_cols <= 0 or self._last_rows <= 0:
+            QTimer.singleShot(16, self._emit_ready)
+            return
+        self._ready_emitted = True
         self.ready.emit()
 
     def _toggle_cursor(self) -> None:
@@ -300,11 +323,12 @@ class TerminalGrid(QQuickPaintedItem):
         self.update(rect)
 
     def _row_rect(self, row: int) -> QRect:
+        top = int(row * self._cell_h)
         return QRect(
             0,
-            int(row) * self._cell_h,
+            top,
             max(1, int(self.width())),
-            self._cell_h,
+            max(1, int(round(self._cell_h)) + 1),
         )
 
     def _schedule(self) -> None:
@@ -322,15 +346,19 @@ class TerminalGrid(QQuickPaintedItem):
         height = int(self.height())
         if width <= 0 or height <= 0:
             return
-        cols = max(16, min(240, width // self._cell_w))
-        rows = max(8, min(80, height // self._cell_h))
+        base_w = max(1, int(self._base_cell_w))
+        base_h = max(1, int(self._base_cell_h))
+        cols = max(16, min(240, width // base_w))
+        rows = max(8, min(80, height // base_h))
+        self._cell_w = float(base_w)
+        self._cell_h = float(base_h)
         if cols != self._last_cols or rows != self._last_rows:
             self._vt.resize(rows, cols)
             self._last_cols = cols
             self._last_rows = rows
             self._resizeTo.emit(rows, cols)
             self.resized.emit(cols, rows)
-            self._touch()
+        self._touch()
 
     @Slot(str)
     def feedB64(self, blob: str) -> None:
@@ -390,6 +418,9 @@ class TerminalGrid(QQuickPaintedItem):
         clip_top = clip.top()
         clip_bottom = clip.bottom()
         bg = _color(DEFAULT_BG_RGB)
+        max_cols = self._last_cols if self._last_cols > 0 else max(
+            1, int(float(self.width()) / max(1.0, float(cell_w)))
+        )
         snap = self._snap
         if snap is not None:
             buf = snap.get("buf") or []
@@ -410,7 +441,8 @@ class TerminalGrid(QQuickPaintedItem):
                 bg,
             )
             x = 0
-            while x < len(row):
+            limit = min(len(row), max_cols)
+            while x < limit:
                 ch, fg, bg, flags = row[x]
                 if ch == "":
                     x += 1
@@ -418,7 +450,7 @@ class TerminalGrid(QQuickPaintedItem):
                 run_fg, run_bg, run_flags = fg, bg, flags
                 text = ch
                 nx = x + 1
-                while nx < len(row):
+                while nx < limit:
                     nch, nfg, nbg, nflags = row[nx]
                     if nch == "":
                         nx += 1
@@ -452,8 +484,11 @@ class TerminalGrid(QQuickPaintedItem):
                         painter.setFont(self._font)
                     painter.setPen(_color(fg_rgb))
                     painter.drawText(
-                        int(rect.x()),
-                        int(y * cell_h + self._ascent),
+                        rect.toAlignedRect(),
+                        int(
+                            Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignVCenter
+                        ),
                         visible,
                     )
                     if run_flags & UNDERLINE:
@@ -478,6 +513,7 @@ class TerminalGrid(QQuickPaintedItem):
             and self._cursor_on
             and 0 <= cursor_r < rows
             and 0 <= cursor_c < cols
+            and cursor_c < max_cols
         ):
             cx = cursor_c * cell_w
             cy = cursor_r * cell_h

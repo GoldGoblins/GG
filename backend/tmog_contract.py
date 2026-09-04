@@ -285,8 +285,18 @@ def _cpu_model() -> str:
     return ""
 
 
-def _temps() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+_TEMP_FILES: tuple[float, list[tuple[str, str, str]]] | None = None
+_TEMP_DISC_TTL = 30.0
+_SLOW_CHIPS = ("nvme", "pch", "bat", "hp", "acad", "iwlwifi", "amdgpu")
+
+
+def _chip_slow(chip: str) -> bool:
+    low = chip.lower()
+    return any(low.startswith(prefix) for prefix in _SLOW_CHIPS)
+
+
+def _discover_temp_files() -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
     hwmon = Path("/sys/class/hwmon")
     try:
         chips = sorted(hwmon.glob("hwmon*"))
@@ -294,22 +304,54 @@ def _temps() -> list[dict[str, Any]]:
         chips = []
     for chip in chips:
         label = _read_text(chip / "name", 64).strip() or chip.name
+        if _chip_slow(label):
+            continue
         for temp_file in sorted(chip.glob("temp*_input")):
-            raw = _read_text(temp_file, 32).strip()
-            try:
-                celsius = int(raw) / 1000.0
-            except ValueError:
-                continue
-            if celsius < 20 or celsius > 110:
-                continue
-            tag = label
             sibling = temp_file.name.replace("_input", "_label")
             named = _read_text(chip / sibling, 64).strip()
-            if named:
-                tag = named
-            rows.append({"name": tag[:24], "c": round(celsius, 1), "chip": label[:16]})
-            if len(rows) >= 10:
+            tag = named or label
+            rows.append((str(temp_file), tag[:24], label[:16]))
+            if len(rows) >= 12:
                 break
+        if len(rows) >= 12:
+            break
+    rows.sort(
+        key=lambda item: (
+            0
+            if "pkg" in item[1].lower()
+            or item[2] in {"coretemp", "k10temp", "zenpower"}
+            else 1,
+            item[2],
+        )
+    )
+    return rows
+
+
+def _temp_files() -> list[tuple[str, str, str]]:
+    global _TEMP_FILES
+    now = time.monotonic()
+    hit = _TEMP_FILES
+    if hit is not None and now - hit[0] < _TEMP_DISC_TTL:
+        return hit[1]
+    rows = _discover_temp_files()
+    _TEMP_FILES = (now, rows)
+    return rows
+
+
+def _temps(limit: int = 3) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    cap = max(1, min(10, int(limit)))
+    for path, tag, chip in _temp_files():
+        raw = _read_text(Path(path), 32).strip()
+        try:
+            celsius = int(raw) / 1000.0
+        except ValueError:
+            continue
+        if celsius < 20 or celsius > 110:
+            continue
+        rows.append({"name": tag, "c": round(celsius, 1), "chip": chip})
+        if len(rows) >= cap:
+            break
     rows.sort(
         key=lambda item: (
             0 if "pkg" in item["name"].lower() or item.get("chip") == "coretemp" else 1,
@@ -372,31 +414,14 @@ def _disk_bytes() -> tuple[int, int]:
 
 
 def _rate(prev: tuple[float, int, int], now: float, a: int, b: int) -> tuple[tuple[float, int, int], int, int]:
-    if prev[0] <= 0 or now - prev[0] < 0.05:
+    if prev[0] <= 0:
         return (now, a, b), 0, 0
     dt = now - prev[0]
+    if dt < 0.008:
+        return prev, 0, 0
     ra = max(0, int((a - prev[1]) / dt))
     rb = max(0, int((b - prev[2]) / dt))
     return (now, a, b), ra, rb
-
-
-def _pid_dirs() -> list[Path]:
-    root = Path("/proc")
-    found: list[Path] = []
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return []
-    for name in names:
-        if not name.isdigit():
-            continue
-        path = root / name
-        if path.is_symlink() or not path.is_dir():
-            continue
-        found.append(path)
-        if len(found) >= MAX_SCAN:
-            break
-    return found
 
 
 _UID_NAMES: dict[int, str] = {}
@@ -477,67 +502,84 @@ def _task_hint() -> tuple[int, int]:
         return 0, 0
 
 
-def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
+def _processes(
+    now: float,
+    dt: float,
+    clk: int,
+    fill_limit: int = MAX_PROCESSES,
+    need_users: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
     global _prev_times, _last_proc, _tombstones
-    rows: list[dict[str, Any]] = []
+    scanned: list[tuple[float, int, int, Path, str, int, int, int]] = []
     next_times: dict[int, tuple[float, int]] = {}
     users: dict[str, int] = {}
     running = 0
     page = _page_kb()
-    for proc_dir in _pid_dirs():
-        try:
-            pid = int(proc_dir.name)
-        except ValueError:
-            continue
-        stat = _read_text(proc_dir / "stat", 2048)
-        if not stat:
-            continue
-        rparen = stat.rfind(")")
-        if rparen < 0:
-            continue
-        rest = stat[rparen + 2 :].split()
-        if len(rest) < 22:
-            continue
-        state = rest[0]
-        try:
-            ppid = int(rest[1])
-            utime = int(rest[11])
-            stime = int(rest[12])
-            threads = int(rest[17])
-            vsize = int(rest[20])
-            rss_pages = int(rest[21])
-        except ValueError:
-            continue
-        ticks = utime + stime
-        next_times[pid] = (now, ticks)
-        cpu_pct = 0.0
-        prev = _prev_times.get(pid)
-        if prev is not None and dt > 0.05:
-            cpu_pct = max(0.0, min(100.0, (ticks - prev[1]) / clk / dt * 100.0))
-        try:
-            uid = proc_dir.stat().st_uid
-        except OSError:
-            uid = os.getuid()
-        user = _user_name(uid)
-        users[user] = users.get(user, 0) + 1
-        if state == "R":
-            running += 1
-        row = {
-            "pid": pid,
-            "ppid": ppid,
-            "comm": "",
-            "state": state[:1],
-            "status": PROC_STATES.get(state[:1], state[:1]),
-            "user": user[:24],
-            "rss_kb": max(0, rss_pages * page),
-            "virt_kb": max(0, vsize // 1024),
-            "cpu_pct": round(cpu_pct, 1),
-            "threads": max(1, threads),
-            "cmdline": "",
-            "tombstone": False,
-            "_dir": proc_dir,
-        }
-        rows.append(row)
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        entries = None
+    if entries is not None:
+        with entries:
+            for ent in entries:
+                if not ent.name.isdigit():
+                    continue
+                try:
+                    pid = int(ent.name)
+                except ValueError:
+                    continue
+                try:
+                    with open(ent.path + "/stat", "r", encoding="utf-8", errors="replace") as fh:
+                        stat = fh.read(2048)
+                except OSError:
+                    continue
+                if not stat:
+                    continue
+                rparen = stat.rfind(")")
+                if rparen < 0:
+                    continue
+                rest = stat[rparen + 2 :].split()
+                if len(rest) < 22:
+                    continue
+                state = rest[0]
+                try:
+                    ppid = int(rest[1])
+                    utime = int(rest[11])
+                    stime = int(rest[12])
+                    threads = int(rest[17])
+                    vsize = int(rest[20])
+                    rss_pages = int(rest[21])
+                except ValueError:
+                    continue
+                ticks = utime + stime
+                next_times[pid] = (now, ticks)
+                cpu_pct = 0.0
+                prev = _prev_times.get(pid)
+                if prev is not None and dt > 0.05:
+                    cpu_pct = max(0.0, min(100.0, (ticks - prev[1]) / clk / dt * 100.0))
+                if state == "R":
+                    running += 1
+                if need_users:
+                    try:
+                        uid = ent.stat().st_uid
+                    except OSError:
+                        uid = os.getuid()
+                    user = _user_name(uid)
+                    users[user] = users.get(user, 0) + 1
+                scanned.append(
+                    (
+                        cpu_pct,
+                        max(0, rss_pages * page),
+                        pid,
+                        Path(ent.path),
+                        state[:1],
+                        ppid,
+                        max(1, threads),
+                        max(0, vsize // 1024),
+                    )
+                )
+                if len(next_times) >= MAX_SCAN:
+                    break
     gone = set(_last_proc) - set(next_times)
     for pid in gone:
         marker = dict(_last_proc.pop(pid))
@@ -552,24 +594,46 @@ def _processes(now: float, dt: float, clk: int) -> tuple[list[dict[str, Any]], d
         if pid in next_times or now - float(marker.get("gone_at") or 0) > _TOMBSTONE_TTL:
             _tombstones.pop(pid, None)
     _prev_times = next_times
-    rows.sort(key=lambda item: (float(item["cpu_pct"]), int(item["rss_kb"])), reverse=True)
+    scanned.sort(key=lambda item: (item[0], item[1]), reverse=True)
     stones = list(_tombstones.values())
     stones.sort(key=lambda item: float(item.get("gone_at") or 0), reverse=True)
-    live_cap = max(0, MAX_PROCESSES - len(stones))
-    kept = rows[:live_cap]
-    for row in kept:
-        _fill_proc(row)
-    new_last: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        stored = {key: value for key, value in row.items() if key != "_dir"}
-        pid = int(stored["pid"])
-        if not stored.get("comm"):
-            prev = _last_proc.get(pid)
-            if prev:
-                stored["comm"] = str(prev.get("comm") or "")
-                stored["cmdline"] = str(prev.get("cmdline") or "")
-        new_last[pid] = stored
-    _last_proc = new_last
+    shown_cap = max(0, min(MAX_PROCESSES, int(fill_limit)))
+    live_cap = max(0, shown_cap - len(stones))
+    kept_src = scanned[:live_cap]
+    kept: list[dict[str, Any]] = []
+    fill_n = max(0, min(len(kept_src), int(fill_limit)))
+    for index, item in enumerate(kept_src):
+        cpu_pct, rss_kb, pid, proc_dir, state, ppid, threads, virt_kb = item
+        row = {
+            "pid": pid,
+            "ppid": ppid,
+            "comm": "",
+            "state": state,
+            "status": PROC_STATES.get(state, state),
+            "user": "",
+            "rss_kb": rss_kb,
+            "virt_kb": virt_kb,
+            "cpu_pct": round(cpu_pct, 1),
+            "threads": threads,
+            "cmdline": "",
+            "tombstone": False,
+            "_dir": proc_dir,
+        }
+        prev = _last_proc.get(pid)
+        if prev:
+            row["comm"] = str(prev.get("comm") or "")
+            row["cmdline"] = str(prev.get("cmdline") or "")
+            row["user"] = str(prev.get("user") or "")
+        if index < fill_n:
+            _fill_proc(row)
+            if not row.get("user"):
+                try:
+                    row["user"] = _user_name(proc_dir.stat().st_uid)[:24]
+                except OSError:
+                    row["user"] = _user_name(os.getuid())[:24]
+        row.pop("_dir", None)
+        kept.append(row)
+    _last_proc = {int(row["pid"]): dict(row) for row in kept}
     shown = stones + kept
     counts = {
         "running": running,
@@ -714,15 +778,78 @@ def _names_from_dir(folder: Path, suffix: str) -> list[str]:
     return names
 
 
-def snapshot(page: str = "") -> dict[str, Any]:
+_last_snap: tuple[float, str, dict[str, Any]] | None = None
+_SNAP_DEBOUNCE = 0.18
+_last_mhz_val = 0
+_last_mhz_max = 0
+_last_mhz_at = 0.0
+_last_temp_c = 0.0
+
+
+def _refresh_slow_meters(now: float, force: bool = False) -> None:
+    global _last_mhz_val, _last_mhz_max, _last_mhz_at, _last_temp_c
+    if not force and _last_mhz_at and now - _last_mhz_at < 0.75:
+        return
+    mhz = _cpu_mhz()
+    _last_mhz_val = mhz[0] if mhz else 0
+    _last_mhz_max = max(mhz) if mhz else 0
+    _last_mhz_at = now
+    temps = _temps(1)
+    if temps:
+        _last_temp_c = float(temps[0]["c"])
+
+
+def pulse() -> dict[str, Any]:
     global _prev_mono, _prev_net, _prev_disk
+    now = time.monotonic()
+    dt = now - _prev_mono if _prev_mono else 0.0
+    mem = _meminfo()
+    load1, load5, load15 = _loadavg()
+    cpu_pcts = _cpu_pcts(_cpu_times())
+    overall = cpu_pcts[0] if cpu_pcts else 0.0
+    _refresh_slow_meters(now)
+    rx, tx, iface = _net_bytes()
+    _prev_net, rx_bps, tx_bps = _rate(_prev_net, now, rx, tx)
+    dread, dwrite = _disk_bytes()
+    _prev_disk, read_bps, write_bps = _rate(_prev_disk, now, dread, dwrite)
+    _prev_mono = now
+    mem_pct = (mem["used"] / mem["total"] * 100.0) if mem["total"] else 0.0
+    return {
+        "schema": SCHEMA,
+        "cpu_busy": overall,
+        "cores": [float(pct) for pct in cpu_pcts[1:MAX_CORES + 1]],
+        "mhz": _last_mhz_val,
+        "mhz_max": _last_mhz_max,
+        "temp_c": _last_temp_c,
+        "mem_used_kb": mem["used"],
+        "mem_total_kb": mem["total"],
+        "mem_pct": round(mem_pct, 2),
+        "load1": load1,
+        "load5": load5,
+        "load15": load15,
+        "net_iface": iface,
+        "net_rx_bps": rx_bps,
+        "net_tx_bps": tx_bps,
+        "disk_read_bps": read_bps,
+        "disk_write_bps": write_bps,
+        "dt": round(dt, 4),
+    }
+
+
+def snapshot(page: str = "") -> dict[str, Any]:
+    global _prev_mono, _prev_net, _prev_disk, _last_snap
     kind = str(page or "").strip().upper()
     full = kind == ""
+    now = time.monotonic()
+    hit = _last_snap
+    if hit is not None and hit[1] == kind and now - hit[0] < _SNAP_DEBOUNCE:
+        return hit[2]
     want_procs = full or kind in {"SUMMARY", "PROCESSES", "USERS"}
     want_conns = full or kind == "CONNECTIONS"
     want_mounts = full or kind == "DISK"
     want_names = full or kind in {"STARTUP", "APPS", "SERVICES"}
-    now = time.monotonic()
+    want_cores = full or kind in {"PERFORMANCE", "FREQ"}
+    want_core_hist = full or kind == "PERFORMANCE"
     dt = now - _prev_mono if _prev_mono else 0.0
     clk = _clk()
     mem = _meminfo()
@@ -731,22 +858,26 @@ def snapshot(page: str = "") -> dict[str, Any]:
     cpu_pcts = _cpu_pcts(cpu_rows)
     overall = cpu_pcts[0] if cpu_pcts else 0.0
     mhz = _cpu_mhz()
-    cores: list[dict[str, Any]] = []
-    for index, pct in enumerate(cpu_pcts[1:]):
-        cores.append(
-            {
-                "id": index,
-                "pct": pct,
-                "mhz": mhz[index] if index < len(mhz) else 0,
-            }
-        )
-    temps = _temps()
-    temp_c = temps[0]["c"] if temps else 0.0
-    while len(_core_hist) < len(cores):
+    _refresh_slow_meters(now, force=True)
+    per_core = cpu_pcts[1:]
+    while len(_core_hist) < len(per_core):
         _core_hist.append([])
-    core_hist = []
-    for index, core in enumerate(cores):
-        core_hist.append(_push(_core_hist[index], float(core["pct"])))
+    cores: list[dict[str, Any]] = []
+    core_hist: list[list[float]] = []
+    for index, pct in enumerate(per_core):
+        _push(_core_hist[index], float(pct))
+        if want_cores:
+            cores.append(
+                {
+                    "id": index,
+                    "pct": pct,
+                    "mhz": mhz[index] if index < len(mhz) else 0,
+                }
+            )
+        if want_core_hist:
+            core_hist.append(list(_core_hist[index]))
+    temps = _temps(1 if kind == "SUMMARY" else 3)
+    temp_c = temps[0]["c"] if temps else 0.0
     energy = _energy()
     rx, tx, iface = _net_bytes()
     _prev_net, rx_bps, tx_bps = _rate(_prev_net, now, rx, tx)
@@ -755,7 +886,14 @@ def snapshot(page: str = "") -> dict[str, Any]:
     procs: list[dict[str, Any]] = []
     users: dict[str, int] = {}
     if want_procs:
-        procs, tasks, users = _processes(now, dt, clk)
+        fill_limit = 8 if kind == "SUMMARY" else MAX_PROCESSES
+        procs, tasks, users = _processes(
+            now,
+            dt,
+            clk,
+            fill_limit=fill_limit,
+            need_users=full or kind == "USERS",
+        )
     else:
         run, total = _task_hint()
         tasks = {"running": run, "total": total, "tombstones": 0}
@@ -766,7 +904,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
     ]
     ident = _host_identity()
     app = _cached_appimage()
-    return {
+    payload = {
         "schema": SCHEMA,
         "cpu_busy": overall,
         "cpu_model": ident["cpu_model"],
@@ -832,6 +970,8 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "appimage_found": bool(app),
         "page": kind or "FULL",
     }
+    _last_snap = (now, kind, payload)
+    return payload
 
 
 def format_kib(value: int) -> str:

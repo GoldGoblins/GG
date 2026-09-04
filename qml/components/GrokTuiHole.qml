@@ -5,6 +5,7 @@ import QtQuick
 FocusScope {
     id: root
     objectName: "grokTuiHost"
+    clip: true
 
     property var surfaceHost: null
 

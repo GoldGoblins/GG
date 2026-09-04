@@ -12,6 +12,28 @@ Item {
     property int selectedPid: -1
     property string page: "SUMMARY"
     property string perfKey: "CPU"
+    readonly property var emptyHist: [0]
+    readonly property int liveCap: 120
+    property int liveTicks: 0
+    property real liveCpu: 0
+    property real liveMemUsed: 0
+    property real liveMemTotal: 0
+    property real liveTemp: 0
+    property real liveLoad1: 0
+    property real liveLoad5: 0
+    property real liveLoad15: 0
+    property int liveMhz: 0
+    property int liveMhzMax: 0
+    property int liveDiskRead: 0
+    property int liveDiskWrite: 0
+    property int liveNetRx: 0
+    property int liveNetTx: 0
+    property var liveCpuHist: []
+    property var liveMemHist: []
+    property var liveTempHist: []
+    property var liveDiskHist: []
+    property var liveNetHist: []
+    property var liveCoreHists: []
 
     readonly property var nav: [
         "SUMMARY",
@@ -60,6 +82,28 @@ Item {
         if (raw === root.statusJson)
             return
         root.statusJson = raw
+        if (root.liveCpuHist.length < 2) {
+            try {
+                var parsed = JSON.parse(raw)
+                if (parsed.cpu_hist && parsed.cpu_hist.length)
+                    root.liveCpuHist = parsed.cpu_hist.slice()
+                if (parsed.mem_hist && parsed.mem_hist.length)
+                    root.liveMemHist = parsed.mem_hist.slice()
+                if (parsed.temp_hist && parsed.temp_hist.length)
+                    root.liveTempHist = parsed.temp_hist.slice()
+                if (parsed.disk_hist && parsed.disk_hist.length)
+                    root.liveDiskHist = parsed.disk_hist.slice()
+                if (parsed.net_hist && parsed.net_hist.length)
+                    root.liveNetHist = parsed.net_hist.slice()
+                root.liveCpu = Number(parsed.cpu_busy || 0)
+                root.liveMemUsed = Number(parsed.mem_used_kb || 0)
+                root.liveMemTotal = Number(parsed.mem_total_kb || 0)
+                root.liveTemp = Number(parsed.temp_c || 0)
+                root.liveMhz = Number(parsed.mhz || 0)
+                root.liveMhzMax = Number(parsed.mhz_max || 0)
+            } catch (err) {
+            }
+        }
     }
 
     function swallow() {
@@ -103,6 +147,18 @@ Item {
     }
 
     function arr(name) {
+        if (name === "cpu_hist")
+            return root.liveCpuHist
+        if (name === "mem_hist")
+            return root.liveMemHist
+        if (name === "temp_hist")
+            return root.liveTempHist
+        if (name === "disk_hist")
+            return root.liveDiskHist
+        if (name === "net_hist")
+            return root.liveNetHist
+        if (name === "core_hist")
+            return root.liveCoreHists
         var rows = root.status[name]
         if (rows && rows.length !== undefined)
             return rows
@@ -110,17 +166,107 @@ Item {
     }
 
     function n(name, fallback) {
+        var fb = fallback === undefined ? 0 : fallback
+        if (name === "cpu_busy")
+            return root.liveCpu
+        if (name === "mem_used_kb")
+            return root.liveMemUsed
+        if (name === "mem_total_kb")
+            return root.liveMemTotal || fb
+        if (name === "temp_c")
+            return root.liveTemp
+        if (name === "load1")
+            return root.liveLoad1
+        if (name === "load5")
+            return root.liveLoad5
+        if (name === "load15")
+            return root.liveLoad15
+        if (name === "mhz")
+            return root.liveMhz
+        if (name === "mhz_max")
+            return root.liveMhzMax
+        if (name === "disk_read_bps")
+            return root.liveDiskRead
+        if (name === "disk_write_bps")
+            return root.liveDiskWrite
+        if (name === "net_rx_bps")
+            return root.liveNetRx
+        if (name === "net_tx_bps")
+            return root.liveNetTx
+        if (name === "disk_led")
+            return Math.min(1, (root.liveDiskRead + root.liveDiskWrite) / (8 * 1024 * 1024))
         var v = root.status[name]
         if (v === undefined || v === null)
-            return fallback === undefined ? 0 : fallback
+            return fb
         return Number(v)
     }
 
+    function pushHist(hist, value) {
+        var next = hist && hist.length !== undefined ? hist.slice() : []
+        next.push(Number(value || 0))
+        if (next.length > root.liveCap)
+            next.splice(0, next.length - root.liveCap)
+        return next
+    }
+
+    function applyPulse(payload) {
+        var p = payload || {}
+        root.liveCpu = Number(p.cpu_busy || 0)
+        root.liveMemUsed = Number(p.mem_used_kb || 0)
+        root.liveMemTotal = Number(p.mem_total_kb || 0)
+        root.liveTemp = Number(p.temp_c || 0)
+        root.liveLoad1 = Number(p.load1 || 0)
+        root.liveLoad5 = Number(p.load5 || 0)
+        root.liveLoad15 = Number(p.load15 || 0)
+        root.liveMhz = Number(p.mhz || 0)
+        root.liveMhzMax = Number(p.mhz_max || 0)
+        root.liveDiskRead = Number(p.disk_read_bps || 0)
+        root.liveDiskWrite = Number(p.disk_write_bps || 0)
+        root.liveNetRx = Number(p.net_rx_bps || 0)
+        root.liveNetTx = Number(p.net_tx_bps || 0)
+        root.liveCpuHist = root.pushHist(root.liveCpuHist, root.liveCpu)
+        root.liveMemHist = root.pushHist(
+            root.liveMemHist,
+            root.liveMemTotal ? (root.liveMemUsed / root.liveMemTotal * 100) : 0
+        )
+        root.liveTempHist = root.pushHist(root.liveTempHist, root.liveTemp)
+        root.liveDiskHist = root.pushHist(
+            root.liveDiskHist,
+            (root.liveDiskRead + root.liveDiskWrite) / 1024.0
+        )
+        root.liveNetHist = root.pushHist(
+            root.liveNetHist,
+            (root.liveNetRx + root.liveNetTx) / 1024.0
+        )
+        var cores = p.cores || []
+        var rows = root.liveCoreHists && root.liveCoreHists.length
+            ? root.liveCoreHists.slice()
+            : []
+        var i
+        for (i = 0; i < cores.length; i++)
+            rows[i] = root.pushHist(rows[i] || [], cores[i])
+        root.liveCoreHists = rows
+    }
+
+    function tick() {
+        if (!root.surfaceHost || !root.surfaceHost.tmogPulse)
+            return
+        try {
+            root.applyPulse(JSON.parse(root.surfaceHost.tmogPulse() || "{}"))
+        } catch (err) {
+        }
+        root.liveTicks += 1
+        if (root.liveTicks >= 60) {
+            root.liveTicks = 0
+            root.refresh()
+        }
+    }
+
     Timer {
-        interval: 2000
+        interval: 16
         running: root.visible
         repeat: true
-        onTriggered: root.refresh()
+        onTriggered: root.tick()
     }
 
     onPageChanged: {
@@ -134,6 +280,8 @@ Item {
         else
             root.hideEmbed()
     }
+
+    Component.onCompleted: root.refresh()
 
     Item {
         anchors.fill: parent
@@ -198,9 +346,17 @@ Item {
                     width: parent.width - navCol.width - 11
                     height: parent.height
 
-                    Item {
+                    Loader {
                         anchors.fill: parent
-                        visible: root.page === "SUMMARY"
+                        active: root.page === "SUMMARY"
+                        visible: active
+                        sourceComponent: summaryPage
+                    }
+
+                    Component {
+                        id: summaryPage
+                        Item {
+                            anchors.fill: parent
 
                         TmogCard {
                             id: barsCard
@@ -216,13 +372,15 @@ Item {
                                 spacing: 6
 
                                 Repeater {
-                                    model: [
-                                        { "k": "cpu_busy", "cap": 100, "l": "CPU" },
-                                        { "k": "mhz", "cap": Math.max(1, root.n("mhz_max")), "l": "CLK" },
-                                        { "k": "temp_c", "cap": 105, "l": "TMP" }
-                                    ]
+                                    model: 3
                                     delegate: Item {
-                                        required property var modelData
+                                        required property int index
+                                        readonly property string barKey: index === 0
+                                            ? "cpu_busy"
+                                            : (index === 1 ? "mhz" : "temp_c")
+                                        readonly property real barCap: index === 0
+                                            ? 100
+                                            : (index === 1 ? Math.max(1, root.n("mhz_max")) : 105)
                                         width: 22
                                         height: parent.height
                                         Rectangle {
@@ -236,7 +394,7 @@ Item {
                                             anchors.bottom: parent.bottom
                                             height: parent.height * Math.max(
                                                 0.02,
-                                                Math.min(1, root.n(modelData.k) / modelData.cap)
+                                                Math.min(1, root.n(barKey) / barCap)
                                             )
                                             color: "#8db89a"
                                         }
@@ -244,7 +402,7 @@ Item {
                                             anchors.bottom: parent.bottom
                                             anchors.bottomMargin: 2
                                             anchors.horizontalCenter: parent.horizontalCenter
-                                            text: modelData.l
+                                            text: index === 0 ? "CPU" : (index === 1 ? "CLK" : "TMP")
                                             color: "#a8b0b8"
                                             font.family: "monospace"
                                             font.pixelSize: 7
@@ -420,10 +578,10 @@ Item {
                                     TmogSpark {
                                         width: parent.width
                                         height: parent.height - 36
-                                        values: [0]
+                                        values: root.arr("temp_hist")
                                         stroke: "#c8a97e"
                                         fill: "#2a2418"
-                                        yMax: 1
+                                        yMax: 105
                                     }
                                 }
                             }
@@ -484,10 +642,19 @@ Item {
                             }
                         }
                     }
+                    }
 
-                    Item {
+                    Loader {
                         anchors.fill: parent
-                        visible: root.page === "PERFORMANCE"
+                        active: root.page === "PERFORMANCE"
+                        visible: active
+                        sourceComponent: performancePage
+                    }
+
+                    Component {
+                        id: performancePage
+                        Item {
+                            anchors.fill: parent
 
                         Column {
                             id: perfNav
@@ -625,7 +792,7 @@ Item {
                                                     var all = root.arr("core_hist")
                                                     if (all && all.length > index)
                                                         return all[index]
-                                                    return [modelData.pct]
+                                                    return root.emptyHist
                                                 }
                                                 yMax: 100
                                                 stroke: "#8db89a"
@@ -673,10 +840,19 @@ Item {
                             }
                         }
                     }
+                    }
 
+                    Loader {
+                        anchors.fill: parent
+                        active: root.page !== "SUMMARY" && root.page !== "PERFORMANCE"
+                        visible: active
+                        sourceComponent: listPage
+                    }
+
+                    Component {
+                        id: listPage
                     Flickable {
                         anchors.fill: parent
-                        visible: root.page !== "SUMMARY" && root.page !== "PERFORMANCE"
                         clip: true
                         boundsBehavior: Flickable.StopAtBounds
                         contentWidth: width
@@ -872,6 +1048,7 @@ Item {
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

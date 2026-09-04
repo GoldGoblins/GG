@@ -17,7 +17,7 @@ SCHEMA = "gg.ai-desktop.media-status.v1"
 STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/media")
 MODES = ("MUSIC", "RADIO", "TV", "GAME", "FETCH")
 DEFAULT_MODE = "MUSIC"
-MAX_ITEMS = 400
+MAX_ITEMS = 600
 MAX_SCAN_DEPTH = 4
 MAX_TITLE = 96
 VOLUME_DEFAULT = 70
@@ -160,12 +160,20 @@ TOOL_DIRS = (
 RADIO_API = "https://de1.api.radio-browser.info/json/stations/search"
 IPTV_PLAYLISTS = (
     "https://iptv-org.github.io/iptv/countries/se.m3u",
-    "https://iptv-org.github.io/iptv/countries/uk.m3u",
+    "https://iptv-org.github.io/iptv/countries/fi.m3u",
     "https://iptv-org.github.io/iptv/countries/no.m3u",
     "https://iptv-org.github.io/iptv/countries/dk.m3u",
+    "https://iptv-org.github.io/iptv/countries/uk.m3u",
     "https://iptv-org.github.io/iptv/categories/news.m3u",
 )
-IPTV_PER_SOURCE = 80
+IPTV_PER_SOURCE = 160
+RADIO_BROWSER_LIMIT = 250
+RADIO_BROWSER_COUNTRIES = (
+    ("SE", 220),
+    ("NO", 50),
+    ("DK", 50),
+    ("FI", 50),
+)
 HOMEBREW_API = "https://hh3.gbdev.io/api"
 HOMEBREW_PAGES = 2
 HOMEBREW_DENIED_TYPES = frozenset({"hackrom"})
@@ -188,18 +196,52 @@ RADIO_PRESETS = (
     {
         "title": "SR P1",
         "url": "https://live1.sr.se/p1-mp3-192",
+        "fm_mhz": 92.4,
     },
     {
         "title": "SR P2",
         "url": "https://live1.sr.se/p2-mp3-192",
+        "fm_mhz": 96.2,
     },
     {
         "title": "SR P3",
         "url": "https://live1.sr.se/p3-mp3-96",
+        "fm_mhz": 99.3,
     },
     {
         "title": "SR P4 Stockholm",
         "url": "https://edge1.sr.se/p4sth-aac-320",
+        "fm_mhz": 102.3,
+    },
+    {
+        "title": "SR P4 Göteborg",
+        "url": "https://live1.sr.se/p4gbg-mp3-192",
+        "fm_mhz": 101.9,
+    },
+    {
+        "title": "SR P4 Malmöhus",
+        "url": "https://live1.sr.se/p4mal-mp3-192",
+        "fm_mhz": 100.6,
+    },
+    {
+        "title": "SR P4 Uppsala",
+        "url": "https://live1.sr.se/p4upp-mp3-192",
+        "fm_mhz": 98.2,
+    },
+    {
+        "title": "SR P4 Östergötland",
+        "url": "https://live1.sr.se/p4ost-mp3-192",
+        "fm_mhz": 101.3,
+    },
+    {
+        "title": "SR P4 Jönköping",
+        "url": "https://live1.sr.se/p4jon-mp3-192",
+        "fm_mhz": 100.2,
+    },
+    {
+        "title": "SR P4 Norrbotten",
+        "url": "https://live1.sr.se/p4nbd-mp3-192",
+        "fm_mhz": 98.7,
     },
     {
         "title": "BBC World Service",
@@ -214,6 +256,9 @@ RADIO_PRESETS = (
         "url": "https://ice2.somafm.com/groovesalad-128-mp3",
     },
 )
+FM_BAND_LO = 87.5
+FM_BAND_HI = 108.0
+_RTL_SDR_USB = frozenset({"0bda:2832", "0bda:2838", "0bda:2831"})
 
 LIBRARY_DIRS = (
     Path("/home/GG/Musik"),
@@ -480,7 +525,7 @@ def radio_browser_stations(
         "hidebroken": "true",
         "order": "clickcount",
         "reverse": "true",
-        "limit": str(max(1, min(int(limit), 120))),
+        "limit": str(max(1, min(int(limit), RADIO_BROWSER_LIMIT))),
     }
     cleaned = str(query or "").strip()
     if cleaned:
@@ -561,6 +606,52 @@ def iptv_catalog() -> list[dict[str, Any]]:
         if len(rows) >= MAX_ITEMS:
             break
     return rows
+
+
+def _title_sort_key(title: str) -> str:
+    text = str(title or "").strip().casefold()
+    return text.translate(
+        str.maketrans(
+            {
+                "å": "zz",
+                "ä": "zza",
+                "ö": "zzb",
+                "é": "e",
+                "ü": "u",
+            }
+        )
+    )
+
+
+def _radio_pin(title: str) -> int:
+    text = " ".join(str(title or "").strip().casefold().split())
+    text = text.replace("sveriges radio", "sr")
+    if text == "sr p1" or text.startswith("sr p1 ") or text.startswith("sr p1-"):
+        return 0
+    if text == "sr p2" or text.startswith("sr p2 ") or text.startswith("sr p2-"):
+        return 1
+    if text == "sr p3" or text.startswith("sr p3 ") or text.startswith("sr p3-"):
+        return 2
+    if text.startswith("sr p4"):
+        return 3
+    return 10
+
+
+def sort_title_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda item: _title_sort_key(str(item.get("title") or "")),
+    )
+
+
+def sort_radio_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda item: (
+            _radio_pin(str(item.get("title") or "")),
+            _title_sort_key(str(item.get("title") or "")),
+        ),
+    )
 
 
 def looks_like_url(value: str) -> bool:
@@ -652,7 +743,7 @@ def video_catalog() -> list[dict[str, Any]]:
         rows.append(item)
         if len(rows) >= MAX_ITEMS:
             break
-    return rows[:MAX_ITEMS]
+    return sort_title_rows(rows)[:MAX_ITEMS]
 
 
 def radio_catalog() -> list[dict[str, Any]]:
@@ -660,17 +751,19 @@ def radio_catalog() -> list[dict[str, Any]]:
     seen: set[str] = set()
     for preset in RADIO_PRESETS:
         url = stream_allowed(str(preset["url"]))
-        rows.append(
-            {
-                "id": item_id("RADIO", url),
-                "title": str(preset["title"])[:MAX_TITLE],
-                "kind": "RADIO",
-                "source": url,
-                "media": "stream",
-                "system": "",
-                "player": "cliamp",
-            }
-        )
+        row = {
+            "id": item_id("RADIO", url),
+            "title": str(preset["title"])[:MAX_TITLE],
+            "kind": "RADIO",
+            "source": url,
+            "media": "stream",
+            "system": "",
+            "player": "cliamp",
+        }
+        mhz = preset.get("fm_mhz")
+        if mhz:
+            row["fm_mhz"] = float(mhz)
+        rows.append(row)
         seen.add(url)
     playlist = ensure_state_dir() / "radio.m3u"
     if playlist.is_file():
@@ -680,14 +773,103 @@ def radio_catalog() -> list[dict[str, Any]]:
             item["player"] = "cliamp"
             rows.append(item)
             seen.add(item["source"])
-    for item in radio_browser_stations(country="SE", limit=80):
-        if item["source"] in seen:
-            continue
-        rows.append(item)
-        seen.add(item["source"])
+    for country, cap in RADIO_BROWSER_COUNTRIES:
+        for item in radio_browser_stations(country=country, limit=cap):
+            if item["source"] in seen:
+                continue
+            rows.append(item)
+            seen.add(item["source"])
+            if len(rows) >= MAX_ITEMS:
+                break
         if len(rows) >= MAX_ITEMS:
             break
-    return rows[:MAX_ITEMS]
+    return sort_radio_rows(rows)[:MAX_ITEMS]
+
+
+def radio_tuner_marks() -> list[dict[str, Any]]:
+    marks: list[dict[str, Any]] = []
+    for preset in RADIO_PRESETS:
+        mhz = preset.get("fm_mhz")
+        if not mhz:
+            continue
+        url = stream_allowed(str(preset["url"]))
+        marks.append(
+            {
+                "title": str(preset["title"])[:MAX_TITLE],
+                "mhz": float(mhz),
+                "id": item_id("RADIO", url),
+            }
+        )
+    return marks
+
+
+def freq_for_now(now: dict[str, Any] | None) -> float:
+    if not now:
+        return 0.0
+    try:
+        listed = float(now.get("fm_mhz") or 0)
+    except (TypeError, ValueError):
+        listed = 0.0
+    if listed > 0:
+        return listed
+    title = str(now.get("title") or "")
+    source = str(now.get("source") or "")
+    tail = source.rsplit("/", 1)[-1]
+    for preset in RADIO_PRESETS:
+        mhz = preset.get("fm_mhz")
+        if not mhz:
+            continue
+        url = str(preset["url"])
+        if str(preset["title"]) == title or url == source or url.endswith(tail) or tail and tail in url:
+            return float(mhz)
+    return 0.0
+
+
+def nearest_radio_preset(mhz: float) -> dict[str, Any] | None:
+    try:
+        target = float(mhz)
+    except (TypeError, ValueError):
+        return None
+    if target < FM_BAND_LO - 1 or target > FM_BAND_HI + 1:
+        return None
+    best: dict[str, Any] | None = None
+    best_delta = 1.6
+    for preset in RADIO_PRESETS:
+        marked = preset.get("fm_mhz")
+        if not marked:
+            continue
+        delta = abs(float(marked) - target)
+        if delta < best_delta:
+            best_delta = delta
+            best = dict(preset)
+    return best
+
+
+def probe_rf_frontend() -> dict[str, str]:
+    radio = Path("/dev/radio0")
+    if radio.exists() and not radio.is_symlink():
+        return {"kind": "V4L_FM", "label": "V4L FM", "path": str(radio)}
+    swradio = Path("/dev/swradio0")
+    if swradio.exists():
+        return {"kind": "RTL_SDR", "label": "RTL-SDR", "path": str(swradio)}
+    root = Path("/sys/bus/usb/devices")
+    try:
+        nodes = list(root.iterdir())
+    except OSError:
+        nodes = []
+    for node in nodes:
+        try:
+            vid = (node / "idVendor").read_text(encoding="ascii").strip()
+            pid = (node / "idProduct").read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        if f"{vid}:{pid}" in _RTL_SDR_USB:
+            return {"kind": "RTL_SDR", "label": "RTL-SDR", "path": str(node)}
+    return {
+        "kind": "NONE",
+        "label": "NO RF",
+        "detail": "wifi-2.4/5g",
+    }
 
 
 def fetch_catalog() -> list[dict[str, Any]]:
@@ -761,7 +943,7 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
         rows.append(direct)
         seen.add(direct["source"])
     if kind == "RADIO":
-        for item in radio_browser_stations(query=cleaned, limit=60):
+        for item in radio_browser_stations(query=cleaned, limit=120):
             if item["source"] in seen:
                 continue
             rows.append(item)
@@ -773,7 +955,7 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
                 continue
             rows.append(item)
             seen.add(item["source"])
-        return rows[:MAX_ITEMS]
+        return sort_radio_rows(rows)[:MAX_ITEMS]
     if kind == "TV":
         needle = cleaned.lower()
         for url in IPTV_PLAYLISTS:
@@ -794,7 +976,7 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
                 continue
             item["player"] = "qml"
             rows.append(item)
-        return rows[:MAX_ITEMS]
+        return sort_title_rows(rows)[:MAX_ITEMS]
     if kind == "MUSIC":
         needle = cleaned.lower()
         for item in music_catalog():

@@ -401,6 +401,13 @@ Item {
             }
         }
 
+        BufferMark {
+            objectName: "composerBuffer"
+            anchors.verticalCenter: parent.verticalCenter
+            active: root.busy
+            cell: 5
+        }
+
         Text {
             id: stopButton
             text: "Stop"

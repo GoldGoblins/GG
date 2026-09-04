@@ -29,6 +29,7 @@ from PySide6.QtCore import (
 from backend.chat_sessions import list_for_ui
 from backend import crypto_host
 from backend import libretro_host
+from backend import marketplace_host
 from backend import media_host
 from backend import tmog_contract
 from backend.grok_wallet import snapshot as grok_wallet_snapshot
@@ -177,6 +178,13 @@ class ChatSurfaceHost(QObject):
         self.watchDesktopWorkspace()
         self._attach_native_tui()
         self._ensure_console_provider()
+        QTimer.singleShot(0, self._emit_wallet)
+
+    @Slot(result=str)
+    def hydrateDesktop(self) -> str:
+        self._attach_native_tui()
+        self._emit_wallet()
+        return self.cryptoRailStatus()
 
     def _tui_hole(self):
         root = self._qml_root
@@ -191,6 +199,10 @@ class ChatSurfaceHost(QObject):
         hole = self._tui_hole()
         if hole is None:
             return
+        try:
+            hole.visibleChanged.disconnect(self._on_tui_hole_visible)
+        except Exception:
+            pass
         try:
             hole.visibleChanged.connect(self._on_tui_hole_visible)
         except Exception:
@@ -292,6 +304,13 @@ class ChatSurfaceHost(QObject):
             return json.dumps(
                 tmog_contract.snapshot(page), separators=(",", ":")
             )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
+
+    @Slot(result=str)
+    def tmogPulse(self) -> str:
+        try:
+            return json.dumps(tmog_contract.pulse(), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__, "schema": tmog_contract.SCHEMA})
 
@@ -547,6 +566,15 @@ class ChatSurfaceHost(QObject):
     def mediaLiveStatus(self) -> str:
         try:
             return media_host.live_status_json()
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
+
+    @Slot(float, result=str)
+    def mediaTuneMhz(self, mhz: float) -> str:
+        try:
+            return self._media_changed(media_host.tune_mhz(mhz))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__, "schema": media_host.SCHEMA})
 
@@ -869,6 +897,56 @@ class ChatSurfaceHost(QObject):
             return json.dumps({"error": str(exc)})
 
     @Slot(result=str)
+    def marketplaceStatus(self) -> str:
+        try:
+            return json.dumps(marketplace_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplaceList(self, raw: str) -> str:
+        try:
+            return json.dumps(marketplace_host.list_item(raw), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplaceDelist(self, listing_id: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.delist_item(listing_id), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplacePaperBuy(self, listing_id: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.paper_buy(listing_id), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplaceSelect(self, listing_id: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.select_listing(listing_id), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def marketplaceSetFilter(self, category: str) -> str:
+        try:
+            return json.dumps(
+                marketplace_host.set_filter(category), separators=(",", ":")
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
     def listSiteFiles(self) -> str:
         return web_surface.list_site_files()
 
@@ -1149,7 +1227,8 @@ class ChatSurfaceHost(QObject):
         os.close(slave)
         self._watch_pty(identity, proc, master)
         if self._pending_tui_size is not None:
-            self.grokTuiResize(*self._pending_tui_size)
+            self._apply_tui_winsize()
+        QTimer.singleShot(0, self._emit_wallet)
         return True
 
     def _watch_pty(
@@ -1419,9 +1498,16 @@ class ChatSurfaceHost(QObject):
         width = max(8, min(240, int(cols)))
         height = max(4, min(80, int(rows)))
         pending = (width, height)
+        session = self._sessions.get(GROK_TUI_TERMINAL_ID)
+        if session is not None and session.get("cols") is None:
+            self._pending_tui_size = pending
+            self._apply_tui_winsize()
+            return
         if self._pending_tui_size == pending and self._winch.isActive():
             return
         self._pending_tui_size = pending
+        if session is None:
+            return
         self._winch.start()
 
     def _apply_tui_winsize(self) -> None:

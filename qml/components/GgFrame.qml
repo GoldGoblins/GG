@@ -15,6 +15,7 @@ Item {
     property int padding: 8
     property int legendGap: 8
     property bool compact: false
+    property bool busy: false
 
     default property alias contentData: content.data
 
@@ -54,20 +55,32 @@ Item {
         anchors.top: parent.top
         anchors.topMargin: -8
         height: Math.max(18, leftLegendText.implicitHeight + 4)
-        width: leftLegendText.implicitWidth + 12
+        width: leftLegendRow.implicitWidth + 12
         color: root.backgroundColor
         radius: Math.min(3, Math.max(1, root.radius - 1))
         antialiasing: false
 
-        Text {
-            id: leftLegendText
+        Row {
+            id: leftLegendRow
             anchors.centerIn: parent
-            text: root.leftLegend
-            color: root.leftLegendColor
-            font.family: "monospace"
-            font.pixelSize: 12
-            font.bold: true
-            verticalAlignment: Text.AlignVCenter
+            spacing: 6
+
+            Text {
+                id: leftLegendText
+                text: root.leftLegend
+                color: root.leftLegendColor
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
+            }
+
+            BufferMark {
+                objectName: "frameBufferMark"
+                anchors.verticalCenter: parent.verticalCenter
+                active: root.busy
+                cell: 5
+            }
         }
     }
 

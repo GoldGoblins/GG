@@ -25,16 +25,21 @@ from backend.media_contract import (
     fetch_terminal,
     FETCH_TUI_TITLE,
     format_clock,
+    freq_for_now,
+    item_id,
     library_roots,
     load_prefs,
     looks_like_url,
     materialize_homebrew,
+    nearest_radio_preset,
     EQ_PRESETS,
     SPECTRUM_BARS,
     normalize_eq,
     normalize_spectrum,
     player_bin,
+    probe_rf_frontend,
     probe_tools,
+    radio_tuner_marks,
     save_prefs,
     search_items,
     stream_allowed,
@@ -56,22 +61,38 @@ _backend = ""
 _catalog_memo: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CATALOG_MEMO_TTL = 45.0
 _CLIAMP_POLL_TIMEOUT = 0.04
-_CLIAMP_BANDS_TIMEOUT = 0.03
+_CLIAMP_BANDS_TIMEOUT = 0.008
 _CLIAMP_BUFFER_MS = 1000
 _CLIAMP_RESUME_GAP = 6.0
-_LIVE_TTL = 0.12
+_LIVE_TTL = 0.008
 _want_source = ""
 _resume_at = 0.0
 _last_bands: list[float] = []
 _last_bands_at = 0.0
+_spectrum: list[float] = []
 _last_live_state: dict[str, Any] = {}
 _last_live_at = 0.0
 _qml_position = 0.0
 _qml_duration = 0.0
 _live_json = ""
 _live_lock = threading.Lock()
+_cliamp_boot_lock = threading.Lock()
 _pump_thread: threading.Thread | None = None
-_GUI_LIVE_TTL = 0.25
+_GUI_LIVE_TTL = 0.008
+_RF_TTL = 5.0
+_rf_cache: tuple[float, dict[str, str]] | None = None
+_TUNER_MARKS = radio_tuner_marks()
+
+
+def _cached_rf() -> dict[str, str]:
+    global _rf_cache
+    now = time.monotonic()
+    hit = _rf_cache
+    if hit is not None and now - hit[0] < _RF_TTL:
+        return hit[1]
+    row = probe_rf_frontend()
+    _rf_cache = (now, row)
+    return row
 
 
 def _rc_path() -> Path:
@@ -255,7 +276,18 @@ def start_live_pump() -> None:
 def live_status_json() -> str:
     start_live_pump()
     with _live_lock:
-        return _live_json
+        raw = _live_json
+        spec = list(_spectrum)
+    if not raw:
+        return raw
+    if not spec:
+        return raw
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    data["spectrum"] = spec
+    return json.dumps(data, separators=(",", ":"))
 
 
 def publish_live(payload: dict[str, Any] | None = None) -> str:
@@ -273,15 +305,42 @@ def publish_live(payload: dict[str, Any] | None = None) -> str:
     return raw
 
 
+def _refresh_bands() -> None:
+    global _last_bands, _last_bands_at, _spectrum
+    if _backend != "cliamp":
+        return
+    spec = _cliamp_call({"cmd": "bands"}, timeout=_CLIAMP_BANDS_TIMEOUT)
+    bands = spec.get("bands") if spec else None
+    if not isinstance(bands, list) or not bands:
+        return
+    _last_bands = bands
+    _last_bands_at = time.monotonic()
+    cooked = normalize_spectrum(bands, SPECTRUM_BARS)
+    with _live_lock:
+        _spectrum = cooked
+
+
 def _live_pump_loop() -> None:
+    ticks = 0
     while True:
-        time.sleep(0.05)
+        started = time.monotonic()
         try:
-            if _backend == "cliamp" and not _cliamp_buffered():
-                _ensure_cliamp()
-            publish_live()
+            if _backend == "cliamp":
+                if not _cliamp_buffered():
+                    _ensure_cliamp()
+                _refresh_bands()
+                ticks += 1
+                if ticks == 1 or ticks % 8 == 0:
+                    publish_live()
+            else:
+                ticks += 1
+                if ticks == 1 or ticks % 8 == 0:
+                    publish_live()
         except Exception:
-            continue
+            pass
+        delay = 0.008 - (time.monotonic() - started)
+        if delay > 0:
+            time.sleep(delay)
 
 
 def _cached_cliamp() -> dict[str, Any]:
@@ -418,32 +477,33 @@ def _ensure_cliamp() -> str:
     binary = which_first(("cliamp",))
     if not binary:
         raise RuntimeError("MEDIA_CLIAMP_MISSING")
-    if _cliamp_alive() and _cliamp_buffered():
-        return binary
-    if _cliamp_alive() or (_cliamp_proc is not None and _cliamp_proc.poll() is None):
-        _stop_cliamp_daemon()
-        time.sleep(0.15)
-    _cliamp_sock().parent.mkdir(parents=True, exist_ok=True)
-    _cliamp_proc = subprocess.Popen(
-        [
-            binary,
-            "--daemon",
-            "--provider",
-            "radio",
-            "--buffer-ms",
-            str(_CLIAMP_BUFFER_MS),
-        ],
-        cwd=str(Path.home()),
-        env=_spawn_env(),
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    for _ in range(20):
-        time.sleep(0.15)
-        if _cliamp_alive():
+    with _cliamp_boot_lock:
+        if _cliamp_alive() and _cliamp_buffered():
             return binary
-    raise RuntimeError("MEDIA_CLIAMP_DAEMON")
+        if _cliamp_alive() or (_cliamp_proc is not None and _cliamp_proc.poll() is None):
+            _stop_cliamp_daemon()
+            time.sleep(0.15)
+        _cliamp_sock().parent.mkdir(parents=True, exist_ok=True)
+        _cliamp_proc = subprocess.Popen(
+            [
+                binary,
+                "--daemon",
+                "--provider",
+                "radio",
+                "--buffer-ms",
+                str(_CLIAMP_BUFFER_MS),
+            ],
+            cwd=str(Path.home()),
+            env=_spawn_env(),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(20):
+            time.sleep(0.15)
+            if _cliamp_alive():
+                return binary
+        raise RuntimeError("MEDIA_CLIAMP_DAEMON")
 
 
 def _halt_audio() -> None:
@@ -500,11 +560,33 @@ def _play_qml(item: dict[str, Any]) -> dict[str, Any]:
 
 def _play_cliamp(source: str) -> None:
     global _backend, _paused, _kind, _want_source, _resume_at
-    _ensure_cliamp()
-    start_live_pump()
-    _want_source = str(source or "")
+    wanted = str(source or "")
+    _want_source = wanted
     _resume_at = 0.0
+    _backend = "cliamp"
+    _paused = False
+    _kind = "audio"
+    start_live_pump()
+    threading.Thread(
+        target=_play_cliamp_load,
+        args=(wanted,),
+        name="gg-cliamp-play",
+        daemon=True,
+    ).start()
+
+
+def _play_cliamp_load(source: str) -> None:
+    if not source or source != _want_source:
+        return
+    try:
+        _ensure_cliamp()
+    except RuntimeError:
+        return
+    if source != _want_source:
+        return
     loaded = _cliamp_call({"cmd": "url.load", "path": source}, timeout=20.0)
+    if source != _want_source:
+        return
     track: dict[str, Any] = {}
     if loaded.get("ok"):
         rows = loaded.get("tracks") or []
@@ -512,31 +594,20 @@ def _play_cliamp(source: str) -> None:
             track = dict(rows[0])
     if not str(track.get("path") or ""):
         track = {"path": source, "stream": True, "title": Path(source).name}
-    played = _cliamp_call({"cmd": "track.play", "track": track})
+    played = _cliamp_call({"cmd": "track.play", "track": track}, timeout=2.0)
+    if source != _want_source:
+        return
     if not played.get("ok"):
-        queued = _cliamp_call({"cmd": "queue", "path": source})
+        queued = _cliamp_call({"cmd": "queue", "path": source}, timeout=2.0)
         if not queued.get("ok") and not loaded.get("ok"):
-            raise RuntimeError("MEDIA_CLIAMP_LOAD")
-        status = _cliamp_call({"cmd": "status"})
+            return
+        status = _cliamp_call({"cmd": "status"}, timeout=0.8)
         total = int(status.get("total") or 0)
-        _cliamp_call({"cmd": "queue.play", "index": max(0, total - 1)})
-    deadline = time.monotonic() + 5.0
-    last: dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        last = _cliamp_call({"cmd": "status"}, timeout=0.8)
-        state = str(last.get("state") or "")
-        path = str((last.get("track") or {}).get("path") or "")
-        if state == "playing" and (path == source or source in path or path in source):
-            break
-        time.sleep(0.2)
-    else:
-        detail = str(last.get("error") or last.get("state") or "silent")
-        raise RuntimeError("MEDIA_CLIAMP_PLAY:" + detail)
-    _backend = "cliamp"
-    _paused = False
-    _kind = "audio"
+        _cliamp_call({"cmd": "queue.play", "index": max(0, total - 1)}, timeout=2.0)
+    if source != _want_source:
+        return
     prefs = load_prefs()
-    _cliamp_call({"cmd": "volume", "value": _volume_db(int(prefs["volume"]))})
+    _cliamp_call({"cmd": "volume", "value": _volume_db(int(prefs["volume"]))}, timeout=0.4)
 
 
 def _spawn(argv: list[str], tokens: tuple[str, ...]) -> None:
@@ -710,7 +781,7 @@ def item_by_id(item_id_value: str) -> dict[str, Any] | None:
             return item
     prefs = load_prefs()
     for mode in (prefs["mode"],) + MODES:
-        for item in catalog_for(mode):
+        for item in _catalog_rows(mode):
             if item["id"] == wanted:
                 return item
     return None
@@ -747,8 +818,8 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
             item["kind"] = "TV"
             return _play_qml(item)
         if which_first(("cliamp",)):
-            _play_cliamp(source)
             _item = item
+            _play_cliamp(source)
             save_prefs({"mode": "FETCH", "last_id": item["id"]})
             return status_payload()
         raise RuntimeError("MEDIA_CLIAMP_MISSING")
@@ -781,8 +852,8 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
     use_cliamp = kind in ("MUSIC", "RADIO") and bool(which_first(("cliamp",)))
     if use_cliamp:
         _stop_proc()
-        _play_cliamp(source)
         _item = item
+        _play_cliamp(source)
         save_prefs({"mode": kind, "last_id": item["id"]})
         return status_payload()
     video = Path(source).suffix.lower() in VIDEO_EXT
@@ -801,6 +872,14 @@ def play_item(item_id_value: str, drawable_xid: int = 0) -> dict[str, Any]:
         payload["screen"] = "EMBED"
         payload["drawable"] = bool(drawable_xid > 0)
     return payload
+
+
+def tune_mhz(mhz: float) -> dict[str, Any]:
+    preset = nearest_radio_preset(mhz)
+    if preset is None:
+        raise ValueError("MEDIA_TUNE_NO_STATION")
+    url = stream_allowed(str(preset["url"]))
+    return play_item(item_id("RADIO", url))
 
 
 def pause() -> dict[str, Any]:
@@ -1100,7 +1179,7 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         if live:
             start_live_pump()
         live_state = (
-            _cliamp_live(want_bands=True)
+            _cliamp_live(want_bands=False)
             if pump or not live
             else _cached_cliamp()
         )
@@ -1134,7 +1213,11 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
                 "stream": bool(track.get("stream")),
             }
         if playing:
-            spectrum = normalize_spectrum(live_state.get("_bands"), SPECTRUM_BARS)
+            with _live_lock:
+                held = list(_spectrum)
+            spectrum = held or normalize_spectrum(
+                live_state.get("_bands") or _last_bands, SPECTRUM_BARS
+            )
     else:
         playing = _running() and not _paused
         paused = _paused and _running()
@@ -1165,6 +1248,7 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         screen = "EMBED"
     elif _kind in ("video", "game", "fetch") and _backend:
         screen = "EMBED"
+    buffering = bool(_want_source) and not playing and not paused
     payload = {
         "schema": SCHEMA,
         "mode": mode,
@@ -1172,7 +1256,10 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         "volume": int(prefs["volume"]),
         "playing": playing,
         "paused": paused,
-        "running": playing or paused or bool(_backend),
+        "buffering": buffering,
+        "buffering_id": str((_item or {}).get("id") or "") if buffering else "",
+        "buffering_source": str(_want_source or "") if buffering else "",
+        "running": playing or paused or bool(_backend) or buffering,
         "player": player,
         "backend": report_backend or player.lower(),
         "pid": 0 if live else player_pid(),
@@ -1190,6 +1277,9 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         "shuffle": shuffle,
         "repeat": repeat,
         "last_id": str(prefs.get("last_id") or ""),
+        "freq_mhz": freq_for_now(now),
+        "rf": _cached_rf(),
+        "tuner": list(_TUNER_MARKS),
     }
     if live:
         payload["live"] = True

@@ -17,6 +17,22 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-04 · 60 Hz TMOG + live spectrum
+
+What GitHub had until this push (`6bdf2a8`, 2 Sep 2026): GROK TUI default chat, PTY GUI-spin fix, 18-dot spectrum, 1 s radio buffer.
+
+What this patch changes on top of that:
+
+**TMOG is 60 Hz live meters.** Summary/performance/list are Loaders (only the open page exists). Sparks paint `Canvas.Immediate` with antialiasing. `tmogPulse()` is a cheap ~0.3 ms tick; the process table still snapshots about once a second. nvme/pch hwmon stays off the live path.
+
+**Spectrum follows the audio.** FFT bands pump on their own (~125 Hz), not behind a status IPC. The strip paints every 8 ms. Each of the 120 columns is its own LED stack: punch up, fall LED by LED. SPECTRUM/CLIAMP labels and extra buffer marks are gone so the meters get the width. `playing` comes from the live pulse, so LEDs light while you hear the station.
+
+**FM dial.** 87.5–108 MHz under the LEDs. Click snaps to the nearest SR preset. `probe_rf_frontend` is `NO RF` on this HP (RTL8822BE is 2.4/5 GHz WiFi, not FM). An RTL-SDR (`0bda:2838`) or `/dev/radio0` is the real RF path; do not pretend WiFi can demodulate broadcast radio.
+
+**MARKETPLACE** sits between CRYPTO and TMOG. Buffer marks on frames that are actually waiting.
+
+Unchanged: GROK TUI as motor, no GGUF in git, ACTION_AUTHORITY NONE, network NONE. Python host edits still need a desktop restart; QML often RELOAD.
+
 ## Patch notes · 2026-09-02 · lag pass
 
 What GitHub had until this push (`fd6e733`, earlier 2026-09-02):

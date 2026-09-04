@@ -560,6 +560,8 @@ Item {
             return "SITE"
         if (objectType === "CRYPTO_DESK")
             return "CRYPTO"
+        if (objectType === "MARKETPLACE_DESK")
+            return "MARKETPLACE"
         if (objectType === "TMOG_DESK")
             return "TMOG"
         if (objectType === "DRAW_DESK" || objectType === "IMAGE")
@@ -593,7 +595,7 @@ Item {
         )
             root.scratchHost().ensureWebEngine()
         root.hostKind = kind
-        if (kind === "CRYPTO" || kind === "TMOG" || kind === "MEDIA" || kind === "DRAW")
+        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "MEDIA" || kind === "DRAW")
             return
         if (
             kind === "CODE"
@@ -830,6 +832,33 @@ Item {
         if (!wasCurrent)
             return
         root.setHostKind(closedKind)
+    }
+
+    function applyCryptoWalletLabel() {
+        var host = root.scratchHost()
+        if (host === null)
+            return
+        var raw = ""
+        if (host.cryptoRailStatus)
+            raw = host.cryptoRailStatus()
+        else if (host.cryptoStatus)
+            raw = host.cryptoStatus()
+        if (!raw)
+            return
+        try {
+            var parsed = JSON.parse(raw)
+            var w = parsed.wallet || {}
+            var label = String(w.label || "")
+            if (!label && w.pubkey) {
+                var key = String(w.pubkey)
+                label = key.length >= 8
+                    ? ("WALLET · " + key.slice(0, 4) + "…" + key.slice(-4))
+                    : ("WALLET · " + key)
+            }
+            if (label)
+                root.cryptoWalletLabel = label
+        } catch (err) {
+        }
     }
 
     function refreshSiteFiles() {
@@ -1222,7 +1251,8 @@ Item {
 
     Component.onCompleted: {
         activate(0)
-        Qt.callLater(root.refreshSiteFiles)
+        root.refreshSiteFiles()
+        root.applyCryptoWalletLabel()
         var host = root.scratchHost()
         if (host !== null && host.watchDesktopWorkspace)
             host.watchDesktopWorkspace()
@@ -1755,6 +1785,7 @@ Item {
             objectName: "workspaceSpawnInstanceButton"
             visible: !root.settingsOpen
                 && root.hostKind !== "CRYPTO"
+                && root.hostKind !== "MARKETPLACE"
                 && root.hostKind !== "TMOG"
                 && root.hostKind !== "MEDIA"
                 && root.hostKind !== "DRAW"
@@ -1897,6 +1928,14 @@ Item {
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 8
         leftLegend: root.frameKindLabel
+        busy: root.chatBusy
+            || root.liveAidState === "QUEUED"
+            || root.liveAidState === "RUNNING"
+            || root.liveAidState === "PREFLIGHT"
+            || root.liveAidState === "GENERATING"
+            || root.liveAidState === "VERIFYING"
+            || root.postDraftBusy
+            || String(root.siteImportStatus).indexOf("IMPORT") === 0
         rightLegend: root.chatBusy
             ? (
                 root.engineTarget === "GROK_WORKER"
@@ -1905,11 +1944,13 @@ Item {
             )
             : (root.hostKind === "CRYPTO"
                 ? ((cryptoPane.item && cryptoPane.item.legend) || "TESTNET")
-                : (
-                    root.currentObjectTitle.length > 0
-                        ? "@current"
-                        : "@workspace"
-                ))
+                : (root.hostKind === "MARKETPLACE"
+                    ? ((marketplacePane.item && marketplacePane.item.legend) || "TESTNET")
+                    : (
+                        root.currentObjectTitle.length > 0
+                            ? "@current"
+                            : "@workspace"
+                    )))
         bottomLeftLegend: ""
         bottomRightLegend: root.editorDirty
             ? (
@@ -1992,6 +2033,7 @@ Item {
                 visible:
                     !root.settingsOpen
                     && root.hostKind !== "CRYPTO"
+                    && root.hostKind !== "MARKETPLACE"
                     && root.hostKind !== "TMOG"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
@@ -2370,6 +2412,24 @@ Item {
             }
 
             Loader {
+                id: marketplacePane
+                objectName: "workspaceMarketplacePane"
+                z: 20
+                anchors.fill: parent
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "MARKETPLACE"
+                visible: active
+                sourceComponent: Component {
+                    MarketplaceSurface {
+                        objectName: "workspaceMarketplacePane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
                 id: tmogPane
                 objectName: "workspaceTmogPane"
                 z: 20
@@ -2563,6 +2623,7 @@ Item {
                 visible:
                     !root.settingsOpen
                     && root.hostKind !== "CRYPTO"
+                    && root.hostKind !== "MARKETPLACE"
                     && root.hostKind !== "TMOG"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
@@ -2743,6 +2804,27 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("CRYPTO")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            text: "MARKETPLACE"
+            color: root.hostKind === "MARKETPLACE" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "MARKETPLACE"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("MARKETPLACE")
             }
         }
 

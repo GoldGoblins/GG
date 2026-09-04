@@ -53,6 +53,14 @@ def main() -> int:
         raise AssertionError("TUI cursor blink still runs before the hole is focused")
     if "def _flush_paint" not in src or "def _row_rect" not in src:
         raise AssertionError("TUI still repaints the full grid on every cell change")
+    if "max_cols" not in src:
+        raise AssertionError("TUI paint still draws columns past the hole")
+    if "_base_cell_w" not in src:
+        raise AssertionError("TUI cell metrics missing")
+    if "float(width) / float(cols)" in src:
+        raise AssertionError("TUI cell stretch still magnifies the composer corner")
+    if "AlignVCenter" not in src:
+        raise AssertionError("TUI glyphs still paint without a cell clip rect")
     if "QThread(self)" in src:
         raise AssertionError("VT QThread is still parented to the Quick item")
     if "def itemChange" not in src or "aboutToQuit" not in src:

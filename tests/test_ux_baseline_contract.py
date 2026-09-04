@@ -259,6 +259,8 @@ def main() -> int:
         "function unloadDesktopShell(",
         "function loadDesktopShell(",
         "function finishShellLoad(",
+        "function hydrateDesktopShell(",
+        "function applyCryptoWalletLabel(",
         "function loadNextShellFile(",
         "Qt.createComponent(",
         'objectName: "workspaceLoader"',
@@ -273,6 +275,9 @@ def main() -> int:
         "parseSurfaceIntent(text)",
         "function beginGrokWorkerStream(",
         'objectName: "grokTuiHost"',
+        "chatChrome.padding",
+        "chatChrome.topChrome",
+        "ScrollBar.AlwaysOff",
         "GrokTuiHole {",
         "GrokWorkStream {",
         "Loader {",
@@ -294,6 +299,26 @@ def main() -> int:
     require(
         "function advanceShellLoad(" not in main_qml,
         "Fake loading ticker still present.",
+    )
+    require(
+        "hydrateDesktop()" in main_qml,
+        "Shell overlay still hides before desktop hydrate.",
+    )
+    require(
+        "utilitySurface.status === Loader.Loading" in main_qml,
+        "Shell overlay still hides before UtilitySurface is ready.",
+    )
+    require(
+        "function applyCryptoWalletLabel(" in workspace_alpha,
+        "Workspace still waits for the CRYPTO tab to show the wallet chip.",
+    )
+    require(
+        "property bool busy: false" in text("qml/components/GgFrame.qml"),
+        "Frame busy mark missing.",
+    )
+    require(
+        "objectName: \"bufferMark\"" in text("qml/components/BufferMark.qml"),
+        "BufferMark component missing.",
     )
 
     for marker in (
@@ -433,16 +458,20 @@ def main() -> int:
         'text: "EXTERNAL"',
         'text: "SITE"',
         'text: "CRYPTO"',
+        'text: "MARKETPLACE"',
         'text: "TMOG"',
         'text: "MEDIA"',
         'text: "DRAW"',
         'hostKind === "CRYPTO"',
+        'hostKind === "MARKETPLACE"',
         'hostKind === "TMOG"',
         'hostKind === "MEDIA"',
         'hostKind === "DRAW"',
+        'objectName: "workspaceMarketplacePane"',
         'objectName: "workspaceTmogPane"',
         'objectName: "workspaceMediaPane"',
         'objectName: "workspaceDrawPane"',
+        "MarketplaceSurface {",
         "MediaSurface {",
         "DrawSurface {",
         "function applyLiveReload()",
@@ -504,6 +533,10 @@ def main() -> int:
     require(
         'objectName: "grokTuiHost"' in grok_tui_hole,
         "GROK TUI hole lost its host id.",
+    )
+    require(
+        "clip: true" in grok_tui_hole,
+        "GROK TUI hole still lets glyphs paint past the right edge.",
     )
     require(
         "ensureWebEngine" in workspace_surface
@@ -604,7 +637,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "TMOG", "MEDIA", "DRAW"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "MEDIA", "DRAW"]',
     ):
         require(
             marker in settings_workspace,
@@ -1307,6 +1340,7 @@ def main() -> int:
     require(
         "Loader {" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"CRYPTO\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"MARKETPLACE\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"TMOG\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml,
         "Unused workspace function panes are still kept alive.",

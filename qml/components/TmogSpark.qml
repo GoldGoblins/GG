@@ -10,9 +10,20 @@ Item {
     property real yMax: 0
     property bool fromZero: true
 
+    function redraw() {
+        if (!root.visible)
+            return
+        if (width < 8 || height < 8)
+            return
+        plot.requestPaint()
+    }
+
     Canvas {
         id: plot
         anchors.fill: parent
+        renderTarget: Canvas.Image
+        renderStrategy: Canvas.Immediate
+        antialiasing: true
         onPaint: {
             var ctx = getContext("2d")
             var w = width
@@ -22,6 +33,8 @@ Item {
                 return
             var gx
             var gy
+            ctx.lineJoin = "round"
+            ctx.lineCap = "round"
             ctx.strokeStyle = root.grid
             ctx.lineWidth = 1
             for (gx = 0; gx <= 6; gx++) {
@@ -86,7 +99,9 @@ Item {
                     ctx.lineTo(sx, sy)
             }
             ctx.strokeStyle = root.stroke
-            ctx.lineWidth = 1.4
+            ctx.lineWidth = 1.6
+            ctx.lineJoin = "round"
+            ctx.lineCap = "round"
             ctx.stroke()
             var marks = root.marks || []
             var n = pts.length
@@ -119,10 +134,14 @@ Item {
         }
     }
 
-    onValuesChanged: plot.requestPaint()
-    onMarksChanged: plot.requestPaint()
-    onYMaxChanged: plot.requestPaint()
-    onFromZeroChanged: plot.requestPaint()
-    onWidthChanged: plot.requestPaint()
-    onHeightChanged: plot.requestPaint()
+    onValuesChanged: root.redraw()
+    onMarksChanged: root.redraw()
+    onYMaxChanged: root.redraw()
+    onFromZeroChanged: root.redraw()
+    onWidthChanged: root.redraw()
+    onHeightChanged: root.redraw()
+    onVisibleChanged: {
+        if (visible)
+            root.redraw()
+    }
 }
