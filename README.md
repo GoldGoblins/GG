@@ -17,13 +17,19 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
-## Patch notes · 2026-09-05 · mandate rail + visible WEB operator
+## Patch notes · 2026-09-05 · marketplace, work lamps, mandate rail, WEB operator
 
-What GitHub had until this push (`269f430`, 4 Sep 2026): 60 Hz TMOG, live spectrum, FM dial, MARKETPLACE, GROK TUI default.
+What GitHub had until this push (`269f430`, 4 Sep 2026): 60 Hz TMOG meters, live spectrum, FM dial, a MARKETPLACE *tab* between CRYPTO and TMOG, BufferMark on frames that wait, GROK TUI default.
 
-What this patch adds on top of that:
+What landed on top of that (this is the full `269f430` → HEAD delta, not only the mandate/WEB slice):
 
-**Mandate rail.** AUTHORITY stays NONE. TOOLS stay GREEN TYPED, WRITE stays YELLOW CURRENT. A new **MANDATE** row shows NONE, WAIT, or TASK_SCOPED after `/approve-mandate`. Yellow/red work needs an explicit human yes; it is never a standing red tool belt.
+**MARKETPLACE is a catalog.** Pages CATALOG / REGISTER / RECEIPT / ELEMENTS / LIVES / ACTIVITY. Listings are ELEMENT, SUBSTANCE or OBJECT. Periodic elements mint as paper receipts (`list_element`). Objects carry composition (parts + mass) and previous lives; `rebirth_item` mints a new object that inherits those parts. Identity-hash stays on paper buy; state-hash moves. Merkle catalog, paper/testnet only, authority NONE. No nested MARKETPLACE GgFrame.
+
+**Colored work lamps.** Chat footer has five dots — CPU (green), GPU (purple when present), NET (gold), DISK (red), CHAT (silver). They blink from the same 60 Hz `tmogPulse` when that resource is actually working. CHAT also follows GROK TUI I/O (`chatIoActive`) without double-stepping the pulse. Composer Send becomes a marching BufferMark + Stop while busy. TMOG DISK card has a red lamp on the hanging legend when disk I/O is live. GgFrame BufferMark still only shows when that frame is waiting.
+
+**TMOG list pages are real rows.** SYSTEM / USERS / CONNECTIONS / DISK / FREQ / STARTUP / APPS / SERVICES fill with dict rows, not bare strings. `TmogRow` for lists, `TmogRail` hanging legends, right-click copy, scroll inside the frame. IPv4/IPv6 decode, `core_count`, `gpu_busy`, RAPL energy. Disk fill bar and spring-damped net/disk sparks stay.
+
+**Mandate rail.** AUTHORITY stays NONE. TOOLS stay GREEN TYPED, WRITE stays YELLOW CURRENT. A new **MANDATE** row shows NONE, WAIT, or TASK_SCOPED after `/approve-mandate`. Yellow/red work needs an explicit human yes; it is never a standing red tool belt. Machine graph is 54 nodes / 165 edges (call-102–105).
 
 **Visible WEB operator.** Agent web actions (OPEN, SNAPSHOT, CLICK, TYPE, RELOAD, BACK) run in the workspace **WEB** tab, not a hidden browser. Password fields are blocked. You type one.com / wp-admin logins yourself in that pane.
 
@@ -33,7 +39,7 @@ What this patch adds on top of that:
 
 **MEDIA / UTILITIES chrome.** `MEDIA / UTILITIES` and `RADIO · NO RF` hang on the strip frame like the other GgFrames.
 
-**Screenshot.** `docs/gg-ai-desktop.png` is this drop: mandate row, WEB host, MEDIA/UTILITIES hanging legends, GROK TUI.
+**Screenshot.** `docs/gg-ai-desktop.png` is the desk capture for this drop: mandate row, WEB host, hanging MEDIA/UTILITIES legends, GROK TUI. Marketplace pages and the work lamps are in the tree the screenshot sits on.
 
 Unchanged: GROK TUI as motor, no GGUF in git, `GENERAL_ACTION_AUTHORITY` NONE. Python host edits still need a desktop restart; QML often RELOAD.
 
