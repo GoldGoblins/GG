@@ -31,6 +31,8 @@ What this patch changes on top of that:
 
 **MARKETPLACE** sits between CRYPTO and TMOG. Buffer marks on frames that are actually waiting.
 
+**Screenshot.** `docs/gg-ai-desktop.png` is this drop: TMOG 60 Hz meters, live spectrum, FM dial, MARKETPLACE, MEDIA/UTILITIES, CRYPTO, GROK TUI.
+
 Unchanged: GROK TUI as motor, no GGUF in git, ACTION_AUTHORITY NONE, network NONE. Python host edits still need a desktop restart; QML often RELOAD.
 
 ## Patch notes · 2026-09-02 · lag pass
@@ -76,7 +78,7 @@ What this patch adds on top of that:
 
 **Shell load.** Startup walks the real QML dependency graph. No fake timer, no unrelated vendor dump in the load queue. RELOAD still uses `shellNonce`.
 
-Unchanged: GROK TUI as motor, no GGUF in git, no `/shell` or `/exec`, network authority NONE, ACTION_AUTHORITY NONE. The screenshot is still the 27 Aug drop; the running program is this patch.
+Unchanged: GROK TUI as motor, no GGUF in git, no `/shell` or `/exec`, network authority NONE, ACTION_AUTHORITY NONE.
 
 ## Control & Bootstrap Plane v1
 
