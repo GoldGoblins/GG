@@ -117,6 +117,10 @@ def main() -> int:
         raise AssertionError("web operator report missing")
     if "_arm_web_operator" not in src:
         raise AssertionError("web operator watcher missing")
+    if "_arm_desktop_operator" not in src:
+        raise AssertionError("desktop operator watcher missing")
+    if "_reload_web_operator" not in src:
+        raise AssertionError("web operator module reload missing")
     if "_poll_import_drop" not in src:
         raise AssertionError("site-import drop watcher missing")
     if "ensure_import_drop" not in src:
@@ -183,6 +187,42 @@ def main() -> int:
         raise AssertionError("GROK TUI grid still boots before the TUI hole is shown")
     if "def ensureWebEngine" not in src:
         raise AssertionError("Chromium still boots with the desktop process")
+    desk_find = src[
+        src.index("def _desk_list_names") : src.index("def _desk_find_label")
+    ]
+    if "findChildren(" in desk_find:
+        raise AssertionError("FIND still enumerates Chromium via findChildren")
+    find_fn = src[src.index("def _desk_find") : src.index("def _desk_class_name")]
+    if "findChild(" in find_fn:
+        raise AssertionError("FIND still uses QObject.findChild into Chromium")
+    vis_fn = src[
+        src.index("def _desk_visible_items") : src.index("def _desk_item_shown")
+    ]
+    if 'property("workspace")' not in vis_fn:
+        raise AssertionError("FIND still skips workspaceLoader.item chrome")
+    if "def _desk_walk_visible" not in src or "childItems" not in src:
+        raise AssertionError("FIND does not walk QML childItems")
+    if "RenderWidget" not in src:
+        raise AssertionError("FIND still descends into Chromium render widgets")
+    if '"webPane"' not in src[src.index("def _desk_is_heavy_surface") : src.index("def _desk_child_items")]:
+        raise AssertionError("FIND still walks WebPane Chromium children")
+    child_fn = src[src.index("def _desk_child_items") : src.index("def _desk_walk_visible")]
+    if "item.children()" in child_fn:
+        raise AssertionError("FIND still enumerates QObject.children into Chromium")
+    if 'grokTuiHost' not in src[src.index("def _desk_is_heavy_surface") : src.index("def _desk_child_items")]:
+        raise AssertionError("FIND still walks the TUI cell grid")
+    if '"steps": 22' not in src:
+        raise AssertionError("desk pointer still jumps in 14 frames")
+    if "def _desk_send_char" not in src or 'job.get("typing")' not in src:
+        raise AssertionError("desk TYPE still dumps the whole string on the GUI thread")
+    if "postEvent" not in src[src.index("def _desk_send_char") : src.index("def _desk_send_type")]:
+        raise AssertionError("desk TYPE still deadlocks the TUI with QTest.keyClick")
+    snap = src[src.index('if action == "SNAPSHOT"') : src.index('if action == "KEY"')]
+    if "names = self._desk_list_names" not in snap:
+        raise AssertionError("desk snapshot still has no visible label map")
+    grab = src[src.index("def _desk_grab") : src.index("def _desk_send_move")]
+    if "grabWindow" not in grab:
+        raise AssertionError("desk snapshot still skips QQuickWindow.grabWindow")
     if "def _apply_tui_winsize" not in src:
         raise AssertionError("TUI resize still SIGWINCH on every layout twitch")
     if "session.get(\"cols\") is None" not in src:

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+_PROJECT = Path(__file__).resolve().parents[1]
+if str(_PROJECT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT))
 
 from backend import web_surface
 
@@ -20,7 +26,61 @@ COMMAND_NAME = "command.json"
 ACTIVE_NAME = "command.active.json"
 RESULT_NAME = "result.json"
 
-ACTIONS = ("OPEN", "SNAPSHOT", "CLICK", "TYPE", "RELOAD", "BACK")
+ACTIONS = (
+    "OPEN",
+    "SNAPSHOT",
+    "CLICK",
+    "TYPE",
+    "RELOAD",
+    "BACK",
+    "MOVE",
+    "HOVER",
+    "SCROLL",
+    "WAIT",
+    "STAGE",
+    "KEY",
+    "TAB_NEW",
+    "TAB_CLOSE",
+    "TAB_NEXT",
+    "TAB_PREV",
+    "FORWARD",
+    "SELECT",
+)
+GREEN_ACTIONS = frozenset(
+    {
+        "SNAPSHOT",
+        "RELOAD",
+        "BACK",
+        "MOVE",
+        "WAIT",
+        "STAGE",
+        "TAB_NEW",
+        "TAB_CLOSE",
+        "TAB_NEXT",
+        "TAB_PREV",
+        "FORWARD",
+    }
+)
+YELLOW_ACTIONS = frozenset(
+    {"CLICK", "TYPE", "HOVER", "SCROLL", "OPEN", "KEY", "SELECT"}
+)
+KEYS = frozenset(
+    {
+        "Enter",
+        "Tab",
+        "Escape",
+        "Space",
+        "Backspace",
+        "Delete",
+        "Home",
+        "End",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+    }
+)
+VIEW_NAME = "view.png"
 RED_HOSTS = (
     "one.com",
     "www.one.com",
@@ -32,6 +92,8 @@ _PASSWORD_RE = re.compile(
     re.IGNORECASE,
 )
 _SHA_LIKE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_COORD_LO = -8000
+_COORD_HI = 8000
 
 
 class WebOperatorError(ValueError):
@@ -70,6 +132,17 @@ def _host(url: str) -> str:
     return str(urlparse(url).hostname or "").lower()
 
 
+def _coord(value: Any, label: str) -> int:
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise WebOperatorError(label + "_INVALID")
+    number = int(value)
+    if number < _COORD_LO or number > _COORD_HI:
+        raise WebOperatorError(label + "_RANGE")
+    return number
+
+
 def risk_class_for(action: str, url: str) -> str:
     host = _host(url)
     path = str(urlparse(url).path or "").lower()
@@ -77,13 +150,11 @@ def risk_class_for(action: str, url: str) -> str:
         return "RED"
     if "wp-login.php" in path or "/wp-admin" in path:
         return "RED"
-    if action in {"CLICK", "TYPE"}:
+    if action in YELLOW_ACTIONS:
         return "YELLOW"
-    if action == "OPEN" and host in {"goldgoblins.se", "www.goldgoblins.se"}:
-        return "YELLOW"
-    if action == "OPEN":
-        return "YELLOW"
-    return "GREEN"
+    if action in GREEN_ACTIONS:
+        return "GREEN"
+    return "YELLOW"
 
 
 def password_selector(selector: str) -> bool:
@@ -114,20 +185,40 @@ def validate_command(value: Any) -> dict[str, Any]:
         raise WebOperatorError("SELECTOR_TOO_LONG")
     if "javascript:" in selector.lower() or "<" in selector:
         raise WebOperatorError("SELECTOR_FORBIDDEN")
-    if action == "OPEN":
+    coord_x = _coord(value.get("x"), "X")
+    coord_y = _coord(value.get("y"), "Y")
+    coord_dx = _coord(value.get("dx"), "DX")
+    coord_dy = _coord(value.get("dy"), "DY")
+    if action in {"OPEN", "TAB_NEW"} and url:
         normalized = web_surface.normalize_browse_url(url)
         if not normalized:
             raise WebOperatorError("URL_NOT_ALLOWED")
         url = normalized
     elif url and not web_surface.browse_url_allowed(url) and url != "about:blank":
         raise WebOperatorError("URL_NOT_ALLOWED")
-    if action in {"CLICK", "TYPE"} and not selector.strip():
+    if action in {"CLICK", "TYPE", "HOVER", "SELECT"} and not selector.strip():
         raise WebOperatorError("SELECTOR_REQUIRED")
+    if action == "MOVE" and not selector.strip() and coord_x == 0 and coord_y == 0:
+        raise WebOperatorError("MOVE_TARGET_REQUIRED")
     if action == "TYPE" and password_selector(selector):
         raise WebOperatorError("PASSWORD_FIELD_FORBIDDEN")
     if action == "TYPE" and not text:
         raise WebOperatorError("TEXT_REQUIRED")
+    if (
+        action == "SCROLL"
+        and coord_dx == 0
+        and coord_dy == 0
+        and not selector.strip()
+    ):
+        raise WebOperatorError("SCROLL_DELTA_REQUIRED")
+    if action == "KEY":
+        if text not in KEYS:
+            raise WebOperatorError("KEY_INVALID")
+    if action == "SELECT" and not text:
+        raise WebOperatorError("TEXT_REQUIRED")
     risk = risk_class_for(action, url)
+    if action == "TAB_NEW" and (url or selector.strip()):
+        risk = "YELLOW"
     return {
         "schema": SCHEMA_COMMAND,
         "command_id": command_id,
@@ -135,8 +226,13 @@ def validate_command(value: Any) -> dict[str, Any]:
         "url": url,
         "selector": selector.strip(),
         "text": text,
+        "x": coord_x,
+        "y": coord_y,
+        "dx": coord_dx,
+        "dy": coord_dy,
         "risk_class": risk,
         "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        "visible_cursor": True,
     }
 
 
@@ -146,6 +242,10 @@ def make_command(
     url: str = "",
     selector: str = "",
     text: str = "",
+    x: int = 0,
+    y: int = 0,
+    dx: int = 0,
+    dy: int = 0,
 ) -> dict[str, Any]:
     return validate_command(
         {
@@ -155,6 +255,10 @@ def make_command(
             "url": url,
             "selector": selector,
             "text": text,
+            "x": x,
+            "y": y,
+            "dx": dx,
+            "dy": dy,
         }
     )
 
@@ -168,7 +272,11 @@ def make_result(
     title: str = "",
     text: str = "",
     links: list[Any] | None = None,
+    image: str = "",
 ) -> dict[str, Any]:
+    view = ROOT / VIEW_NAME
+    if not image and view.is_file():
+        image = str(view)
     return {
         "schema": SCHEMA_RESULT,
         "command_id": command.get("command_id"),
@@ -180,8 +288,10 @@ def make_result(
         "title": title,
         "text": text[:8000],
         "links": list(links or [])[:40],
+        "image": image,
         "general_action_authority": GENERAL_ACTION_AUTHORITY,
         "visible_web_tab": True,
+        "visible_cursor": True,
     }
 
 
@@ -250,12 +360,28 @@ def submit(command: dict[str, Any], *, timeout: float = 25.0) -> dict[str, Any]:
                 time.sleep(0.05)
                 continue
             if value.get("command_id") == validated["command_id"]:
+                if (
+                    value.get("reason_code") == "OPERATOR_BUSY"
+                    and time.monotonic() + 0.5 < deadline
+                ):
+                    time.sleep(0.4)
+                    if command_path.exists() or (ROOT / ACTIVE_NAME).exists():
+                        continue
+                    try:
+                        result_path.unlink()
+                    except OSError:
+                        pass
+                    try:
+                        _write_exclusive(command_path, _canonical(validated))
+                    except WebOperatorError:
+                        continue
+                    continue
                 return value
         time.sleep(0.05)
     raise WebOperatorError("OPERATOR_TIMEOUT")
 
 
-def open_url(url: str, *, timeout: float = 25.0) -> dict[str, Any]:
+def open_url(url: str, *, timeout: float = 40.0) -> dict[str, Any]:
     return submit(make_command("OPEN", url=url), timeout=timeout)
 
 
@@ -267,7 +393,7 @@ def click(selector: str, *, timeout: float = 25.0) -> dict[str, Any]:
     return submit(make_command("CLICK", selector=selector), timeout=timeout)
 
 
-def type_text(selector: str, text: str, *, timeout: float = 25.0) -> dict[str, Any]:
+def type_text(selector: str, text: str, *, timeout: float = 40.0) -> dict[str, Any]:
     return submit(
         make_command("TYPE", selector=selector, text=text),
         timeout=timeout,
@@ -280,3 +406,225 @@ def reload_page(*, timeout: float = 25.0) -> dict[str, Any]:
 
 def go_back(*, timeout: float = 25.0) -> dict[str, Any]:
     return submit(make_command("BACK"), timeout=timeout)
+
+
+def move(
+    *,
+    selector: str = "",
+    x: int = 0,
+    y: int = 0,
+    timeout: float = 25.0,
+) -> dict[str, Any]:
+    return submit(
+        make_command("MOVE", selector=selector, x=x, y=y),
+        timeout=timeout,
+    )
+
+
+def hover(selector: str, *, timeout: float = 25.0) -> dict[str, Any]:
+    return submit(make_command("HOVER", selector=selector), timeout=timeout)
+
+
+def scroll(
+    *,
+    dx: int = 0,
+    dy: int = 0,
+    selector: str = "",
+    timeout: float = 25.0,
+) -> dict[str, Any]:
+    return submit(
+        make_command("SCROLL", dx=dx, dy=dy, selector=selector),
+        timeout=timeout,
+    )
+
+
+def wait_load(*, timeout: float = 40.0) -> dict[str, Any]:
+    return submit(make_command("WAIT"), timeout=timeout)
+
+
+def stage(*, timeout: float = 25.0) -> dict[str, Any]:
+    return submit(make_command("STAGE"), timeout=timeout)
+
+
+def press_key(
+    key: str,
+    *,
+    selector: str = "",
+    timeout: float = 25.0,
+) -> dict[str, Any]:
+    return submit(
+        make_command("KEY", selector=selector, text=key),
+        timeout=timeout,
+    )
+
+
+def tab_new(
+    *,
+    url: str = "",
+    selector: str = "",
+    timeout: float = 40.0,
+) -> dict[str, Any]:
+    return submit(
+        make_command("TAB_NEW", url=url, selector=selector),
+        timeout=timeout,
+    )
+
+
+def tab_close(*, timeout: float = 15.0) -> dict[str, Any]:
+    return submit(make_command("TAB_CLOSE"), timeout=timeout)
+
+
+def tab_next(*, timeout: float = 15.0) -> dict[str, Any]:
+    return submit(make_command("TAB_NEXT"), timeout=timeout)
+
+
+def tab_prev(*, timeout: float = 15.0) -> dict[str, Any]:
+    return submit(make_command("TAB_PREV"), timeout=timeout)
+
+
+def go_forward(*, timeout: float = 25.0) -> dict[str, Any]:
+    return submit(make_command("FORWARD"), timeout=timeout)
+
+
+def select_option(
+    selector: str,
+    text: str,
+    *,
+    timeout: float = 25.0,
+) -> dict[str, Any]:
+    return submit(
+        make_command("SELECT", selector=selector, text=text),
+        timeout=timeout,
+    )
+
+
+def _print_result(value: dict[str, Any]) -> int:
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    return 0 if value.get("ok") else 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="gg-web",
+        description=(
+            "Drive the GG AI Desktop WEB tab. Actions are visible "
+            "(agent cursor). Hidden HTTP is not this path."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Seconds to wait for the visible pane (default per action).",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    p_open = sub.add_parser("open", help="OPEN url in the WEB tab")
+    p_open.add_argument("url")
+    sub.add_parser("snapshot", help="SNAPSHOT the visible page")
+    p_click = sub.add_parser("click", help="CLICK selector")
+    p_click.add_argument("selector")
+    p_type = sub.add_parser("type", help="TYPE into selector")
+    p_type.add_argument("selector")
+    p_type.add_argument("text")
+    sub.add_parser("reload", help="RELOAD")
+    sub.add_parser("back", help="BACK")
+    p_move = sub.add_parser("move", help="MOVE the agent cursor")
+    p_move.add_argument("--selector", default="")
+    p_move.add_argument("--x", type=int, default=0)
+    p_move.add_argument("--y", type=int, default=0)
+    p_hover = sub.add_parser("hover", help="HOVER selector")
+    p_hover.add_argument("selector")
+    p_scroll = sub.add_parser("scroll", help="SCROLL the page")
+    p_scroll.add_argument("--dx", type=int, default=0)
+    p_scroll.add_argument("--dy", type=int, default=0)
+    p_scroll.add_argument("--selector", default="")
+    sub.add_parser("wait", help="WAIT for load")
+    sub.add_parser("stage", help="Load the local visible-WEB rehearsal page")
+    p_key = sub.add_parser("key", help="KEY Enter/Tab/Escape/…")
+    p_key.add_argument("key")
+    p_key.add_argument("--selector", default="")
+    p_tab_new = sub.add_parser("tab-new", help="Open a new WEB tab")
+    p_tab_new.add_argument("url", nargs="?", default="")
+    p_tab_new.add_argument("--selector", default="")
+    sub.add_parser("tab-close", help="Close the current WEB tab")
+    sub.add_parser("tab-next", help="Focus the next WEB tab")
+    sub.add_parser("tab-prev", help="Focus the previous WEB tab")
+    sub.add_parser("forward", help="FORWARD in history")
+    p_sel = sub.add_parser("select", help="SELECT a dropdown option")
+    p_sel.add_argument("selector")
+    p_sel.add_argument("text")
+    args = parser.parse_args(argv)
+    timeout = args.timeout
+    action = str(args.action)
+    try:
+        if action == "open":
+            result = open_url(args.url, timeout=timeout or 40.0)
+        elif action == "snapshot":
+            result = snapshot(timeout=timeout or 25.0)
+        elif action == "click":
+            result = click(args.selector, timeout=timeout or 25.0)
+        elif action == "type":
+            result = type_text(args.selector, args.text, timeout=timeout or 40.0)
+        elif action == "reload":
+            result = reload_page(timeout=timeout or 25.0)
+        elif action == "back":
+            result = go_back(timeout=timeout or 25.0)
+        elif action == "move":
+            result = move(
+                selector=args.selector,
+                x=args.x,
+                y=args.y,
+                timeout=timeout or 25.0,
+            )
+        elif action == "hover":
+            result = hover(args.selector, timeout=timeout or 25.0)
+        elif action == "scroll":
+            result = scroll(
+                dx=args.dx,
+                dy=args.dy,
+                selector=args.selector,
+                timeout=timeout or 25.0,
+            )
+        elif action == "wait":
+            result = wait_load(timeout=timeout or 40.0)
+        elif action == "stage":
+            result = stage(timeout=timeout or 25.0)
+        elif action == "key":
+            result = press_key(
+                args.key,
+                selector=args.selector,
+                timeout=timeout or 25.0,
+            )
+        elif action == "tab-new":
+            result = tab_new(
+                url=args.url,
+                selector=args.selector,
+                timeout=timeout or 40.0,
+            )
+        elif action == "tab-close":
+            result = tab_close(timeout=timeout or 15.0)
+        elif action == "tab-next":
+            result = tab_next(timeout=timeout or 15.0)
+        elif action == "tab-prev":
+            result = tab_prev(timeout=timeout or 15.0)
+        elif action == "forward":
+            result = go_forward(timeout=timeout or 25.0)
+        elif action == "select":
+            result = select_option(
+                args.selector,
+                args.text,
+                timeout=timeout or 25.0,
+            )
+        else:
+            raise WebOperatorError("ACTION_INVALID")
+    except WebOperatorError as exc:
+        sys.stderr.write("WEB_OPERATOR " + str(exc) + "\n")
+        return 1
+    return _print_result(result)
+
+
+if __name__ == "__main__":
+    project = Path(__file__).resolve().parents[1]
+    if str(project) not in sys.path:
+        sys.path.insert(0, str(project))
+    raise SystemExit(main())

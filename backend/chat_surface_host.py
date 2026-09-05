@@ -158,6 +158,11 @@ class ChatSurfaceHost(QObject):
         self._wallet_timer.start()
         self._qml_watch: QFileSystemWatcher | None = None
         self._web_op_watch: QFileSystemWatcher | None = None
+        self._desk_op_watch: QFileSystemWatcher | None = None
+        self._desk_job: dict[str, Any] | None = None
+        self._desk_timer = QTimer(self)
+        self._desk_timer.setInterval(16)
+        self._desk_timer.timeout.connect(self._desk_tick)
         self._imported_zips: set[str] = set()
         self._qml_reload = QTimer(self)
         self._qml_reload.setSingleShot(True)
@@ -1454,6 +1459,7 @@ class ChatSurfaceHost(QObject):
         watcher.fileChanged.connect(self._on_live_file)
         self._fs = watcher
         self._arm_web_operator()
+        self._arm_desktop_operator()
         self._poll_import_drop()
 
     @Slot(str)
@@ -1650,8 +1656,25 @@ class ChatSurfaceHost(QObject):
     def _on_web_operator_dir(self, _directory: str) -> None:
         self._poll_web_operator()
 
-    def _poll_web_operator(self) -> None:
+    def _reload_web_operator(self):
+        import importlib
+
         from backend import web_operator
+
+        path = Path(web_operator.__file__)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return web_operator
+        previous = getattr(self, "_web_op_mtime", 0.0)
+        if mtime != previous:
+            module = importlib.reload(web_operator)
+            self._web_op_mtime = mtime
+            return module
+        return web_operator
+
+    def _poll_web_operator(self) -> None:
+        web_operator = self._reload_web_operator()
 
         command = web_operator.take_command()
         if command is None:
@@ -1660,9 +1683,741 @@ class ChatSurfaceHost(QObject):
             json.dumps(command, ensure_ascii=False, separators=(",", ":"))
         )
 
+    def _arm_desktop_operator(self) -> None:
+        from backend import desktop_operator
+
+        desktop_operator.ensure_root()
+        if self._desk_op_watch is not None:
+            self._poll_desktop_operator()
+            return
+        watcher = QFileSystemWatcher(self)
+        watcher.addPath(str(desktop_operator.ROOT))
+        watcher.directoryChanged.connect(self._on_desktop_operator_dir)
+        self._desk_op_watch = watcher
+        self._poll_desktop_operator()
+
+    def _on_desktop_operator_dir(self, _directory: str) -> None:
+        self._poll_desktop_operator()
+
+    def _poll_desktop_operator(self) -> None:
+        from backend import desktop_operator
+
+        if self._desk_job is not None:
+            return
+        command = desktop_operator.take_command()
+        if command is None:
+            return
+        self._desk_start(command)
+
+    def _desk_window(self):
+        hole = self._tui_hole()
+        if hole is not None:
+            win = hole.window()
+            if win is not None:
+                return win
+        root = self._qml_root
+        if root is not None and hasattr(root, "window"):
+            try:
+                win = root.window()
+            except Exception:
+                win = None
+            if win is not None:
+                return win
+        from PySide6.QtGui import QGuiApplication
+
+        wins = QGuiApplication.topLevelWindows()
+        return wins[0] if wins else None
+
+    def _desk_find(self, name: str):
+        if not name:
+            return None
+        for item in self._desk_visible_items():
+            if self._desk_item_name(item) == name:
+                return item
+        return None
+
+    def _desk_class_name(self, item) -> str:
+        try:
+            meta = item.metaObject()
+            if meta is not None:
+                return str(meta.className() or "")
+        except Exception:
+            pass
+        return type(item).__name__
+
+    def _desk_is_web_surface(self, item) -> bool:
+        cls = self._desk_class_name(item)
+        return any(
+            token in cls
+            for token in ("WebEngine", "WebView", "Chromium", "RenderWidget")
+        )
+
+    def _desk_item_name(self, item) -> str:
+        obj = str(item.objectName() or "")
+        if obj:
+            return obj
+        value = item.property("objectName")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return ""
+
+    def _desk_is_heavy_surface(self, item) -> bool:
+        if self._desk_is_web_surface(item):
+            return True
+        name = self._desk_item_name(item)
+        if name in {
+            "grokTuiHost",
+            "webPane",
+            "webPaneLoader",
+            "webAgentCursor",
+            "chatActivityStream",
+            "chatArtifactPane",
+            "workspaceCodeEditor",
+            "workspaceCodeScroll",
+            "workspaceCryptoPane",
+            "workspaceTmogPane",
+            "workspaceMediaPane",
+            "workspaceDrawPane",
+            "workspaceMarketplacePane",
+        }:
+            return True
+        cls = self._desk_class_name(item)
+        return any(
+            token in cls for token in ("TerminalGrid", "TuiHole", "VtHost")
+        )
+
+    def _desk_child_items(self, item) -> list:
+        if item is None:
+            return []
+        kids = None
+        attr = getattr(item, "childItems", None)
+        if callable(attr):
+            try:
+                kids = attr()
+            except Exception:
+                kids = None
+        elif attr is not None:
+            kids = attr
+        if kids is None:
+            try:
+                kids = item.property("childItems")
+            except Exception:
+                kids = None
+        out: list = []
+        if kids:
+            try:
+                out = list(kids)
+            except Exception:
+                out = []
+        loaded = self._desk_loader_item(item)
+        if loaded is not None and loaded not in out:
+            out.append(loaded)
+        return out
+
+    def _desk_loader_item(self, item):
+        if item is None:
+            return None
+        loaded = None
+        try:
+            loaded = item.property("item")
+        except Exception:
+            loaded = None
+        if loaded is None:
+            getter = getattr(item, "item", None)
+            if callable(getter):
+                try:
+                    loaded = getter()
+                except Exception:
+                    loaded = None
+        if loaded is None or loaded is item:
+            return None
+        return loaded
+
+    def _desk_walk_visible(self, item, depth: int, acc: list) -> None:
+        if item is None or depth > 32 or len(acc) >= 200:
+            return
+        vis = item.property("visible")
+        if vis is False:
+            return
+        named = bool(self._desk_item_name(item) or self._desk_item_label(item))
+        if named and item not in acc:
+            acc.append(item)
+        if self._desk_is_heavy_surface(item):
+            if self._desk_item_name(item) == "grokTuiHost":
+                for child in self._desk_child_items(item):
+                    child_name = self._desk_item_name(child)
+                    child_label = self._desk_item_label(child)
+                    if (child_name or child_label) and child not in acc:
+                        acc.append(child)
+            return
+        for child in self._desk_child_items(item):
+            self._desk_walk_visible(child, depth + 1, acc)
+
+    def _desk_content_item(self):
+        win = self._desk_window()
+        for source in (win, self._qml_root):
+            if source is None:
+                continue
+            attr = getattr(source, "contentItem", None)
+            content = None
+            if callable(attr):
+                try:
+                    content = attr()
+                except Exception:
+                    content = None
+            elif attr is not None:
+                content = attr
+            if content is None:
+                try:
+                    content = source.property("contentItem")
+                except Exception:
+                    content = None
+            if content is not None:
+                return content
+        return None
+
+    def _desk_visible_items(self) -> list:
+        acc: list = []
+        root = self._qml_root
+        workspace = None
+        if root is not None:
+            try:
+                workspace = root.property("workspace")
+            except Exception:
+                workspace = None
+        if workspace is not None:
+            self._desk_walk_visible(workspace, 0, acc)
+        content = self._desk_content_item()
+        if content is not None:
+            self._desk_walk_visible(content, 0, acc)
+        if root is not None and root is not content:
+            self._desk_walk_visible(root, 0, acc)
+        return acc
+
+    def _desk_item_shown(self, item) -> bool:
+        if item is None or self._desk_is_web_surface(item):
+            return False
+        vis = item.property("visible")
+        if vis is False:
+            return False
+        try:
+            if float(item.property("width") or 0) <= 0:
+                return False
+            if float(item.property("height") or 0) <= 0:
+                return False
+        except (TypeError, ValueError):
+            pass
+        return True
+
+    def _desk_item_label(self, item) -> str:
+        for key in ("text", "placeholderText", "title"):
+            value = item.property(key)
+            if isinstance(value, str):
+                label = value.strip()
+                if label and label != "|":
+                    return label
+        return ""
+
+    def _desk_list_names(self, query: str) -> list[str]:
+        needle = query.lower()
+        names: list[str] = []
+        seen: set[str] = set()
+        for item in self._desk_visible_items():
+            if not self._desk_item_shown(item):
+                continue
+            obj = self._desk_item_name(item)
+            label = self._desk_item_label(item)
+            hay = (obj + " " + label).lower()
+            if needle and needle not in hay:
+                continue
+            try:
+                x, y = self._desk_point(item)
+            except Exception:
+                continue
+            if label:
+                row = label.replace("\n", " ")[:60] + " @" + str(x) + "," + str(y)
+                if obj:
+                    row += " [" + obj + "]"
+            elif obj:
+                row = obj + " @" + str(x) + "," + str(y)
+            else:
+                continue
+            if row in seen:
+                continue
+            seen.add(row)
+            names.append(row)
+            if len(names) >= 120:
+                break
+        return names
+
+    def _desk_find_label(self, query: str):
+        if not query:
+            return None
+        needle = query.strip().lower()
+        exact = None
+        partial = None
+        for item in self._desk_visible_items():
+            if not self._desk_item_shown(item):
+                continue
+            label = self._desk_item_label(item)
+            if not label:
+                continue
+            low = label.strip().lower()
+            if low == needle:
+                exact = item
+                break
+            if partial is None and needle in low and len(label) < 80:
+                partial = item
+        return exact or partial
+
+    def _desk_point(self, item) -> tuple[int, int]:
+        from PySide6.QtCore import QPoint, QPointF
+
+        width = float(item.property("width") or 0)
+        height = float(item.property("height") or 0)
+        if width <= 0:
+            width = 1.0
+        if height <= 0:
+            height = 1.0
+        local = QPointF(width / 2.0, height / 2.0)
+        content = self._desk_content_item()
+        if content is not None and hasattr(item, "mapToItem"):
+            try:
+                point = item.mapToItem(content, local)
+                if hasattr(point, "x"):
+                    return int(point.x()), int(point.y())
+            except Exception:
+                pass
+        win = item.window() if hasattr(item, "window") else None
+        if win is not None and hasattr(item, "mapToGlobal"):
+            glob = item.mapToGlobal(local)
+            if hasattr(glob, "toPoint"):
+                glob = glob.toPoint()
+            elif not isinstance(glob, QPoint):
+                glob = QPoint(int(glob.x()), int(glob.y()))
+            if hasattr(win, "mapFromGlobal"):
+                loc = win.mapFromGlobal(glob)
+                return int(loc.x()), int(loc.y())
+        raise RuntimeError("MAP_FAIL")
+
+    def _desk_set_cursor(self, x: int, y: int, shape: str) -> None:
+        root = self._qml_root
+        if root is None:
+            return
+        root.setProperty("deskX", float(x))
+        root.setProperty("deskY", float(y))
+        if shape:
+            root.setProperty("deskShape", shape)
+        root.setProperty("deskFromChrome", False)
+
+    def _desk_current_cursor(self) -> tuple[int, int]:
+        root = self._qml_root
+        if root is None:
+            return 420, 240
+        try:
+            return int(root.property("deskX") or 420), int(
+                root.property("deskY") or 240
+            )
+        except (TypeError, ValueError):
+            return 420, 240
+
+    def _desk_finish(self, cmd: dict[str, Any], **fields: Any) -> None:
+        from backend import desktop_operator
+
+        self._desk_job = None
+        self._desk_timer.stop()
+        desktop_operator.write_result(desktop_operator.make_result(cmd, **fields))
+
+    def _desk_start(self, cmd: dict[str, Any]) -> None:
+        from backend import desktop_operator
+
+        action = str(cmd.get("action") or "")
+        if action == "FIND":
+            query = str(cmd.get("text") or cmd.get("name") or "")
+            names = self._desk_list_names(query)
+            self._desk_finish(
+                cmd,
+                ok=True,
+                reason_code="FOUND",
+                text=query,
+                names=names,
+            )
+            return
+        if action == "SNAPSHOT":
+            path = str(desktop_operator.ROOT / desktop_operator.VIEW_NAME)
+            ok = self._desk_grab(path)
+            if not ok:
+                ok = self._desk_grab_screen(path)
+            x, y = self._desk_current_cursor()
+            names = self._desk_list_names("")
+            self._desk_finish(
+                cmd,
+                ok=ok,
+                reason_code="SNAPSHOT" if ok else "SNAPSHOT_FAIL",
+                text="" if ok else "grab-fail",
+                x=x,
+                y=y,
+                names=names,
+                image=path if ok else "",
+            )
+            return
+        if action == "KEY" and not cmd.get("name"):
+            self._desk_send_key(str(cmd.get("text") or ""))
+            x, y = self._desk_current_cursor()
+            self._desk_finish(
+                cmd,
+                ok=True,
+                reason_code="KEYED",
+                text=str(cmd.get("text") or ""),
+                x=x,
+                y=y,
+            )
+            return
+        name = str(cmd.get("name") or "")
+        label = str(cmd.get("text") or "") if action != "TYPE" else ""
+        x = int(cmd.get("x") or 0)
+        y = int(cmd.get("y") or 0)
+        item = None
+        if name:
+            item = self._desk_find(name)
+        elif label:
+            item = self._desk_find_label(label)
+        if name or label:
+            if item is None:
+                self._desk_finish(
+                    cmd,
+                    ok=False,
+                    reason_code="MISS",
+                    text=name or label,
+                    names=self._desk_list_names(name or label),
+                )
+                return
+            try:
+                x, y = self._desk_point(item)
+            except Exception:
+                self._desk_finish(
+                    cmd,
+                    ok=False,
+                    reason_code="MAP_FAIL",
+                    text=name or label,
+                )
+                return
+        if action == "TYPE" and not name and not label and x == 0 and y == 0:
+            x, y = self._desk_current_cursor()
+        start = self._desk_current_cursor()
+        shape = "text" if action == "TYPE" else "pointer"
+        if action == "MOVE":
+            shape = "default"
+        self._desk_job = {
+            "cmd": cmd,
+            "sx": float(start[0]),
+            "sy": float(start[1]),
+            "tx": float(x),
+            "ty": float(y),
+            "step": 0,
+            "steps": 22,
+            "shape": shape,
+        }
+        self._desk_set_cursor(start[0], start[1], shape)
+        self._desk_timer.start()
+
+    def _desk_tick(self) -> None:
+        job = self._desk_job
+        if job is None:
+            self._desk_timer.stop()
+            return
+        if job.get("typing"):
+            text = str(job.get("type_text") or "")
+            index = int(job.get("type_index") or 0)
+            if index >= len(text):
+                self._desk_timer.setInterval(16)
+                cmd = job["cmd"]
+                x, y = self._desk_current_cursor()
+                self._desk_finish(
+                    cmd,
+                    ok=True,
+                    reason_code="TYPED",
+                    text=text,
+                    x=x,
+                    y=y,
+                )
+                return
+            self._desk_send_char(text[index])
+            job["type_index"] = index + 1
+            return
+        job["step"] = int(job["step"]) + 1
+        steps = max(1, int(job["steps"]))
+        t = min(1.0, float(job["step"]) / float(steps))
+        ease = t * t * (3.0 - 2.0 * t)
+        x = int(job["sx"] + (job["tx"] - job["sx"]) * ease)
+        y = int(job["sy"] + (job["ty"] - job["sy"]) * ease)
+        self._desk_set_cursor(x, y, str(job["shape"]))
+        if t < 1.0:
+            return
+        self._desk_timer.stop()
+        cmd = job["cmd"]
+        action = str(cmd.get("action") or "")
+        if action == "CLICK":
+            self._desk_send_click(x, y, str(cmd.get("button") or "left"))
+            self._desk_finish(
+                cmd,
+                ok=True,
+                reason_code="CLICKED",
+                text=str(cmd.get("name") or ""),
+                x=x,
+                y=y,
+            )
+            return
+        if action == "HOVER":
+            self._desk_send_move(x, y)
+            self._desk_finish(
+                cmd,
+                ok=True,
+                reason_code="HOVERED",
+                text=str(cmd.get("name") or ""),
+                x=x,
+                y=y,
+            )
+            return
+        if action == "TYPE":
+            self._desk_send_click(x, y, "left")
+            self._desk_job = {
+                "cmd": cmd,
+                "typing": True,
+                "type_text": str(cmd.get("text") or ""),
+                "type_index": 0,
+                "shape": "text",
+            }
+            self._desk_set_cursor(x, y, "text")
+            self._desk_timer.setInterval(28)
+            self._desk_timer.start()
+            return
+        if action == "KEY":
+            if cmd.get("name"):
+                self._desk_send_click(x, y, "left")
+            self._desk_send_key(str(cmd.get("text") or ""))
+            self._desk_finish(
+                cmd,
+                ok=True,
+                reason_code="KEYED",
+                text=str(cmd.get("text") or ""),
+                x=x,
+                y=y,
+            )
+            return
+        self._desk_finish(
+            cmd,
+            ok=True,
+            reason_code="MOVED",
+            text=str(cmd.get("name") or ""),
+            x=x,
+            y=y,
+        )
+
+    def _desk_grab_screen(self, path: str) -> bool:
+        from PySide6.QtGui import QGuiApplication
+
+        from backend import desktop_operator
+
+        win = self._desk_window()
+        screen = None
+        if win is not None:
+            screen = win.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        desktop_operator.ensure_root()
+        try:
+            wid = int(win.winId()) if win is not None else 0
+            pix = screen.grabWindow(wid)
+            if pix is None or pix.isNull() or pix.width() < 2:
+                pix = screen.grabWindow(0)
+            return bool(pix.save(path, "PNG")) and Path(path).stat().st_size > 200
+        except Exception:
+            return False
+
+    def _desk_grab_qml(self, path: str) -> bool:
+        from PySide6.QtCore import Q_ARG, QEventLoop, QMetaObject, QTimer, Qt
+
+        from backend import desktop_operator
+
+        root = self._qml_root
+        if root is None:
+            return False
+        desktop_operator.ensure_root()
+        target = Path(path)
+        if target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        root.setProperty("deskGrabReady", False)
+        invoked = False
+        for arg in (path,):
+            try:
+                invoked = bool(
+                    QMetaObject.invokeMethod(
+                        root,
+                        "grabDesk",
+                        Qt.ConnectionType.DirectConnection,
+                        Q_ARG(str, arg),
+                    )
+                )
+            except Exception:
+                invoked = False
+            if invoked:
+                break
+            try:
+                invoked = bool(
+                    QMetaObject.invokeMethod(
+                        root,
+                        "grabDesk",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG("QString", arg),
+                    )
+                )
+            except Exception:
+                invoked = False
+            if invoked:
+                break
+        if not invoked:
+            content = self._desk_content_item()
+            if content is not None and hasattr(content, "grabToImage"):
+                try:
+                    content.grabToImage(
+                        lambda result: root.setProperty(
+                            "deskGrabReady",
+                            bool(result.saveToFile(path)),
+                        )
+                    )
+                    invoked = True
+                except Exception:
+                    invoked = False
+        if not invoked:
+            return False
+        loop = QEventLoop()
+        ticks = {"n": 0}
+
+        def tick() -> None:
+            ticks["n"] += 1
+            ready = bool(root.property("deskGrabReady"))
+            if ready or ticks["n"] > 25:
+                loop.quit()
+
+        timer = QTimer(self)
+        timer.setInterval(40)
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        timer.stop()
+        try:
+            return target.is_file() and target.stat().st_size > 200
+        except OSError:
+            return False
+
+    def _desk_grab(self, path: str) -> bool:
+        from backend import desktop_operator
+
+        desktop_operator.ensure_root()
+        win = self._desk_window()
+        if win is not None:
+            grab = getattr(win, "grabWindow", None)
+            if callable(grab):
+                try:
+                    img = grab()
+                    if img is not None and not img.isNull():
+                        ok = bool(img.save(path, "PNG"))
+                        if ok and Path(path).is_file() and Path(path).stat().st_size > 200:
+                            return True
+                except Exception:
+                    pass
+        if self._desk_grab_qml(path):
+            return True
+        return False
+
+    def _desk_send_move(self, x: int, y: int) -> None:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        win = self._desk_window()
+        if win is None:
+            return
+        QTest.mouseMove(win, QPoint(x, y))
+
+    def _desk_send_click(self, x: int, y: int, button: str) -> None:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        win = self._desk_window()
+        if win is None:
+            return
+        mapping = {
+            "left": Qt.MouseButton.LeftButton,
+            "middle": Qt.MouseButton.MiddleButton,
+            "right": Qt.MouseButton.RightButton,
+        }
+        qt_button = mapping.get(button, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(win, qt_button, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+
+    def _desk_send_key(self, key: str) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        win = self._desk_window()
+        if win is None:
+            return
+        keys = {
+            "Enter": Qt.Key.Key_Return,
+            "Tab": Qt.Key.Key_Tab,
+            "Escape": Qt.Key.Key_Escape,
+            "Space": Qt.Key.Key_Space,
+            "Backspace": Qt.Key.Key_Backspace,
+            "Delete": Qt.Key.Key_Delete,
+            "Home": Qt.Key.Key_Home,
+            "End": Qt.Key.Key_End,
+            "ArrowUp": Qt.Key.Key_Up,
+            "ArrowDown": Qt.Key.Key_Down,
+            "ArrowLeft": Qt.Key.Key_Left,
+            "ArrowRight": Qt.Key.Key_Right,
+        }
+        qt_key = keys.get(key)
+        if qt_key is None:
+            return
+        QTest.keyClick(win, qt_key)
+
+    def _desk_send_char(self, ch: str) -> None:
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt
+        from PySide6.QtGui import QKeyEvent, QKeySequence
+
+        win = self._desk_window()
+        if win is None or not ch:
+            return
+        if ch == "\n":
+            key = Qt.Key.Key_Return
+            text = "\r"
+        elif ch == " ":
+            key = Qt.Key.Key_Space
+            text = " "
+        else:
+            seq = QKeySequence(ch)
+            key = seq[0].key() if seq.count() > 0 else Qt.Key.Key_unknown
+            text = ch
+        mods = Qt.KeyboardModifier.NoModifier
+        QCoreApplication.postEvent(
+            win, QKeyEvent(QEvent.Type.KeyPress, key, mods, text)
+        )
+        QCoreApplication.postEvent(
+            win, QKeyEvent(QEvent.Type.KeyRelease, key, mods, text)
+        )
+
+    def _desk_send_type(self, text: str) -> None:
+        for ch in str(text or ""):
+            self._desk_send_char(ch)
+
     @Slot(str)
     def webOperatorReport(self, payload: str) -> None:
-        from backend import web_operator
+        web_operator = self._reload_web_operator()
 
         try:
             value = json.loads(str(payload or ""))

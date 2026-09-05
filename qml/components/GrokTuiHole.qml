@@ -13,4 +13,14 @@ FocusScope {
         if (visible)
             root.forceActiveFocus()
     }
+
+    Item {
+        objectName: "grokTuiPrompt"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 30
+        height: 38
+        enabled: false
+    }
 }

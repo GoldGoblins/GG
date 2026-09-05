@@ -534,7 +534,8 @@ def main() -> int:
         "GROK TUI still boots Chromium for a cell grid.",
     )
     require(
-        'objectName: "grokTuiHost"' in grok_tui_hole,
+        'objectName: "grokTuiHost"' in grok_tui_hole
+        and 'objectName: "grokTuiPrompt"' in grok_tui_hole,
         "GROK TUI hole lost its host id.",
     )
     require(
@@ -544,12 +545,53 @@ def main() -> int:
     require(
         "ensureWebEngine" in workspace_surface
         and 'source: active ? "WebPane.qml" : ""' in workspace_surface
-        and "function applyWebOperator(" in workspace_surface,
+        and "function applyWebOperator(" in workspace_surface
+        and "WEB_NOT_FOCUSED" in workspace_surface
+        and 'root.setHostKind("WEB")' not in workspace_surface[workspace_surface.index("function applyWebOperator(") : workspace_surface.index("function flushPendingWebOp(")]
+        and "function playOperator(" in web_pane
+        and 'objectName: "webAgentCursor"' in web_pane
+        and 'objectName: "deskAgentCursor"' in main_qml
+        and "WebAgentCursor" in web_pane
+        and "agentCursorShape" in web_pane
+        and "function flushPendingWebOp(" in workspace_surface
+        and "holdWebEngine" in workspace_surface
+        and "clickRipple" not in web_pane
+        and "ripple.play()" in web_pane
+        and "function _elFindJs(" in web_pane
+        and "WheelEvent" in web_pane
+        and "function _scroll(" in web_pane
+        and "function _grabViewNow(" in web_pane
+        and "id: grabWait" in web_pane,
         "WEB Chromium is still type-bound into workspace boot.",
+    )
+    host_py = text("backend/chat_surface_host.py")
+    require(
+        "def _desk_walk_visible" in host_py
+        and "childItems" in host_py
+        and "RenderWidget" in host_py
+        and "grokTuiHost" in host_py
+        and "findChildren(" not in host_py[host_py.index("def _desk_list_names") : host_py.index("def _desk_find_label")]
+        and 'property("workspace")' in host_py[host_py.index("def _desk_visible_items") : host_py.index("def _desk_item_shown")]
+        and "findChild(" not in host_py[host_py.index("def _desk_find") : host_py.index("def _desk_class_name")]
+        and "names = self._desk_list_names" in host_py[host_py.index('if action == "SNAPSHOT"') : host_py.index('if action == "KEY"')],
+        "Desk FIND still walks Chromium internals.",
+    )
+    require(
+        "grabWindow" in host_py[host_py.index("def _desk_grab") : host_py.index("def _desk_send_move")],
+        "Desk snapshot still skips QQuickWindow.grabWindow.",
     )
     require(
         "WebPane {" not in workspace_surface,
         "WEB Chromium still compiles with WorkspaceSurface.",
+    )
+    require(
+        (PROJECT / "qml/components/webCursorPack.js").is_file()
+        and (PROJECT / "qml/components/WebAgentCursor.qml").is_file()
+        and (PROJECT / "qml/components/web-cursors/pointer.png").is_file()
+        and (PROJECT / "qml/components/web-cursors/wait.png").is_file()
+        and (PROJECT / "qml/components/web-cursors/text.png").is_file()
+        and (PROJECT / "qml/components/web-cursors/default.png").is_file(),
+        "Visible WEB cursor pack is incomplete.",
     )
 
     for marker in (

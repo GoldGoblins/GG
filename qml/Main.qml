@@ -73,6 +73,40 @@ ApplicationWindow {
     property bool _shellHydrated: false
     property bool _utilityBound: false
     property bool _workspaceBound: false
+    property real deskX: 420
+    property real deskY: 240
+    property string deskShape: "default"
+    property bool deskFromChrome: false
+    property bool deskGrabReady: false
+
+    function grabDesk(path) {
+        root.deskGrabReady = false
+        var item = root.contentItem
+        if (!item || !item.grabToImage) {
+            root.deskGrabReady = false
+            return false
+        }
+        item.grabToImage(function(result) {
+            var ok = false
+            try {
+                ok = result.saveToFile(path)
+            } catch (err) {
+                ok = false
+            }
+            root.deskGrabReady = ok
+        })
+        return true
+    }
+
+    function setDeskCursor(item, lx, ly, shape) {
+        if (!item)
+            return
+        var p = item.mapToItem(root.contentItem, Number(lx), Number(ly))
+        root.deskX = p.x
+        root.deskY = p.y
+        if (shape && String(shape).length > 0)
+            root.deskShape = String(shape)
+    }
 
     function workspaceUrl() {
         return Qt.resolvedUrl("components/WorkspaceSurface.qml")
@@ -442,9 +476,9 @@ ApplicationWindow {
             root.grokWalletJson = payload
         }
         function onQmlLiveReload() {
-            if (!root._shellQueue.length)
-                root._shellQueue = root.parseShellQueue()
-            root.loadNextShellFile()
+            if (!root.shellLoading)
+                root.beginShellLoad("RELOAD")
+            Qt.callLater(root.loadNextShellFile)
         }
         function onMandateRailChanged(payload) {
             root.setMandateRail(payload)
@@ -2123,5 +2157,16 @@ ApplicationWindow {
                 cell: 6
             }
         }
+    }
+
+    WebAgentCursor {
+        id: deskAgentCursor
+        objectName: "deskAgentCursor"
+        parent: root.contentItem
+        z: 10001
+        visible: true
+        shape: root.deskShape
+        x: root.deskX - deskAgentCursor.hotX
+        y: root.deskY - deskAgentCursor.hotY
     }
 }

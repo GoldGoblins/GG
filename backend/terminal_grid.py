@@ -432,14 +432,19 @@ class TerminalGrid(QQuickPaintedItem):
             cursor_r = self._vt.r
             cursor_c = self._vt.c
             cursor_visible = self._vt.cursor_visible
+        width = float(self.width() or 0)
+        if width <= 0 or cell_h <= 0:
+            return
         for y, row in enumerate(buf):
             y0 = y * cell_h
+            if y0 < 0 or y0 > 100000:
+                continue
             if y0 + cell_h < clip_top or y0 > clip_bottom:
                 continue
-            painter.fillRect(
-                QRectF(0, y0, max(1.0, float(self.width())), cell_h),
-                bg,
-            )
+            try:
+                painter.fillRect(QRectF(0, y0, width, cell_h), bg)
+            except (OverflowError, ValueError):
+                continue
             x = 0
             limit = min(len(row), max_cols)
             while x < limit:

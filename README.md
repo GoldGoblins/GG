@@ -17,6 +17,37 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-05 · program-wide gold pointer
+
+What GitHub had until this push (`d86aacd`, earlier 2026-09-05): MARKETPLACE catalog, colored work lamps, mandate rail, WEB operator OPEN / SNAPSHOT / CLICK / TYPE / RELOAD / BACK, site-import drop, SFTP plan, hanging MEDIA/UTILITIES legends.
+
+What landed on top of that (this is the full `d86aacd` → HEAD delta, not only the WEB-cursor slice):
+
+**Gold pointer is the whole desk.** `gg-desk` drives GG AI Desktop with a visible Breeze Light gold cursor, not a web-only gadget. MOVE / CLICK / HOVER / TYPE / KEY / SNAPSHOT / FIND. SNAPSHOT returns a label map of visible chrome (`WEB @763,863 [workspaceKindWEB]`). FIND walks QML `childItems` only — never `QObject.children()` into Chromium. Heavy surfaces (WebEngine, TUI cell grid, code editor) are skipped; workspace chrome is seeded from the workspace Loader so CODE / TERMINAL / WEB / SITE / the address field stay findable.
+
+**WEB tab is hands after eyes.** Click **WEB** with `gg-desk` first. `gg-web` does not switch tabs (`WEB_NOT_FOCUSED`). Then page DOM: snapshot, hover, click, type, scroll. `open URL` types the address bar and goes. New tabs: click `+` or middle-click a link. Password fields stay blocked. one.com / wp-admin stay red. No hidden HTTP.
+
+**Visible WEB drive.** MOVE / HOVER / SCROLL / WAIT / STAGE / FORWARD / TAB_*. Gold 24px cursor pack. After in-page scroll, `view.png` is grabbed after a paint so it matches the new viewport, not the old top. WebEngine loads only when the WEB tab is current.
+
+**TUI prompt is the `>` box.** Overlay `grokTuiPrompt` sits on the input row, not the hint row. TYPE clicks the target then sends keys character-by-character so the GUI does not deadlock.
+
+**Stability.** Terminal grid paint clamps overflow. FIND/CLICK miss returns nearby names. Python host edits still need a desktop restart; QML often RELOAD.
+
+Drive it from Grok TUI:
+
+```text
+python3 projects/gg-ai-desktop/gg-desk snapshot
+python3 projects/gg-ai-desktop/gg-desk click --name workspaceKindWEB
+python3 projects/gg-ai-desktop/gg-web snapshot
+python3 projects/gg-ai-desktop/gg-web click "text=RINGAR"
+```
+
+`stage` still loads a local rehearsal page (no network). Live `goldgoblins.se` OPEN is yellow and needs a named mandate.
+
+**Screenshot.** Same desk capture as the previous drop (`docs/gg-ai-desktop.png`). No new picture this round.
+
+Unchanged: GROK TUI as motor, no GGUF in git, `GENERAL_ACTION_AUTHORITY` NONE.
+
 ## Patch notes · 2026-09-05 · marketplace, work lamps, mandate rail, WEB operator
 
 What GitHub had until this push (`269f430`, 4 Sep 2026): 60 Hz TMOG meters, live spectrum, FM dial, a MARKETPLACE *tab* between CRYPTO and TMOG, BufferMark on frames that wait, GROK TUI default.

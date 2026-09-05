@@ -46,6 +46,19 @@ Item {
     property string currentObjectProvenance: ""
     property string currentObjectSourcePath: ""
     property var liveWebPane: null
+    property var liveBrowseBar: null
+    property string pendingWebOpPayload: ""
+    property int pendingWebOpTries: 0
+    property bool addressTyping: false
+    property string addressDraft: ""
+    property bool chromeOn: false
+    property string chromeShape: "default"
+    property real chromeX: 48
+    property real chromeY: 12
+    property var _chromeDone: null
+    property var _addrCmd: null
+    property string _addrTarget: ""
+    property int _addrIndex: 0
     readonly property string currentContextReference:
         root.currentObjectId.length > 0 ? "@current" : "@workspace"
 
@@ -770,7 +783,11 @@ Item {
     }
 
     function webTabCount() {
-        var n = 0
+        return root.webTabIndices().length
+    }
+
+    function webTabIndices() {
+        var out = []
         var i
         for (i = 0; i < workspaceObjects.count; ++i) {
             var item = workspaceObjects.get(i)
@@ -778,9 +795,28 @@ Item {
                 item.objectType === "WEBSITE"
                 && item.provenanceClass === "REAL_UI_STATE"
             )
-                n += 1
+                out.push(i)
         }
-        return n
+        return out
+    }
+
+    function focusWebTabDelta(delta) {
+        var tabs = root.webTabIndices()
+        if (tabs.length === 0)
+            return false
+        var at = tabs.indexOf(root.currentIndex)
+        if (at < 0)
+            at = 0
+        var next = tabs[(at + delta + tabs.length) % tabs.length]
+        root.activate(next)
+        return true
+    }
+
+    function openWebTab(url) {
+        root.setHostKind("WEB")
+        root.spawnHostInstance()
+        if (String(url || "").length > 0)
+            root.goBrowse(url)
     }
 
     function resetWebTab(index) {
@@ -963,133 +999,339 @@ Item {
         root.rememberBrowse(root.currentIndex, next)
     }
 
+    function syncChromeDesk() {
+        var win = Window.window
+        if (!win || !win.setDeskCursor)
+            return
+        win.deskFromChrome = root.chromeOn
+        if (root.chromeOn)
+            win.setDeskCursor(root, root.chromeX, root.chromeY, root.chromeShape)
+    }
+
+    function moveChromeTo(item, ox, oy, done) {
+        if (!item) {
+            if (typeof done === "function")
+                done()
+            return
+        }
+        var win = Window.window
+        if (win && win.deskX !== undefined) {
+            var here = root.mapFromItem(
+                win.contentItem,
+                Number(win.deskX),
+                Number(win.deskY)
+            )
+            root.chromeX = here.x
+            root.chromeY = here.y
+        }
+        var p = item.mapToItem(root, ox, oy)
+        var nx = Math.max(4, Number(p.x))
+        var ny = Math.max(4, Number(p.y))
+        root.chromeOn = true
+        root.syncChromeDesk()
+        var dist = Math.sqrt(
+            Math.pow(nx - root.chromeX, 2) + Math.pow(ny - root.chromeY, 2)
+        )
+        if (dist < 1.5) {
+            root.chromeX = nx
+            root.chromeY = ny
+            if (typeof done === "function")
+                Qt.callLater(done)
+            return
+        }
+        chromeMove.doneFn = done
+        chromeXAnim.from = root.chromeX
+        chromeXAnim.to = nx
+        chromeYAnim.from = root.chromeY
+        chromeYAnim.to = ny
+        var ms = Math.max(180, Math.min(560, 120 + dist * 0.6))
+        chromeXAnim.duration = ms
+        chromeYAnim.duration = ms
+        chromeMove.start()
+    }
+
+    function typeAddressThenGo(url, cmd) {
+        var pane = root.liveWebPane
+        if (pane) {
+            pane.agentActive = false
+            pane.operatorLabel = "GROK · OPEN"
+            pane.agentShape = "text"
+        }
+        root.chromeShape = "text"
+        root._addrCmd = cmd
+        root._addrTarget = String(url || "")
+        root._addrIndex = 0
+        root.addressTyping = true
+        root.addressDraft = ""
+        var bar = root.liveBrowseBar
+        if (bar && bar.forceActiveFocus)
+            bar.forceActiveFocus()
+        root.moveChromeTo(bar, 18, 13, function() {
+            addrTypeTimer.start()
+        })
+    }
+
+    function _addrTick() {
+        if (root._addrIndex >= root._addrTarget.length) {
+            addrTypeTimer.stop()
+            root.addressTyping = false
+            var pane = root.liveWebPane
+            var cmd = root._addrCmd
+            root.goBrowse(root._addrTarget)
+            if (pane && pane.waitLoad) {
+                pane.agentActive = true
+                pane.agentShape = "wait"
+                pane.waitLoad(function(state) {
+                    root.chromeOn = false
+                    var href = pane.currentHref()
+                    root.reportWebOperator(
+                        cmd,
+                        state === "PASS" || href.length > 0,
+                        state === "PASS" ? "OPENED_WEB_TAB" : "OPEN_" + state,
+                        href || root._addrTarget,
+                        "",
+                        "",
+                        []
+                    )
+                })
+                return
+            }
+            root.chromeOn = false
+            root.reportWebOperator(cmd, true, "OPENED_WEB_TAB", root._addrTarget, "", "", [])
+            return
+        }
+        root.addressDraft += root._addrTarget.charAt(root._addrIndex)
+        root._addrIndex += 1
+        if (root.liveWebPane)
+            root.liveWebPane.operatorLabel = "GROK · OPEN · " + root._addrIndex + "/" + root._addrTarget.length
+    }
+
+    function clickPlusThen(done) {
+        var pane = root.liveWebPane
+        if (pane) {
+            pane.agentActive = false
+            pane.operatorLabel = "GROK · TAB"
+            pane.agentShape = "pointer"
+        }
+        root.chromeShape = "pointer"
+        root.moveChromeTo(spawnInstanceButton, spawnInstanceButton.width - 7, 9, function() {
+            chromeRipple.play()
+            root.spawnHostInstance()
+            Qt.callLater(function() {
+                if (typeof done === "function")
+                    done()
+            })
+        })
+    }
+
+    function reportWebOperator(cmd, ok, reason, url, title, text, links, image) {
+        var host = root.scratchHost()
+        if (!host || !host.webOperatorReport)
+            return
+        host.webOperatorReport(JSON.stringify({
+            "schema": "gg.web-operator-result.v1",
+            "command_id": cmd.command_id,
+            "ok": ok,
+            "reason_code": reason,
+            "risk_class": cmd.risk_class || "GREEN",
+            "action": String(cmd.action || ""),
+            "url": url || "",
+            "title": title || "",
+            "text": text || "",
+            "links": links || [],
+            "image": image || "",
+            "general_action_authority": "NONE",
+            "visible_web_tab": true,
+            "visible_cursor": true
+        }))
+    }
+
     function applyWebOperator(payload) {
+        if (root.hostKind !== "WEB") {
+            var blocked = {}
+            try {
+                blocked = JSON.parse(String(payload || "{}"))
+            } catch (err) {
+                blocked = {}
+            }
+            root.reportWebOperator(
+                blocked,
+                false,
+                "WEB_NOT_FOCUSED",
+                "",
+                "",
+                "",
+                []
+            )
+            return
+        }
+        var pane = root.liveWebPane
+        if (!pane || !pane.playOperator) {
+            root.pendingWebOpPayload = String(payload || "")
+            root.pendingWebOpTries = 0
+            webOpRetry.restart()
+            return
+        }
+        root.runWebOperator(String(payload || ""))
+    }
+
+    function flushPendingWebOp() {
+        if (root.pendingWebOpPayload.length === 0)
+            return
+        var pane = root.liveWebPane
+        if (pane && pane.playOperator) {
+            var payload = root.pendingWebOpPayload
+            root.pendingWebOpPayload = ""
+            root.runWebOperator(payload)
+            return
+        }
+        root.pendingWebOpTries += 1
+        if (root.pendingWebOpTries > 40) {
+            var cmd = {}
+            try {
+                cmd = JSON.parse(root.pendingWebOpPayload)
+            } catch (err) {
+                cmd = {}
+            }
+            root.pendingWebOpPayload = ""
+            root.reportWebOperator(
+                cmd,
+                false,
+                "WEB_PANE_NOT_READY",
+                "",
+                "",
+                "",
+                []
+            )
+            return
+        }
+        webOpRetry.restart()
+    }
+
+    function runWebOperator(payload) {
         var cmd = {}
         try {
             cmd = JSON.parse(String(payload || "{}"))
         } catch (err) {
             return
         }
-        var host = root.scratchHost()
         var action = String(cmd.action || "")
-        root.setHostKind("WEB")
-        if (action === "OPEN") {
-            root.goBrowse(String(cmd.url || ""))
-            if (host && host.webOperatorReport)
-                host.webOperatorReport(JSON.stringify({
-                    "schema": "gg.web-operator-result.v1",
+        if (action === "TAB_NEW") {
+            var sel = String(cmd.selector || "")
+            var url = String(cmd.url || "")
+            if (sel.length > 0) {
+                var paneHit = root.liveWebPane
+                if (!paneHit || !paneHit.playOperator) {
+                    root.reportWebOperator(cmd, false, "WEB_PANE_NOT_READY", "", "", "", [])
+                    return
+                }
+                paneHit.agentActive = true
+                paneHit.playOperator({
+                    "schema": cmd.schema,
                     "command_id": cmd.command_id,
-                    "ok": true,
-                    "reason_code": "OPENED_WEB_TAB",
-                    "risk_class": cmd.risk_class || "YELLOW",
-                    "action": action,
-                    "url": String(cmd.url || ""),
-                    "title": "",
+                    "action": "CLICK",
+                    "url": "",
+                    "selector": sel,
+                    "text": "aux",
+                    "risk_class": cmd.risk_class
+                }, function(result) {
+                    var value = result || {}
+                    var href = String(value.url || "")
+                    var before = root.webTabCount()
+                    Qt.callLater(function() {
+                        if (root.webTabCount() === before && href.length > 0)
+                            root.openWebTab(href)
+                        root.reportWebOperator(
+                            cmd,
+                            true,
+                            "TAB_OPENED",
+                            href,
+                            "",
+                            String(root.webTabCount()),
+                            []
+                        )
+                    })
+                })
+                return
+            }
+            root.clickPlusThen(function() {
+                if (url.length === 0) {
+                    root.chromeOn = false
+                    root.reportWebOperator(
+                        cmd,
+                        true,
+                        "TAB_OPENED",
+                        "about:blank",
+                        "",
+                        String(root.webTabCount()),
+                        []
+                    )
+                    return
+                }
+                root.pendingWebOpPayload = JSON.stringify({
+                    "schema": cmd.schema,
+                    "command_id": cmd.command_id,
+                    "action": "OPEN",
+                    "url": url,
+                    "selector": "",
                     "text": "",
-                    "links": [],
-                    "general_action_authority": "NONE",
-                    "visible_web_tab": true
-                }))
+                    "risk_class": cmd.risk_class,
+                    "general_action_authority": "NONE"
+                })
+                root.pendingWebOpTries = 0
+                webOpRetry.restart()
+            })
+            return
+        }
+        if (action === "TAB_CLOSE") {
+            root.closeHostInstance(root.currentIndex)
+            root.reportWebOperator(
+                cmd,
+                true,
+                "TAB_CLOSED",
+                "",
+                "",
+                String(root.webTabCount()),
+                []
+            )
+            return
+        }
+        if (action === "TAB_NEXT" || action === "TAB_PREV") {
+            var moved = root.focusWebTabDelta(action === "TAB_NEXT" ? 1 : -1)
+            var href = root.liveWebPane ? root.liveWebPane.currentHref() : ""
+            root.reportWebOperator(
+                cmd,
+                moved,
+                moved ? "TAB_FOCUSED" : "TAB_MISSING",
+                href,
+                "",
+                String(root.webTabCount()),
+                []
+            )
             return
         }
         var pane = root.liveWebPane
-        if (!pane) {
-            if (host && host.webOperatorReport)
-                host.webOperatorReport(JSON.stringify({
-                    "schema": "gg.web-operator-result.v1",
-                    "command_id": cmd.command_id,
-                    "ok": false,
-                    "reason_code": "WEB_PANE_NOT_READY",
-                    "risk_class": cmd.risk_class || "GREEN",
-                    "action": action,
-                    "url": "",
-                    "title": "",
-                    "text": "",
-                    "links": [],
-                    "general_action_authority": "NONE",
-                    "visible_web_tab": true
-                }))
+        if (!pane || !pane.playOperator) {
+            root.reportWebOperator(cmd, false, "WEB_PANE_NOT_READY", "", "", "", [])
             return
         }
-        if (action === "RELOAD") {
-            pane.reload()
-            if (host && host.webOperatorReport)
-                host.webOperatorReport(JSON.stringify({
-                    "schema": "gg.web-operator-result.v1",
-                    "command_id": cmd.command_id,
-                    "ok": true,
-                    "reason_code": "RELOADED",
-                    "risk_class": "GREEN",
-                    "action": action,
-                    "url": pane.currentHref(),
-                    "title": "",
-                    "text": "",
-                    "links": [],
-                    "general_action_authority": "NONE",
-                    "visible_web_tab": true
-                }))
+        pane.agentActive = true
+        if (action === "OPEN") {
+            root.typeAddressThenGo(String(cmd.url || ""), cmd)
             return
         }
-        if (action === "BACK") {
-            pane.goBack()
-            if (host && host.webOperatorReport)
-                host.webOperatorReport(JSON.stringify({
-                    "schema": "gg.web-operator-result.v1",
-                    "command_id": cmd.command_id,
-                    "ok": true,
-                    "reason_code": "BACK",
-                    "risk_class": "GREEN",
-                    "action": action,
-                    "url": pane.currentHref(),
-                    "title": "",
-                    "text": "",
-                    "links": [],
-                    "general_action_authority": "NONE",
-                    "visible_web_tab": true
-                }))
-            return
-        }
-        var script = ""
-        if (action === "SNAPSHOT") {
-            script = "(function(){var t=document.body?document.body.innerText:'';if(t.length>8000)t=t.slice(0,8000);var links=[];var as=document.querySelectorAll('a[href]');var i;for(i=0;i<as.length&&i<40;i++){links.push({t:(as[i].innerText||'').trim().slice(0,80),h:as[i].href});}return JSON.stringify({url:location.href,title:document.title,text:t,links:links});})()"
-        } else if (action === "CLICK") {
-            script = "(function(){var el=document.querySelector(" + JSON.stringify(cmd.selector || "") + ");if(!el)return JSON.stringify({ok:false,reason:'MISS'});el.click();return JSON.stringify({ok:true,reason:'CLICKED',url:location.href,title:document.title});})()"
-        } else if (action === "TYPE") {
-            script = "(function(){var el=document.querySelector(" + JSON.stringify(cmd.selector || "") + ");if(!el)return JSON.stringify({ok:false,reason:'MISS'});var typ=String(el.type||'').toLowerCase();if(typ==='password')return JSON.stringify({ok:false,reason:'PASSWORD'});el.focus();el.value=" + JSON.stringify(cmd.text || "") + ";el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return JSON.stringify({ok:true,reason:'TYPED',url:location.href,title:document.title});})()"
-        } else {
-            return
-        }
-        pane.runPageScript(script, function(raw) {
-            var parsed = {}
-            try {
-                parsed = JSON.parse(String(raw || "{}"))
-            } catch (err2) {
-                parsed = {}
-            }
-            var ok = true
-            var reason = "SNAPSHOT"
-            if (action === "SNAPSHOT") {
-                ok = true
-                reason = "SNAPSHOT"
-            } else {
-                ok = parsed.ok === true
-                reason = String(parsed.reason || "FAIL")
-            }
-            if (host && host.webOperatorReport)
-                host.webOperatorReport(JSON.stringify({
-                    "schema": "gg.web-operator-result.v1",
-                    "command_id": cmd.command_id,
-                    "ok": ok,
-                    "reason_code": reason,
-                    "risk_class": cmd.risk_class || "GREEN",
-                    "action": action,
-                    "url": String(parsed.url || pane.currentHref()),
-                    "title": String(parsed.title || ""),
-                    "text": String(parsed.text || ""),
-                    "links": parsed.links || [],
-                    "general_action_authority": "NONE",
-                    "visible_web_tab": true
-                }))
+        pane.playOperator(cmd, function(result) {
+            var value = result || {}
+            root.reportWebOperator(
+                cmd,
+                value.ok === true,
+                String(value.reason || "FAIL"),
+                String(value.url || pane.currentHref()),
+                String(value.title || ""),
+                String(value.text || ""),
+                value.links || [],
+                String(value.image || "")
+            )
         })
     }
 
@@ -1404,6 +1646,104 @@ Item {
         repeat: false
         onTriggered: root.requestLiveAidAnalysis()
     }
+
+    Timer {
+        id: webOpRetry
+        interval: 80
+        repeat: false
+        onTriggered: root.flushPendingWebOp()
+    }
+
+    Timer {
+        id: addrTypeTimer
+        interval: 28
+        repeat: true
+        onTriggered: root._addrTick()
+    }
+
+    ParallelAnimation {
+        id: chromeMove
+        property var doneFn: null
+        NumberAnimation {
+            id: chromeXAnim
+            target: root
+            property: "chromeX"
+            duration: 280
+            easing.type: Easing.InOutCubic
+        }
+        NumberAnimation {
+            id: chromeYAnim
+            target: root
+            property: "chromeY"
+            duration: 280
+            easing.type: Easing.InOutCubic
+        }
+        onStopped: {
+            var fn = chromeMove.doneFn
+            chromeMove.doneFn = null
+            if (typeof fn === "function")
+                fn()
+        }
+    }
+
+    Rectangle {
+        id: chromeRipple
+        z: 51
+        width: 8
+        height: 8
+        radius: 4
+        visible: false
+        color: "#00c8a97e"
+        border.width: 2
+        border.color: "#c8a97e"
+        x: root.chromeX - width / 2
+        y: root.chromeY - height / 2
+
+        function play() {
+            chromeRipple.visible = true
+            chromeRippleAnim.start()
+        }
+    }
+
+    SequentialAnimation {
+        id: chromeRippleAnim
+        ParallelAnimation {
+            NumberAnimation {
+                target: chromeRipple
+                property: "width"
+                from: 10
+                to: 36
+                duration: 180
+            }
+            NumberAnimation {
+                target: chromeRipple
+                property: "height"
+                from: 10
+                to: 36
+                duration: 180
+            }
+            NumberAnimation {
+                target: chromeRipple
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: 180
+            }
+        }
+        ScriptAction {
+            script: {
+                chromeRipple.visible = false
+                chromeRipple.opacity = 1
+                chromeRipple.width = 8
+                chromeRipple.height = 8
+            }
+        }
+    }
+
+    onChromeXChanged: root.syncChromeDesk()
+    onChromeYChanged: root.syncChromeDesk()
+    onChromeOnChanged: root.syncChromeDesk()
+    onChromeShapeChanged: root.syncChromeDesk()
 
     Timer {
         id: scratchLiveTimer
@@ -1913,6 +2253,7 @@ Item {
         }
 
         Item {
+            id: spawnInstanceButton
             objectName: "workspaceSpawnInstanceButton"
             visible: !root.settingsOpen
                 && root.hostKind !== "CRYPTO"
@@ -2637,11 +2978,26 @@ Item {
                         required property string provenanceClass
                         required property string sourcePath
 
+                        property bool holdWebEngine: false
                         readonly property bool isWebTab:
                             webTab.objectType === "WEBSITE"
                             && webTab.provenanceClass === "REAL_UI_STATE"
                         readonly property bool isCurrent:
                             webTab.objectId === root.currentObjectId
+
+                        onIsCurrentChanged: {
+                            if (webTab.isCurrent && webTab.isWebTab)
+                                webTab.holdWebEngine = true
+                            if (webTab.isCurrent) {
+                                root.liveBrowseBar = tabBrowseBar
+                                if (webPaneLoader.item)
+                                    root.liveWebPane = webPaneLoader.item
+                            }
+                        }
+                        Component.onCompleted: {
+                            if (webTab.isCurrent && webTab.isWebTab)
+                                webTab.holdWebEngine = true
+                        }
 
                         anchors.fill: parent
                         visible: webTab.isWebTab
@@ -2658,17 +3014,22 @@ Item {
                                 objectName: "workspaceWebAddress"
                                 width: parent.width
                                 height: 26
-                                text: webTab.sourcePath === "about:blank"
-                                    ? ""
-                                    : webTab.sourcePath
+                                text: webTab.isCurrent && root.addressTyping
+                                    ? root.addressDraft
+                                    : (
+                                        webTab.sourcePath === "about:blank"
+                                            ? ""
+                                            : webTab.sourcePath
+                                    )
                                 placeholderText: "https://"
                                 onAccepted: root.goBrowse(tabBrowseBar.text)
                             }
 
                             Loader {
+                                id: webPaneLoader
                                 width: parent.width
                                 height: parent.height - tabBrowseBar.height - 6
-                                active: webHost.visible && webTab.isWebTab && webTab.isCurrent
+                                active: webTab.isWebTab && webTab.holdWebEngine
                                 source: active ? "WebPane.qml" : ""
                                 onLoaded: {
                                     item.siteOnly = false
@@ -2677,12 +3038,26 @@ Item {
                                             ? webTab.sourcePath
                                             : "about:blank"
                                     })
-                                    item.wantEngine = webHost.visible && webTab.isCurrent
-                                    if (webTab.isCurrent)
+                                    item.wantEngine = true
+                                    if (webTab.isCurrent) {
                                         root.liveWebPane = item
+                                        root.liveBrowseBar = tabBrowseBar
+                                    }
                                     item.navigated.connect(function(href) {
                                         root.rememberBrowse(webTab.index, href)
                                     })
+                                    item.openNewTab.connect(function(href) {
+                                        root.openWebTab(href)
+                                    })
+                                    item.titled.connect(function(title) {
+                                        var label = String(title || "").trim()
+                                        if (label.length > 40)
+                                            label = label.slice(0, 37) + "..."
+                                        if (label.length > 0)
+                                            workspaceObjects.setProperty(webTab.index, "title", label)
+                                    })
+                                    if (webTab.isCurrent)
+                                        Qt.callLater(root.flushPendingWebOp)
                                 }
                             }
                         }
@@ -2826,6 +3201,7 @@ Item {
         spacing: 0
 
         Text {
+            objectName: "workspaceKindCODE"
             text: "CODE"
             color: root.hostKind === "CODE" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
@@ -2847,6 +3223,7 @@ Item {
         }
 
         Text {
+            objectName: "workspaceKindTERMINAL"
             text: "TERMINAL"
             color: root.hostKind === "TERMINAL" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
@@ -2868,6 +3245,7 @@ Item {
         }
 
         Text {
+            objectName: "workspaceKindWEB"
             text: "WEB"
             color: root.hostKind === "WEB" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
@@ -2910,6 +3288,7 @@ Item {
         }
 
         Text {
+            objectName: "workspaceKindSITE"
             text: "SITE"
             color: root.hostKind === "SITE" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
