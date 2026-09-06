@@ -19,6 +19,38 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-06 · GPTUI, media and workspace consolidation
+
+What GitHub had until this push (`aefff5b`, earlier 2026-09-06): the
+program-wide gold pointer, MARKETPLACE catalog, work lamps, mandate rail,
+visible WEB operator and GROK TUI workspace.
+
+What landed on top of that (source commit `dbf285a`):
+
+**GPTUI is now a first-class motor.** Codex CLI runs in its own native
+terminal grid beside GROK TUI. Both motors use the same workspace, settings,
+chat catalog and laser-Merkle knowledge tree. GPTUI resumes Codex sessions,
+shares the memory commands (`/flush`, `/dream`, `/memory`, `/remember`), and
+keeps the existing approval and workspace boundaries.
+
+**Chat and terminal handling are steadier.** QML reloads rebind the terminal
+hosts cleanly, terminal scroll metrics are exposed to the custom scrollbar,
+and streaming output no longer pulls the reader back to the newest message
+after a manual scroll. The desktop can also enter and leave fullscreen.
+
+**MEDIA is live and recoverable.** IPTV catalogs load concurrently with a
+last-good cache fallback. Radio keeps a larger jitter buffer, the spectrum
+updates live at 60 Hz, and stalled video streams get a bounded retry instead
+of leaving the player frozen.
+
+**New local state is explicit.** Codex session discovery/resume and the GPT
+memory bridge live in dedicated backend modules; no model weights or login
+state are added to git.
+
+Unchanged: GROK TUI remains available as the default motor, no GGUF in git,
+`GENERAL_ACTION_AUTHORITY` NONE, and network/production actions remain behind
+the existing approval boundaries.
+
 ## Patch notes · 2026-09-05 · program-wide gold pointer
 
 What GitHub had until this push (`d86aacd`, earlier 2026-09-05): MARKETPLACE catalog, colored work lamps, mandate rail, WEB operator OPEN / SNAPSHOT / CLICK / TYPE / RELOAD / BACK, site-import drop, SFTP plan, hanging MEDIA/UTILITIES legends.
