@@ -118,7 +118,7 @@ def rgb_of(code: int, is_fg: bool = True) -> tuple[int, int, int]:
 
 
 class MiniVt:
-    """Small VT cursor screen. Replaces a TUI, does not append a log."""
+    """Small VT cursor screen with bounded terminal line scrollback."""
 
     HISTORY_LIMIT = 2000
 
@@ -408,6 +408,13 @@ class MiniVt:
         self.r = min(bottom, max(top, self.r))
         self.c = min(self.cols - 1, max(0, self.c))
 
+    def _remember_scrolled_row(self, row: list[tuple[str, int, int, int]]) -> None:
+        """Keep rows leaving the top-anchored viewport in terminal scrollback."""
+        self.history.append(row[:])
+        self.history_version += 1
+        if len(self.history) > self.HISTORY_LIMIT:
+            del self.history[:-self.HISTORY_LIMIT]
+
     def _index(self) -> None:
         self._pending_wrap = False
         if self.r == self.scroll_bottom:
@@ -432,15 +439,8 @@ class MiniVt:
         for _ in range(count):
             if region:
                 removed = region.pop(0)
-                if (
-                    top == 0
-                    and bot == self.rows - 1
-                    and not self.alt_screen
-                ):
-                    self.history.append(removed[:])
-                    self.history_version += 1
-                    if len(self.history) > self.HISTORY_LIMIT:
-                        del self.history[:-self.HISTORY_LIMIT]
+                if top == 0 and not self.alt_screen:
+                    self._remember_scrolled_row(removed)
             region.append(self._blank_row())
         self.buf[top : bot + 1] = region
 
@@ -686,7 +686,9 @@ class MiniVt:
             region = self.buf[top : bot + 1]
             for _ in range(count):
                 if region:
-                    region.pop(0)
+                    removed = region.pop(0)
+                    if top == 0 and not self.alt_screen:
+                        self._remember_scrolled_row(removed)
                 region.append(self._blank_row())
             self.buf[top : bot + 1] = region
             return

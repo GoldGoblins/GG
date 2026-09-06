@@ -33,8 +33,12 @@ FocusScope {
     property int scrollPage: 1
 
     function applyScrollMetrics(offset, maximum, page) {
-        root.scrollOffset = Math.max(0, Number(offset) || 0)
-        root.scrollMaximum = Math.max(0, Number(maximum) || 0)
+        var safeMaximum = Math.max(0, Number(maximum) || 0)
+        root.scrollMaximum = safeMaximum
+        root.scrollOffset = Math.max(
+            0,
+            Math.min(safeMaximum, Number(offset) || 0)
+        )
         root.scrollPage = Math.max(1, Number(page) || 1)
     }
 
@@ -45,12 +49,37 @@ FocusScope {
         var thumb = Math.max(24, track * root.scrollPage /
             (root.scrollMaximum + root.scrollPage))
         var travel = Math.max(1, track - thumb)
-        var ratio = Math.max(0, Math.min(1, (y - thumb / 2) / travel))
+        var visualRatio = Math.max(
+            0,
+            Math.min(1, (y - thumb / 2) / travel)
+        )
+        // offset 0 is the live tail, which belongs at the bottom of the
+        // scrollbar; the largest offset is the oldest visible text at top.
+        var offset = Math.round(
+            (1 - visualRatio) * root.scrollMaximum
+        )
         if (root.surfaceHost && root.surfaceHost.scrollChatTerminalTo)
             root.surfaceHost.scrollChatTerminalTo(
                 root.terminalId,
-                Math.round(ratio * root.scrollMaximum)
+                offset
             )
+    }
+
+    function scrollFromWheel(wheel) {
+        var delta = Number(wheel.angleDelta.y)
+        if (delta === 0)
+            delta = Number(wheel.pixelDelta.y)
+        if (
+            !isFinite(delta)
+            || delta === 0
+            || !root.surfaceHost
+            || !root.surfaceHost.scrollChatTerminal
+        )
+            return false
+        return Boolean(root.surfaceHost.scrollChatTerminal(
+            root.terminalId,
+            delta
+        ))
     }
 
     Connections {
@@ -87,13 +116,15 @@ FocusScope {
         acceptedButtons: Qt.NoButton
         propagateComposedEvents: true
         onWheel: function(wheel) {
-            if (!root.surfaceHost || !root.surfaceHost.scrollChatTerminal)
-                return
-            var handled = root.surfaceHost.scrollChatTerminal(
-                root.terminalId,
-                wheel.angleDelta.y
-            )
-            wheel.accepted = Boolean(handled)
+            wheel.accepted = root.scrollFromWheel(wheel)
+        }
+    }
+
+    WheelHandler {
+        id: terminalWheelHandler
+        target: null
+        onWheel: function(wheel) {
+            wheel.accepted = root.scrollFromWheel(wheel)
         }
     }
 
@@ -122,7 +153,10 @@ FocusScope {
             )
             y: (parent.height - height) *
                 (root.scrollMaximum > 0
-                    ? root.scrollOffset / root.scrollMaximum
+                    ? 1 - Math.max(
+                        0,
+                        Math.min(1, root.scrollOffset / root.scrollMaximum)
+                    )
                     : 0)
             radius: 2
             visible: root.scrollMaximum > 0
@@ -147,13 +181,7 @@ FocusScope {
                     root.scrollFromBar(mouse.y)
             }
             onWheel: function(wheel) {
-                if (!root.surfaceHost || !root.surfaceHost.scrollChatTerminal)
-                    return
-                var handled = root.surfaceHost.scrollChatTerminal(
-                    root.terminalId,
-                    wheel.angleDelta.y
-                )
-                wheel.accepted = Boolean(handled)
+                wheel.accepted = root.scrollFromWheel(wheel)
             }
         }
     }

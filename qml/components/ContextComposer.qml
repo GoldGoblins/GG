@@ -440,13 +440,28 @@ Item {
         }
     }
 
+    Rectangle {
+        id: engineFooterLegendPlate
+        visible: root.engineTarget === "GPT_TUI"
+        z: 5
+        anchors.left: engineFooter.left
+        anchors.leftMargin: -6
+        anchors.bottom: engineFooter.bottom
+        width: engineFooter.width + 12
+        height: 18
+        color: "#161616"
+        radius: 3
+        antialiasing: false
+    }
+
     Row {
         id: engineFooter
         objectName: "engineTargetSelector"
+        z: 6
         anchors.left: parent.left
         anchors.leftMargin: 14
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 8
+        anchors.bottomMargin: -8
         height: 18
         spacing: 0
 

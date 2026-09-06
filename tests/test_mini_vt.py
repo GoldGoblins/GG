@@ -66,6 +66,15 @@ def main() -> int:
     if not inline.history:
         raise AssertionError("inline VT did not retain scrollback")
 
+    region = MiniVt(5, 20)
+    region.feed("\x1b[1;4r\x1b[Hone\r\ntwo\r\nthree\r\nfour\r\nfive")
+    history_text = "\n".join(
+        "".join(cell[0] for cell in row).rstrip()
+        for row in region.history
+    )
+    if not region.history or "one" not in history_text:
+        raise AssertionError("top-anchored scroll region did not retain scrollback")
+
     print("MINI_VT_TEST=PASS")
     return 0
 

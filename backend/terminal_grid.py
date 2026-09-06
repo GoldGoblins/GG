@@ -13,7 +13,6 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -23,6 +22,7 @@ from PySide6.QtGui import (
     QPainter,
 )
 from PySide6.QtQuick import QQuickItem, QQuickPaintedItem
+from PySide6.QtWidgets import QMenu
 
 from backend.mini_vt import (
     BOLD,
@@ -179,6 +179,8 @@ class TerminalGrid(QQuickPaintedItem):
         self._selecting = False
         self._selection_moved = False
         self._selection_passthrough_click = False
+        self._context_menu_open = False
+        self._context_menu: QMenu | None = None
         self._view_offset = 0
         self._last_scroll_metrics: tuple[int, int, int] | None = None
         self.setFillColor(_color(DEFAULT_BG_RGB))
@@ -233,6 +235,11 @@ class TerminalGrid(QQuickPaintedItem):
         thread = self._thread
         if thread is None:
             return
+        if self._context_menu is not None:
+            self._context_menu.close()
+            self._context_menu.deleteLater()
+            self._context_menu = None
+            self._context_menu_open = False
         self._thread = None
         # Disconnect queued deliveries before stopping the worker.  During
         # application shutdown a queued snapshot can otherwise target a
@@ -417,76 +424,77 @@ class TerminalGrid(QQuickPaintedItem):
         return "\n".join(lines)
 
     def _display_rows(self) -> list[list[tuple[str, int, int, int]]]:
-        """Return the viewport rows, including bounded inline scrollback."""
+        """Return the current viewport, including the VT's line scrollback."""
         snap = self._snap or {}
         current = snap.get("buf") or self._vt.buf
         history = snap.get("history") or getattr(self._vt, "history", [])
-        if bool(snap.get("alt_screen")) or not history:
-            self._view_offset = 0
-            return current
-        rows = int(snap.get("rows") or len(current) or self._last_rows or 1)
-        combined = list(history) + list(current)
-        max_offset = max(0, len(combined) - rows)
-        self._view_offset = max(0, min(self._view_offset, max_offset))
-        end = len(combined) - self._view_offset
-        start = max(0, end - rows)
-        visible = combined[start:end]
-        if len(visible) < rows:
-            visible = ([self._vt._blank_row()] * (rows - len(visible))) + visible
-        return visible
+        if not bool(snap.get("alt_screen")) and history:
+            rows = int(snap.get("rows") or len(current) or self._last_rows or 1)
+            combined = list(history) + list(current)
+            max_offset = max(0, len(combined) - rows)
+            self._view_offset = max(0, min(self._view_offset, max_offset))
+            end = len(combined) - self._view_offset
+            start = max(0, end - rows)
+            visible = combined[start:end]
+            if len(visible) < rows:
+                visible = ([self._vt._blank_row()] * (rows - len(visible))) + visible
+            return visible
+        self._view_offset = 0
+        return current
 
     def _scroll_view(self, lines: int) -> bool:
         snap = self._snap or {}
-        if bool(snap.get("alt_screen")):
-            return False
         history = snap.get("history") or getattr(self._vt, "history", [])
-        if not history:
-            return False
-        rows = int(snap.get("rows") or self._last_rows or 1)
-        current = snap.get("buf") or self._vt.buf
-        max_offset = max(0, len(history) + len(current) - rows)
-        previous = self._view_offset
-        self._view_offset = max(0, min(max_offset, previous + int(lines)))
-        changed = self._view_offset != previous
-        if changed:
-            self._emit_scroll_metrics()
-            self.update()
-        return changed
+        if not bool(snap.get("alt_screen")) and history:
+            rows = int(snap.get("rows") or self._last_rows or 1)
+            current = snap.get("buf") or self._vt.buf
+            max_offset = max(0, len(history) + len(current) - rows)
+            previous = self._view_offset
+            self._view_offset = max(0, min(max_offset, previous + int(lines)))
+            changed = self._view_offset != previous
+            if changed:
+                self._emit_scroll_metrics()
+                self.update()
+            return changed
+        return False
 
     @Slot(int, result=bool)
     def scrollToOffset(self, offset: int) -> bool:
         """Move the inline scrollback viewport to an absolute line offset."""
         snap = self._snap or {}
-        if bool(snap.get("alt_screen")):
-            return False
         history = snap.get("history") or getattr(self._vt, "history", [])
-        if not history:
-            return False
-        rows = int(snap.get("rows") or self._last_rows or 1)
-        current = snap.get("buf") or self._vt.buf
-        maximum = max(0, len(history) + len(current) - rows)
-        previous = self._view_offset
-        self._view_offset = max(0, min(maximum, int(offset)))
-        changed = self._view_offset != previous
-        if changed:
-            self._emit_scroll_metrics()
-            self.update()
-        return changed
+        if not bool(snap.get("alt_screen")) and history:
+            rows = int(snap.get("rows") or self._last_rows or 1)
+            current = snap.get("buf") or self._vt.buf
+            maximum = max(0, len(history) + len(current) - rows)
+            previous = self._view_offset
+            self._view_offset = max(0, min(maximum, int(offset)))
+            changed = self._view_offset != previous
+            if changed:
+                self._emit_scroll_metrics()
+                self.update()
+            return changed
+        return False
 
     def _emit_scroll_metrics(self) -> None:
         snap = self._snap or {}
         history = snap.get("history") or getattr(self._vt, "history", [])
         rows = int(snap.get("rows") or self._last_rows or 1)
         current = snap.get("buf") or self._vt.buf
-        if bool(snap.get("alt_screen")) or not history:
-            metrics = (0, 0, max(1, rows))
-        else:
+        if not bool(snap.get("alt_screen")) and history:
             maximum = max(0, len(history) + len(current) - rows)
+            self._view_offset = max(
+                0,
+                min(maximum, int(self._view_offset)),
+            )
             metrics = (
-                max(0, min(maximum, int(self._view_offset))),
+                self._view_offset,
                 maximum,
                 max(1, rows),
             )
+        else:
+            self._view_offset = 0
+            metrics = (0, 0, max(1, rows))
         if metrics == self._last_scroll_metrics:
             return
         self._last_scroll_metrics = metrics
@@ -513,6 +521,33 @@ class TerminalGrid(QQuickPaintedItem):
     def _finish_selection(self) -> None:
         self._selecting = False
         self.update()
+
+    def _copy_selection(self) -> bool:
+        """Copy the current terminal selection without sending PTY input."""
+        if self._selection_bounds() is None:
+            return False
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setText(self._selected_text())
+        return True
+
+    def _context_menu_hidden(self) -> None:
+        self._context_menu_open = False
+
+    def _show_selection_menu(self, event) -> bool:
+        if self._selection_bounds() is None:
+            return False
+        menu = self._context_menu
+        if menu is None:
+            menu = QMenu()
+            action = menu.addAction("Copy")
+            action.triggered.connect(self._copy_selection)
+            menu.aboutToHide.connect(self._context_menu_hidden)
+            self._context_menu = menu
+        self._context_menu_open = True
+        menu.popup(event.globalPosition().toPoint())
+        return True
 
     def _schedule(self) -> None:
         self._touch()
@@ -584,12 +619,16 @@ class TerminalGrid(QQuickPaintedItem):
         old_buf = (previous or {}).get("buf") or []
         old_history = (previous or {}).get("history") or []
         new_history = snap.get("history") or []
-        if bool(snap.get("alt_screen")):
-            self._view_offset = 0
-        elif self._view_offset > 0 and len(new_history) > len(old_history):
+        if (
+            not bool(snap.get("alt_screen"))
+            and self._view_offset > 0
+            and len(new_history) > len(old_history)
+        ):
             # Keep the same document lines under the cursor while new output
             # grows below the user's manually scrolled viewport.
             self._view_offset += len(new_history) - len(old_history)
+        elif bool(snap.get("alt_screen")):
+            self._view_offset = 0
         self._emit_scroll_metrics()
         if (not old_buf) or len(old_buf) != len(new_buf):
             self._touch()
@@ -751,11 +790,13 @@ class TerminalGrid(QQuickPaintedItem):
         if (
             event.key() == Qt.Key.Key_C
             and mods & Qt.KeyboardModifier.ControlModifier
-            and mods & Qt.KeyboardModifier.ShiftModifier
         ):
-            selected = self._selected_text()
-            if selected:
-                QGuiApplication.clipboard().setText(selected)
+            if self._copy_selection():
+                event.accept()
+                return
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                # Preserve the terminal convention for Ctrl+Shift+C when
+                # there is no local selection.
                 event.accept()
                 return
         mapped = self._map_key(event)
@@ -776,6 +817,12 @@ class TerminalGrid(QQuickPaintedItem):
 
     def mousePressEvent(self, event) -> None:
         self.forceActiveFocus()
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._show_selection_menu(event)
+        ):
+            event.accept()
+            return
         shift_select = bool(
             event.modifiers() & Qt.KeyboardModifier.ShiftModifier
         )
@@ -804,6 +851,12 @@ class TerminalGrid(QQuickPaintedItem):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._context_menu_open
+        ):
+            event.accept()
+            return
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self._selecting
@@ -859,10 +912,14 @@ class TerminalGrid(QQuickPaintedItem):
             return False
         # Inline Codex sessions intentionally keep terminal scrollback local
         # to this renderer.  Consume the wheel here so it cannot become a
-        # prompt keystroke, while retaining the TUI mouse path for alternate
-        # screen overlays that own their own pager.
+        # prompt keystroke.
         steps = max(1, abs(int(delta / 120)))
-        if self._scroll_view((3 if delta > 0 else -3) * steps):
+        snap = self._snap or {}
+        history = snap.get("history") or getattr(
+            self._vt, "history", []
+        )
+        if not bool(snap.get("alt_screen")) and history:
+            self._scroll_view((3 if delta > 0 else -3) * steps)
             return True
         if self._vt.mouse_mode:
             button = 64 if delta > 0 else 65
@@ -871,11 +928,9 @@ class TerminalGrid(QQuickPaintedItem):
             if report:
                 self.dataProduced.emit(report)
             return bool(report)
-        # Arrow keys are input-history navigation in Grok/Codex TUI.  Page
-        # keys belong to the rendered session view, so wheel scrolling must
-        # use them instead of feeding Up/Down into the prompt.
-        seq = "\x1b[5~" if delta > 0 else "\x1b[6~"
-        self.dataProduced.emit(seq * steps)
+        # There is no local scrollback yet.  Still consume the event: sending
+        # PageUp/PageDown to the PTY would mutate the live prompt instead of
+        # scrolling the rendered text.
         return True
 
     def wheelEvent(self, event) -> None:
@@ -999,10 +1054,10 @@ class TerminalGrid(QQuickPaintedItem):
             return "\x1b[Z" if shift else "\t"
         if key == Qt.Key.Key_Escape:
             return "\x1b"
-        if ctrl and text:
-            return text
         if ctrl and Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
             return chr(key - Qt.Key.Key_A + 1)
+        if ctrl and text:
+            return text
         if alt and text:
             return "\x1b" + text
         if text:

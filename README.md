@@ -19,6 +19,43 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-06 · GPTUI scrollback, copy and approval flow
+
+Previous public patch (`5edae4f`, documenting published source `aefff5b`)
+already made GPTUI a first-class motor beside GROK TUI. This patch keeps that
+architecture and finishes the parts that were still rough in daily use.
+
+**Real GPTUI scrollback.** GPTUI now keeps bounded, row-based terminal
+scrollback from the VT layer, including Codex's top-anchored inline scroll
+regions. Older text is shown inside the fixed chat frame; the frame itself
+does not move, empty screen snapshots are never used as history, and wheel
+events cannot leak into the live prompt. The scrollbar is clamped to the real
+viewport and follows the normal direction: top is older text, bottom is the
+live tail.
+
+**Normal terminal copy.** Drag selection is copied with Ctrl+C. Right-clicking
+a selection opens the standard Copy context menu. Ctrl+C without a selection
+keeps its normal terminal meaning and sends the interrupt character to the
+PTY; Ctrl+Shift+C remains harmless when there is no selection. Grok TUI's
+alternate-screen mouse handling remains unchanged.
+
+**Universal Operational Stream remains authoritative.** Direct user messages
+in the shared chat stream are the active task instruction, while
+`AGENTS.md`, approval contracts and explicit red/yellow boundaries remain
+the agent's guardrails. An operation approval is requested in the stream and
+applies only to the current operation.
+
+**Long GPTUI sessions.** For extended interactive work, the recommended model
+is `gpt-5.6-luna xhigh`; select it with GPTUI's `/model` command when it is
+available to the account. It is recommended for near-continuous use with more
+headroom before the account's five-hour token limit. The model choice is a
+recommendation, not a credential or a change to the approval boundaries, and
+account quotas still apply.
+
+Unchanged: no credentials, login state, model weights or local session state
+are added to git; GROK TUI remains available; and network, production and
+other restricted actions stay behind the existing approval boundaries.
+
 ## Patch notes · 2026-09-06 · GPTUI, media and workspace consolidation
 
 What GitHub had until this push (`aefff5b`, earlier 2026-09-06): the
