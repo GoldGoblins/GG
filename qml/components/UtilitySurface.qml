@@ -301,7 +301,9 @@ Item {
     }
 
     Timer {
-        interval: 8
+        // Spectrum is produced off the GUI thread and delivered as cached
+        // data; paint at the desktop's minimum visual cadence.
+        interval: 16
         running: root.liveMeters
         repeat: true
         onTriggered: root.refreshMeters()
@@ -562,13 +564,13 @@ Item {
                         onHeightChanged: requestPaint()
                         onPaint: {
                             var ctx = getContext("2d")
-                            ctx.reset()
                             var cols = root.spectrumBars
                             var segs = root.spectrumSegs
                             var w = width
                             var h = height
                             if (w < 2 || h < 2)
                                 return
+                            ctx.clearRect(0, 0, w, h)
                             var gapX = 1
                             var gapY = 1
                             var colW = Math.max(1, Math.floor((w - (cols - 1) * gapX) / cols))
@@ -599,6 +601,9 @@ Item {
                             var step = 1 / Math.max(1, segs)
                             var up = step * root.spectrumAttack
                             var down = step * root.spectrumRelease
+                            var litLevels = []
+                            var peakLevels = []
+                            var peakVisible = []
                             for (i = 0; i < cols; i++) {
                                 var target = 0
                                 if (root.playing && rows && i < rows.length)
@@ -627,26 +632,50 @@ Item {
                                 }
                                 peaks[i] = peak
                                 holds[i] = hold
-                                var lit = Math.round(level * segs)
+                                litLevels.push(Math.round(level * segs))
                                 var peakSeg = Math.round(peak * segs) - 1
                                 if (peak > 0 && peakSeg < 0)
                                     peakSeg = 0
-                                for (s = 0; s < segs; s++) {
-                                    var on = s < lit
-                                    var isPeak = peak > 0.02 && s === peakSeg
-                                    if (!on && !isPeak)
-                                        continue
-                                    var y = yBase + (segs - 1 - s) * (blockH + gapY)
-                                    var frac = segs <= 1 ? 0 : s / (segs - 1)
-                                    if (isPeak && !on)
-                                        ctx.fillStyle = "#f0e6c0"
-                                    else
-                                        ctx.fillStyle = root.ledColor(frac)
-                                    ctx.fillRect(x, y, colW, blockH)
-                                }
+                                peakLevels.push(peakSeg)
+                                peakVisible.push(peak > 0.02)
                                 x += colW + gapX
                                 if (x >= w)
                                     break
+                            }
+                            // Paint row-wise with one fill style per LED color.
+                            // Small square cells are intentionally used here:
+                            // they read as crisp LED dots and avoid thousands
+                            // of expensive path/arc operations per frame.
+                            var dotW = Math.max(1, colW - 1)
+                            var dotH = Math.max(1, blockH - 1)
+                            for (s = 0; s < segs; s++) {
+                                var frac = segs <= 1 ? 0 : s / (segs - 1)
+                                ctx.fillStyle = root.ledColor(frac)
+                                var rowY = yBase + (segs - 1 - s) * (blockH + gapY)
+                                for (i = 0; i < litLevels.length; i++) {
+                                    if (s < litLevels[i]) {
+                                        var dotX = i * (colW + gapX)
+                                        ctx.fillRect(
+                                            dotX + Math.floor((colW - dotW) * 0.5),
+                                            rowY + Math.floor((blockH - dotH) * 0.5),
+                                            dotW,
+                                            dotH
+                                        )
+                                    }
+                                }
+                            }
+                            ctx.fillStyle = "#f0e6c0"
+                            for (i = 0; i < peakLevels.length; i++) {
+                                if (!peakVisible[i] || peakLevels[i] < litLevels[i])
+                                    continue
+                                var peakX = i * (colW + gapX)
+                                var peakY = yBase + (segs - 1 - peakLevels[i]) * (blockH + gapY)
+                                ctx.fillRect(
+                                    peakX + Math.floor((colW - dotW) * 0.5),
+                                    peakY + Math.floor((blockH - dotH) * 0.5),
+                                    dotW,
+                                    dotH
+                                )
                             }
                         }
                     }

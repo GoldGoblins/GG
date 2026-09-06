@@ -24,6 +24,7 @@ ApplicationWindow {
     property string engineTarget: "GROK_TUI"
     readonly property string networkAuthority: (
         root.engineTarget === "GROK_TUI"
+        || root.engineTarget === "GPT_TUI"
         || root.engineTarget === "GROK_WORKER"
     )
         ? "CONNECTED"
@@ -38,10 +39,12 @@ ApplicationWindow {
     property var liveAidBackend: null
     readonly property var workspace: workspaceLoader.item
     property string grokWalletJson: "{}"
+    property string gptWalletJson: "{}"
     property string mandateRailJson: "{}"
     property string actionAuthority: "NONE"
     property string mandateLabel: "NONE"
     property string cryptoStatusJson: "{}"
+
     onSurfaceHostChanged: {
         root.pullCryptoStatus()
         root.applyDesktopShellNow()
@@ -453,6 +456,7 @@ ApplicationWindow {
     property bool showOpenTabInInput: false
     property bool showInnerEditorChrome: true
     property bool desktopShell: false
+    property bool appFullscreen: false
     readonly property color violet: "#b6a6c8"
     readonly property color green: "#8db89a"
     readonly property color amber: "#c8a97e"
@@ -474,6 +478,9 @@ ApplicationWindow {
         target: root.surfaceHost
         function onGrokWalletChanged(payload) {
             root.grokWalletJson = payload
+        }
+        function onGptWalletChanged(payload) {
+            root.gptWalletJson = payload
         }
         function onQmlLiveReload() {
             if (!root.shellLoading)
@@ -562,15 +569,21 @@ ApplicationWindow {
         root.surfaceHost.applyDesktopShell(root.desktopShell)
     }
 
+    function toggleAppFullscreen() {
+        root.appFullscreen = !root.appFullscreen
+    }
+
     title: "GG AI Desktop · Alpha"
     width: 1920
     height: 1080
     minimumWidth: 820
     minimumHeight: 620
-    flags: root.desktopShell
+    flags: root.desktopShell && !root.appFullscreen
         ? (Qt.FramelessWindowHint | Qt.WindowStaysOnBottomHint)
         : Qt.Window
-    visibility: root.desktopShell ? Window.Windowed : Window.Maximized
+    visibility: root.appFullscreen
+        ? Window.FullScreen
+        : (root.desktopShell ? Window.Windowed : Window.Maximized)
     color: root.canvas
 
     ListModel {
@@ -1171,9 +1184,16 @@ ApplicationWindow {
     }
 
     function scrollChatToLatest() {
-        root.followChatTail = true
+        // Keep a reader's manual position.  New streamed nodes may request a
+        // tail update, but they must not silently yank the viewport back down
+        // after the user has scrolled up to inspect an earlier message.
+        if (!root.followChatTail)
+            return
         root.stickChatToLatest()
-        Qt.callLater(root.stickChatToLatest)
+        Qt.callLater(function() {
+            if (root.followChatTail)
+                root.stickChatToLatest()
+        })
     }
 
     function setMandateRail(payload) {
@@ -1313,6 +1333,29 @@ ApplicationWindow {
                         }
                     }
                 }
+
+                Text {
+                    text: "·"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    id: fullscreenButton
+                    objectName: "topBarFullscreenButton"
+                    text: root.appFullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN"
+                    color: root.appFullscreen ? root.amber : "#c8cdd4"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    font.bold: root.appFullscreen
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleAppFullscreen()
+                    }
+                }
             }
 
             Row {
@@ -1439,7 +1482,24 @@ ApplicationWindow {
                 GrokTuiHole {
                     id: grokTuiHost
                     objectName: "grokTuiHost"
+                    terminalId: "ws.tui.grok"
                     visible: root.engineTarget === "GROK_TUI"
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: composer.top
+                    anchors.leftMargin: chatChrome.padding
+                    anchors.rightMargin: chatChrome.padding
+                    anchors.topMargin: chatChrome.topChrome
+                    anchors.bottomMargin: 0
+                    surfaceHost: root.surfaceHost
+                }
+
+                GrokTuiHole {
+                    id: gptTuiHost
+                    objectName: "gptTuiHost"
+                    terminalId: "ws.tui.gpt"
+                    visible: root.engineTarget === "GPT_TUI"
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -1454,7 +1514,7 @@ ApplicationWindow {
                 Flickable {
                     id: chatFlick
                     objectName: "chatCockpit"
-                    visible: root.engineTarget !== "GROK_TUI"
+                    visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -1473,17 +1533,31 @@ ApplicationWindow {
                     flickableDirection: Flickable.VerticalFlick
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: GgScrollBar {
+                        objectName: "chatScrollBar"
+                        keepVisible: true
                         policy: chatFlick.visible
                             ? ScrollBar.AsNeeded
                             : ScrollBar.AlwaysOff
                     }
                     onContentHeightChanged: {
-                        if (root.followChatTail || root.bridgeBusy)
+                        if (root.followChatTail)
                             root.stickChatToLatest()
                     }
                     onHeightChanged: {
-                        if (root.followChatTail || root.bridgeBusy)
+                        if (root.followChatTail)
                             root.stickChatToLatest()
+                    }
+                    onContentYChanged: {
+                        // Drop tail-follow as soon as a real drag moves the
+                        // viewport away from the newest line.  This happens
+                        // before the next streamed update can snap it back.
+                        if (
+                            chatFlick.moving
+                            && chatFlick.contentY
+                                + chatFlick.height
+                                < chatFlick.contentHeight - 32
+                        )
+                            root.followChatTail = false
                     }
                     onMovementStarted: {
                         root.followChatTail = (
@@ -1516,7 +1590,7 @@ ApplicationWindow {
                         anchors.bottom: parent.bottom
                         spacing: 8
                         onImplicitHeightChanged: {
-                            if (root.followChatTail || root.bridgeBusy)
+                            if (root.followChatTail)
                                 root.stickChatToLatest()
                         }
 
@@ -1557,7 +1631,7 @@ ApplicationWindow {
                                             livePulse: root.bridgeBusy
                                                 && streamDelegate.model.taskId === root.activeTaskId
                                             onImplicitHeightChanged: {
-                                                if (root.followChatTail || root.bridgeBusy)
+                                                if (root.followChatTail)
                                                     root.stickChatToLatest()
                                             }
                                         }
@@ -1669,7 +1743,7 @@ ApplicationWindow {
                                                 ? streamDelegate.width - width
                                                 : 0
                                             onImplicitHeightChanged: {
-                                                if (root.followChatTail || root.bridgeBusy)
+                                                if (root.followChatTail)
                                                     root.stickChatToLatest()
                                             }
                                         }
@@ -1913,6 +1987,7 @@ ApplicationWindow {
                             value === "LOCAL_QWEN"
                             || value === "GROK_WORKER"
                             || value === "GROK_TUI"
+                            || value === "GPT_TUI"
                         ) {
                             root.engineTarget = value
                             root.persistDesktopSettings()
@@ -2046,6 +2121,7 @@ ApplicationWindow {
                 modelState: root.bridgeBusy ? "BUSY" : "READY"
                 engineTarget: root.engineTarget
                 grokWalletJson: root.grokWalletJson
+                gptWalletJson: root.gptWalletJson
                 bridgeState: root.bridgeBusy ? "BUSY" : "CONNECTED"
                 frameBorder: root.frameBorder
                 frameRadius: root.frameRadius
@@ -2060,8 +2136,10 @@ ApplicationWindow {
                 }
                 onChatSessionChosen: function(sessionId, engine) {
                     root.activeChatSession = sessionId
-                    if (engine === "GROK_TUI" || engine === "GROK_WORKER" || engine === "LOCAL_QWEN")
+                    if (engine === "GPT_TUI" || engine === "GROK_TUI" || engine === "GROK_WORKER" || engine === "LOCAL_QWEN")
                         root.engineTarget = engine
+                    if (engine === "GPT_TUI" && root.surfaceHost)
+                        root.surfaceHost.activateGptTui(sessionId)
                     if (engine === "GROK_TUI" && root.surfaceHost)
                         root.surfaceHost.resumeGrokTui(sessionId)
                 }

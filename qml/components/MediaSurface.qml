@@ -1,5 +1,6 @@
 import QtQuick
 import QtMultimedia
+import QtQuick.Window
 
 Item {
     id: root
@@ -16,6 +17,11 @@ Item {
     property string pendingPlayId: ""
     property bool searchBusy: false
     property real _clockStamp: 0
+    property bool playerWantsPlay: false
+    property int playerRetryCount: 0
+    property real watchdogPosition: -1
+    property int watchdogIdleTicks: 0
+    property bool videoFullscreen: false
     signal nowPlayingChanged(string label)
 
     readonly property var status: {
@@ -151,10 +157,103 @@ Item {
         return s
     }
 
+    function toggleFullscreen() {
+        root.videoFullscreen = !root.videoFullscreen
+    }
+
+    function reportPlayerState() {
+        if (!root.surfaceHost || !root.surfaceHost.mediaReportPlayerState)
+            return
+        var status = holePlayer.mediaStatus
+        var buffering = root.qmlVideo
+            && root.status.paused !== true
+            && (
+                status === MediaPlayer.NoMedia
+                || status === MediaPlayer.LoadingMedia
+                || status === MediaPlayer.BufferingMedia
+                || status === MediaPlayer.StalledMedia
+            )
+        var playing = root.qmlVideo
+            && root.status.paused !== true
+            && holePlayer.playbackState === MediaPlayer.PlayingState
+            && !buffering
+        root.surfaceHost.mediaReportPlayerState(playing, buffering)
+    }
+
+    function schedulePlayerRetry() {
+        if (!root.qmlVideo || root.status.paused === true || !root.lastPlayUrl)
+            return
+        if (playerRetryTimer.running)
+            return
+        playerRetryTimer.interval = Math.min(5000, 700 + root.playerRetryCount * 450)
+        playerRetryTimer.start()
+    }
+
+    function resetPlayerWatchdog() {
+        root.watchdogPosition = -1
+        root.watchdogIdleTicks = 0
+    }
+
+    function watchPlayer() {
+        if (!root.qmlVideo || root.status.paused === true || !root.playerWantsPlay) {
+            root.resetPlayerWatchdog()
+            return
+        }
+        var status = holePlayer.mediaStatus
+        if (status === MediaPlayer.StalledMedia
+            || status === MediaPlayer.BufferingMedia) {
+            root.watchdogIdleTicks += 1
+            if (root.watchdogIdleTicks >= 12) {
+                root.watchdogIdleTicks = 0
+                root.schedulePlayerRetry()
+            }
+            return
+        }
+        if (holePlayer.playbackState !== MediaPlayer.PlayingState) {
+            root.resetPlayerWatchdog()
+            return
+        }
+        var position = Number(holePlayer.position || 0)
+        var duration = Number(holePlayer.duration || 0)
+        // Some live feeds expose neither a duration nor a clock.  Do not
+        // restart those merely because their position remains zero.
+        if (position <= 0 && duration <= 0) {
+            root.resetPlayerWatchdog()
+            return
+        }
+        if (root.watchdogPosition >= 0
+            && Math.abs(position - root.watchdogPosition) < 0.5)
+            root.watchdogIdleTicks += 1
+        else
+            root.watchdogIdleTicks = 0
+        root.watchdogPosition = position
+        if (root.watchdogIdleTicks >= 12) {
+            root.watchdogIdleTicks = 0
+            root.schedulePlayerRetry()
+        }
+    }
+
+    function retryPlayer() {
+        if (!root.qmlVideo || root.status.paused === true || !root.lastPlayUrl)
+            return
+        root.playerRetryCount += 1
+        root.resetPlayerWatchdog()
+        var url = root.lastPlayUrl
+        holePlayer.stop()
+        holePlayer.source = ""
+        holePlayer.source = url
+        root.playerWantsPlay = true
+        root.reportPlayerState()
+    }
+
     function syncPlayer() {
         if (!root.playerReady)
             return
         if (!root.qmlVideo) {
+            root.videoFullscreen = false
+            playerRetryTimer.stop()
+            root.resetPlayerWatchdog()
+            root.playerWantsPlay = false
             root.lastPlayUrl = ""
             holePlayer.stop()
             holePlayer.source = ""
@@ -165,29 +264,51 @@ Item {
         var url = root.toMediaUrl(String((root.status.now || {}).source || ""))
         holeAudio.volume = Math.max(0, Math.min(1, Number(root.status.volume || 70) / 100))
         if (url !== root.lastPlayUrl) {
+            playerRetryTimer.stop()
+            root.resetPlayerWatchdog()
             root.lastPlayUrl = url
+            root.playerRetryCount = 0
+            root.playerWantsPlay = root.status.paused !== true && !!url
             root.playerError = ""
+            holePlayer.stop()
+            holePlayer.source = ""
             holePlayer.source = url
             if (root.status.paused === true)
                 holePlayer.pause()
-            else if (url)
-                holePlayer.play()
+            root.reportPlayerState()
             return
         }
         if (root.status.paused === true) {
+            root.playerWantsPlay = false
             if (holePlayer.playbackState !== MediaPlayer.PausedState)
                 holePlayer.pause()
+            root.reportPlayerState()
             return
         }
         if (!url)
             return
-        if (holePlayer.playbackState === MediaPlayer.StoppedState)
+        root.playerWantsPlay = true
+        if (
+            (holePlayer.mediaStatus === MediaPlayer.LoadedMedia
+                || holePlayer.mediaStatus === MediaPlayer.BufferedMedia)
+            && holePlayer.playbackState !== MediaPlayer.PlayingState
+        )
             holePlayer.play()
+        root.reportPlayerState()
     }
 
     onLibretroChanged: {
         if (root.libretro)
             hole.forceActiveFocus()
+    }
+
+    onVideoFullscreenChanged: {
+        if (root.videoFullscreen && root.qmlVideo) {
+            fullscreenWindow.showFullScreen()
+            fullscreenWindow.requestActivate()
+        } else {
+            fullscreenWindow.hide()
+        }
     }
 
     onStatusJsonChanged: {
@@ -197,6 +318,8 @@ Item {
 
     Component.onCompleted: {
         root.playerReady = true
+        if (Window.window)
+            fullscreenWindow.transientParent = Window.window
         root.syncPlayer()
     }
 
@@ -235,10 +358,26 @@ Item {
     }
 
     Timer {
-        interval: root.streamBuffering || root.pendingPlayId.length > 0 ? 80 : 5000
+        // State changes arrive through mediaStateChanged.  This is only a
+        // recovery poll while a stream negotiates, not a second render loop.
+        interval: root.streamBuffering || root.pendingPlayId.length > 0 ? 250 : 5000
         running: root.visible
         repeat: true
         onTriggered: root.refreshLive()
+    }
+
+    Timer {
+        id: playerRetryTimer
+        repeat: false
+        onTriggered: root.retryPlayer()
+    }
+
+    Timer {
+        id: playerWatchdogTimer
+        interval: 1000
+        running: root.visible && root.qmlVideo && root.playerWantsPlay
+        repeat: true
+        onTriggered: root.watchPlayer()
     }
 
     onVisibleChanged: {
@@ -558,7 +697,7 @@ Item {
                         anchors.fill: parent
                         anchors.margins: 1
                         fillMode: VideoOutput.PreserveAspectFit
-                        visible: root.qmlVideo
+                        visible: root.qmlVideo && !root.videoFullscreen
                     }
 
                     Image {
@@ -604,19 +743,104 @@ Item {
 
                     MediaPlayer {
                         id: holePlayer
-                        videoOutput: holeVideo
+                        videoOutput: root.videoFullscreen ? fullscreenVideo : holeVideo
                         audioOutput: holeAudio
                         onErrorOccurred: function(error, errorString) {
                             root.playerError = String(errorString || "VIDEO ERROR")
+                            root.reportPlayerState()
+                            root.schedulePlayerRetry()
                         }
                         onMediaStatusChanged: {
+                            root.reportPlayerState()
                             if (!root.qmlVideo || root.status.paused === true)
                                 return
-                            if (holePlayer.mediaStatus === MediaPlayer.EndOfMedia && root.lastPlayUrl)
-                                holePlayer.play()
+                            if (
+                                holePlayer.mediaStatus === MediaPlayer.LoadedMedia
+                                || holePlayer.mediaStatus === MediaPlayer.BufferedMedia
+                            ) {
+                                root.playerError = ""
+                                root.playerRetryCount = 0
+                                if (root.playerWantsPlay
+                                    && holePlayer.playbackState !== MediaPlayer.PlayingState)
+                                    holePlayer.play()
+                            } else if (holePlayer.mediaStatus === MediaPlayer.StalledMedia) {
+                                root.schedulePlayerRetry()
+                            } else if (holePlayer.mediaStatus === MediaPlayer.InvalidMedia) {
+                                root.schedulePlayerRetry()
+                            } else if (holePlayer.mediaStatus === MediaPlayer.EndOfMedia && root.lastPlayUrl) {
+                                root.schedulePlayerRetry()
+                            }
+                        }
+                        onPlaybackStateChanged: {
+                            root.reportPlayerState()
+                            if (root.qmlVideo
+                                && root.playerWantsPlay
+                                && root.status.paused !== true
+                                && holePlayer.playbackState === MediaPlayer.StoppedState)
+                                root.schedulePlayerRetry()
                         }
                         onPositionChanged: root.reportClock()
                         onDurationChanged: root.reportClock()
+                    }
+
+                    Window {
+                        id: fullscreenWindow
+                        objectName: "mediaVideoFullscreenWindow"
+                        color: "#000000"
+                        flags: Qt.FramelessWindowHint
+                        visible: false
+                        onClosing: root.videoFullscreen = false
+
+                        VideoOutput {
+                            id: fullscreenVideo
+                            objectName: "mediaFullscreenVideo"
+                            anchors.fill: parent
+                            fillMode: VideoOutput.PreserveAspectFit
+                        }
+
+                        Rectangle {
+                            id: fullscreenExitButton
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 18
+                            width: fullscreenExitLabel.implicitWidth + 18
+                            height: 24
+                            radius: 2
+                            color: fullscreenExitMouse.containsMouse ? "#303030" : "#181818"
+                            opacity: fullscreenExitMouse.containsMouse ? 1.0 : 0.0
+                            border.color: "#6a6a6a"
+                            border.width: 1
+                            z: 2
+
+                            Behavior on opacity {
+                                NumberAnimation { duration: 140 }
+                            }
+
+                            Text {
+                                id: fullscreenExitLabel
+                                anchors.centerIn: parent
+                                text: "EXIT FULLSCREEN"
+                                color: "#e6edf3"
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                font.bold: true
+                            }
+
+                            MouseArea {
+                                id: fullscreenExitMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.videoFullscreen = false
+                            }
+                        }
+
+                        Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_Escape) {
+                                root.videoFullscreen = false
+                                event.accepted = true
+                            }
+                        }
                     }
 
                     Text {
@@ -642,13 +866,53 @@ Item {
                         objectName: "mediaHoleBuffer"
                         anchors.right: parent.right
                         anchors.top: parent.top
-                        anchors.margins: 8
+                        anchors.rightMargin: 8
+                        anchors.topMargin: root.qmlVideo ? 36 : 8
                         active: root.qmlVideo && (
                             holePlayer.mediaStatus === MediaPlayer.LoadingMedia
                             || holePlayer.mediaStatus === MediaPlayer.BufferingMedia
                             || holePlayer.mediaStatus === MediaPlayer.StalledMedia
                         )
                         cell: 6
+                    }
+
+                    Rectangle {
+                        id: fullscreenButton
+                        objectName: "mediaFullscreenButton"
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        width: fullscreenLabel.implicitWidth + 18
+                        height: 22
+                        radius: 2
+                        color: fullscreenMouse.containsMouse ? "#303030" : "#181818"
+                        opacity: fullscreenMouse.containsMouse ? 1.0 : 0.0
+                        border.color: "#6a6a6a"
+                        border.width: 1
+                        visible: root.qmlVideo
+                        z: 4
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 140 }
+                        }
+
+                        Text {
+                            id: fullscreenLabel
+                            anchors.centerIn: parent
+                            text: root.videoFullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN"
+                            color: "#e6edf3"
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+
+                        MouseArea {
+                            id: fullscreenMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.toggleFullscreen()
+                        }
                     }
 
                     Text {

@@ -16,6 +16,7 @@ Item {
     readonly property int liveCap: 120
     property int liveTicks: 0
     property real liveCpu: 0
+    property real liveGpu: 0
     property real liveMemUsed: 0
     property real liveMemTotal: 0
     property real liveTemp: 0
@@ -29,6 +30,7 @@ Item {
     property int liveNetRx: 0
     property int liveNetTx: 0
     property var liveCpuHist: []
+    property var liveGpuHist: []
     property var liveMemHist: []
     property var liveTempHist: []
     property var liveDiskHist: []
@@ -103,6 +105,8 @@ Item {
                 var parsed = JSON.parse(raw)
                 if (parsed.cpu_hist && parsed.cpu_hist.length)
                     root.liveCpuHist = parsed.cpu_hist.slice()
+                if (parsed.gpu_hist && parsed.gpu_hist.length)
+                    root.liveGpuHist = parsed.gpu_hist.slice()
                 if (parsed.mem_hist && parsed.mem_hist.length)
                     root.liveMemHist = parsed.mem_hist.slice()
                 if (parsed.temp_hist && parsed.temp_hist.length)
@@ -197,6 +201,8 @@ Item {
     function arr(name) {
         if (name === "cpu_hist")
             return root.liveCpuHist
+        if (name === "gpu_hist")
+            return root.liveGpuHist
         if (name === "mem_hist")
             return root.liveMemHist
         if (name === "temp_hist")
@@ -219,6 +225,8 @@ Item {
         var fb = fallback === undefined ? 0 : fallback
         if (name === "cpu_busy")
             return root.liveCpu
+        if (name === "gpu_busy")
+            return root.liveGpu
         if (name === "mem_used_kb")
             return root.liveMemUsed
         if (name === "mem_total_kb")
@@ -295,6 +303,7 @@ Item {
         root.diskWPos = sprung[0]
         root.diskWVel = sprung[1]
         root.liveCpu = Number(p.cpu_busy || 0)
+        root.liveGpu = Number(p.gpu_busy || 0)
         root.liveMemUsed = Number(p.mem_used_kb || 0)
         root.liveMemTotal = Number(p.mem_total_kb || 0)
         root.liveTemp = Number(p.temp_c || 0)
@@ -308,6 +317,7 @@ Item {
         root.liveNetRx = root.netRxPos
         root.liveNetTx = root.netTxPos
         root.liveCpuHist = root.pushHist(root.liveCpuHist, root.liveCpu)
+        root.liveGpuHist = root.pushHist(root.liveGpuHist, root.liveGpu)
         root.liveMemHist = root.pushHist(
             root.liveMemHist,
             root.liveMemTotal ? (root.liveMemUsed / root.liveMemTotal * 100) : 0
@@ -473,7 +483,7 @@ Item {
                             anchors.top: parent.top
                             width: Math.max(92, parent.width * 0.14)
                             height: parent.height * 0.42
-                            leftLegend: "CPU"
+                            leftLegend: "CPU · CLK · TEMP · GPU"
                             rightLegend: root.n("cpu_busy").toFixed(1) + "%"
 
                             Row {
@@ -481,15 +491,20 @@ Item {
                                 spacing: 6
 
                                 Repeater {
-                                    model: 3
+                                    model: 4
                                     delegate: Item {
                                         required property int index
                                         readonly property string barKey: index === 0
                                             ? "cpu_busy"
-                                            : (index === 1 ? "mhz" : "temp_c")
+                                            : (index === 1 ? "mhz" : (index === 2 ? "temp_c" : "gpu_busy"))
                                         readonly property real barCap: index === 0
                                             ? 100
-                                            : (index === 1 ? Math.max(1, root.n("mhz_max")) : 105)
+                                            : (index === 1 ? Math.max(1, root.n("mhz_max"))
+                                                : (index === 2 ? 105 : 100))
+                                        readonly property color barColor: index === 0
+                                            ? "#8db89a"
+                                            : (index === 1 ? "#d58b8b"
+                                                : (index === 2 ? "#c8a97e" : "#78a8d8"))
                                         width: 22
                                         height: parent.height
                                         Rectangle {
@@ -503,20 +518,33 @@ Item {
                                             anchors.bottom: parent.bottom
                                             height: parent.height * Math.max(
                                                 0.02,
-                                                Math.min(1, root.n(barKey) / barCap)
+                                                Math.min(1, (index === 3 ? root.liveGpu : root.n(barKey)) / barCap)
                                             )
-                                            color: "#8db89a"
+                                            color: barColor
+                                        }
+                                        Text {
+                                            anchors.top: parent.top
+                                            anchors.topMargin: 4
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            text: index === 0 ? "CPU" : (index === 1 ? "CLK" : (index === 2 ? "TMP" : "GPU"))
+                                            color: barColor
+                                            font.family: "monospace"
+                                            font.pixelSize: 7
                                         }
                                         Text {
                                             anchors.bottom: parent.bottom
-                                            anchors.bottomMargin: 2
+                                            anchors.bottomMargin: 4
                                             anchors.horizontalCenter: parent.horizontalCenter
-                                            text: index === 0 ? "CPU" : (index === 1 ? "CLK" : "TMP")
-                                            color: "#a8b0b8"
+                                            text: index === 0
+                                                ? root.n("cpu_busy").toFixed(0) + "%"
+                                                : (index === 1
+                                                    ? root.n("mhz").toFixed(0)
+                                                    : (index === 2
+                                                        ? root.n("temp_c").toFixed(0) + "C"
+                                                        : root.n("gpu_busy").toFixed(0) + "%"))
+                                            color: "#d8dee9"
                                             font.family: "monospace"
                                             font.pixelSize: 7
-                                            rotation: -90
-                                            visible: false
                                         }
                                     }
                                 }
@@ -534,12 +562,41 @@ Item {
                             leftLegend: "CPU OVERVIEW"
                             rightLegend: root.n("cpu_busy").toFixed(1) + "%"
 
-                            TmogSpark {
+                            Row {
                                 anchors.fill: parent
-                                values: root.arr("cpu_hist")
-                                yMax: 100
-                                stroke: "#8db89a"
-                                fill: "#1c2a22"
+                                anchors.margins: 8
+                                spacing: 6
+                                Repeater {
+                                    model: [
+                                        { "label": "CPU", "key": "cpu_hist", "max": 100, "color": "#8db89a", "fill": "#1c2a22" },
+                                        { "label": "TEMP", "key": "temp_hist", "max": 105, "color": "#c8a97e", "fill": "#2a2418" },
+                                        { "label": "GPU", "key": "gpu_hist", "max": 100, "color": "#78a8d8", "fill": "#182536" }
+                                    ]
+                                    delegate: Item {
+                                        required property var modelData
+                                        width: (parent.width - 12) / 3
+                                        height: parent.height
+                                        Text {
+                                            anchors.left: parent.left
+                                            anchors.top: parent.top
+                                            text: modelData.label
+                                            color: modelData.color
+                                            font.family: "monospace"
+                                            font.pixelSize: 10
+                                        }
+                                        TmogSpark {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.bottom: parent.bottom
+                                            anchors.topMargin: 14
+                                            values: root.arr(modelData.key)
+                                            yMax: modelData.max
+                                            stroke: modelData.color
+                                            fill: modelData.fill
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -557,17 +614,20 @@ Item {
                                 spacing: 2
                                 Repeater {
                                     model: root.processes.slice(0, 8)
-                                    delegate: Text {
+                                    delegate: TmogRow {
                                         required property var modelData
                                         width: parent.width
                                         text: String(modelData.pid)
                                             + "  " + String(modelData.cpu_pct) + "%"
                                             + "  " + root.kib(modelData.rss_kb)
                                             + "  " + String(modelData.comm || "")
-                                        color: "#d8dee9"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                        elide: Text.ElideRight
+                                        selected: Number(modelData.pid) === root.selectedPid
+                                        onChosen: root.selectedPid = Number(modelData.pid)
+                                        onMenuRequested: {
+                                            root.selectedPid = Number(modelData.pid)
+                                            root.armMenu("proc", modelData)
+                                            tmogMenu.popup()
+                                        }
                                     }
                                 }
                             }
@@ -778,6 +838,7 @@ Item {
                             Repeater {
                                 model: [
                                     { "k": "CPU", "c": "#8db89a", "h": "cpu_hist" },
+                                    { "k": "GPU", "c": "#78a8d8", "h": "gpu_hist" },
                                     { "k": "MEMORY", "c": "#b6a6c8", "h": "mem_hist" },
                                     { "k": "ENERGY", "c": "#c8a97e", "h": "energy_hist" },
                                     { "k": "THERMALS", "c": "#c8a97e", "h": "temp_hist" },
@@ -797,7 +858,7 @@ Item {
                                         values: root.arr(modelData.h)
                                         stroke: modelData.c
                                         fill: "#161616"
-                                        yMax: modelData.k === "CPU" || modelData.k === "MEMORY"
+                                        yMax: modelData.k === "CPU" || modelData.k === "MEMORY" || modelData.k === "GPU"
                                             ? 100
                                             : (modelData.k === "THERMALS"
                                                 ? 105
@@ -827,7 +888,9 @@ Item {
                             leftLegend: root.perfKey
                             rightLegend: root.perfKey === "CPU"
                                 ? root.n("cpu_busy").toFixed(1) + "%"
-                                : (root.perfKey === "MEMORY"
+                                : (root.perfKey === "GPU"
+                                    ? root.n("gpu_busy").toFixed(1) + "%"
+                                    : (root.perfKey === "MEMORY"
                                     ? root.kib(root.n("mem_used_kb"))
                                     : (root.perfKey === "THERMALS"
                                         ? root.n("temp_c").toFixed(0) + " C"
@@ -837,7 +900,7 @@ Item {
                                                 ? root.bps(root.n("net_rx_bps") + root.n("net_tx_bps"))
                                                 : (root.n("energy_w")
                                                     ? String(root.n("energy_w")) + " W"
-                                                    : String(root.energy.source || "AC"))))))
+                                                    : String(root.energy.source || "AC")))))))
 
                             Column {
                                 anchors.fill: parent
@@ -848,7 +911,9 @@ Item {
                                     height: 16
                                     ratio: root.perfKey === "CPU"
                                         ? root.n("cpu_busy") / 100
-                                        : (root.perfKey === "MEMORY"
+                                        : (root.perfKey === "GPU"
+                                            ? root.n("gpu_busy") / 100
+                                            : (root.perfKey === "MEMORY"
                                             ? (root.n("mem_total_kb")
                                                 ? root.n("mem_used_kb") / root.n("mem_total_kb")
                                                 : 0)
@@ -858,12 +923,14 @@ Item {
                                                     ? (root.energy.battery_pct
                                                         ? Number(root.energy.battery_pct) / 100
                                                         : Math.min(1, root.n("energy_w") / Math.max(40, root.liveEnergyYMax)))
-                                                    : 0.05)))
-                                    onColor: root.perfKey === "MEMORY"
-                                        ? "#b6a6c8"
-                                        : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
-                                            ? "#c8a97e"
-                                            : "#8db89a")
+                                                    : 0.05))))
+                                    onColor: root.perfKey === "GPU"
+                                        ? "#78a8d8"
+                                        : (root.perfKey === "MEMORY"
+                                            ? "#b6a6c8"
+                                            : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
+                                                ? "#c8a97e"
+                                                : "#8db89a"))
                                     segments: 36
                                 }
 
@@ -872,9 +939,11 @@ Item {
                                     height: root.perfKey === "CPU"
                                         ? Math.max(72, parent.height * 0.28)
                                         : Math.max(120, parent.height * 0.55)
-                                    values: root.perfKey === "MEMORY"
-                                        ? root.arr("mem_hist")
-                                        : (root.perfKey === "THERMALS"
+                                    values: root.perfKey === "GPU"
+                                        ? root.arr("gpu_hist")
+                                        : (root.perfKey === "MEMORY"
+                                            ? root.arr("mem_hist")
+                                            : (root.perfKey === "THERMALS"
                                             ? root.arr("temp_hist")
                                             : (root.perfKey === "ENERGY"
                                                 ? root.arr("energy_hist")
@@ -882,8 +951,8 @@ Item {
                                                 ? root.arr("disk_hist")
                                                 : (root.perfKey === "NETWORK"
                                                     ? root.arr("net_hist")
-                                                    : root.arr("cpu_hist")))))
-                                    yMax: root.perfKey === "CPU" || root.perfKey === "MEMORY"
+                                                    : root.arr("cpu_hist"))))))
+                                    yMax: root.perfKey === "CPU" || root.perfKey === "MEMORY" || root.perfKey === "GPU"
                                         ? 100
                                         : (root.perfKey === "THERMALS"
                                             ? 105
@@ -894,16 +963,20 @@ Item {
                                                 : (root.perfKey === "NETWORK"
                                                     ? root.liveNetYMax
                                                     : 0))))
-                                    stroke: root.perfKey === "MEMORY"
-                                        ? "#b6a6c8"
-                                        : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
-                                            ? "#c8a97e"
-                                            : "#8db89a")
-                                    fill: root.perfKey === "MEMORY"
-                                        ? "#241c28"
-                                        : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
-                                            ? "#2a2418"
-                                            : "#1c2a22")
+                                    stroke: root.perfKey === "GPU"
+                                        ? "#78a8d8"
+                                        : (root.perfKey === "MEMORY"
+                                            ? "#b6a6c8"
+                                            : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
+                                                ? "#c8a97e"
+                                                : "#8db89a"))
+                                    fill: root.perfKey === "GPU"
+                                        ? "#182536"
+                                        : (root.perfKey === "MEMORY"
+                                            ? "#241c28"
+                                            : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
+                                                ? "#2a2418"
+                                                : "#1c2a22"))
                                 }
 
                                 Flow {
@@ -947,7 +1020,9 @@ Item {
                                             + root.n("mhz") + " MHz   up "
                                             + root.clock(root.n("uptime_s"))
                                             + "   threads " + String(root.n("process_count"))
-                                        : (root.perfKey === "MEMORY"
+                                        : (root.perfKey === "GPU"
+                                            ? "gpu " + root.n("gpu_busy").toFixed(1) + "%"
+                                            : (root.perfKey === "MEMORY"
                                             ? "capacity " + root.kib(root.n("mem_total_kb"))
                                                 + "   used " + root.kib(root.n("mem_used_kb"))
                                                 + "   avail " + root.kib(root.n("mem_avail_kb"))
@@ -968,7 +1043,7 @@ Item {
                                                         : String(root.energy.source || "AC")
                                                             + (root.n("energy_w")
                                                                 ? "   " + String(root.n("energy_w")) + " W package"
-                                                                : "   desktop · no battery")))))
+                                                                : "   desktop · no battery"))))))
                                 }
                             }
                         }

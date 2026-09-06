@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -503,14 +504,24 @@ def _cache_fresh(path: Path) -> bool:
     return age < CACHE_TTL
 
 
-def _cached_bytes(name: str, url: str) -> bytes:
+def _cached_bytes(name: str, url: str, *, timeout: float = 12.0) -> bytes:
     path = _cache_path(name)
     if _cache_fresh(path):
         try:
             return path.read_bytes()
         except OSError:
             pass
-    raw = _http_get(url)
+    stale = b""
+    try:
+        stale = path.read_bytes()
+    except OSError:
+        pass
+    try:
+        raw = _http_get(url, timeout=timeout)
+    except (OSError, urllib.error.URLError, TimeoutError):
+        if stale:
+            return stale
+        raise
     path.write_bytes(raw)
     path.chmod(0o600)
     return raw
@@ -580,7 +591,9 @@ def radio_browser_stations(
 def _iptv_playlist(url: str) -> list[dict[str, Any]]:
     name = "tv-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16] + ".m3u"
     try:
-        text = _cached_bytes(name, url).decode("utf-8", "replace")
+        # A dead IPTV mirror must not hold the GUI for the generic 12-second
+        # HTTP timeout.  The catalog can still use its last successful cache.
+        text = _cached_bytes(name, url, timeout=5.0).decode("utf-8", "replace")
     except (OSError, urllib.error.URLError, TimeoutError, UnicodeError):
         return []
     rows: list[dict[str, Any]] = []
@@ -590,12 +603,28 @@ def _iptv_playlist(url: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _iptv_playlists() -> list[list[dict[str, Any]]]:
+    """Fetch country/category playlists concurrently, keeping source order."""
+    if not IPTV_PLAYLISTS:
+        return []
+    workers = min(6, len(IPTV_PLAYLISTS))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gg-tv") as pool:
+        futures = [pool.submit(_iptv_playlist, url) for url in IPTV_PLAYLISTS]
+        rows: list[list[dict[str, Any]]] = []
+        for future in futures:
+            try:
+                rows.append(future.result())
+            except Exception:
+                rows.append([])
+        return rows
+
+
 def iptv_catalog() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for url in IPTV_PLAYLISTS:
+    for playlist in _iptv_playlists():
         taken = 0
-        for item in _iptv_playlist(url):
+        for item in playlist:
             if item["source"] in seen:
                 continue
             seen.add(item["source"])
@@ -958,8 +987,8 @@ def search_items(mode: str, query: str) -> list[dict[str, Any]]:
         return sort_radio_rows(rows)[:MAX_ITEMS]
     if kind == "TV":
         needle = cleaned.lower()
-        for url in IPTV_PLAYLISTS:
-            for item in _iptv_playlist(url):
+        for playlist in _iptv_playlists():
+            for item in playlist:
                 hay = (str(item.get("title") or "") + " " + str(item.get("source") or "")).lower()
                 if needle and needle not in hay:
                     continue

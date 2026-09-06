@@ -77,8 +77,17 @@ Item {
         var href = String(target || "")
         if (href === "about:blank" || href.indexOf("about:blank") === 0)
             return true
-        if (root.siteOnly)
+        if (root.siteOnly) {
+            if (href.indexOf("http://127.0.0.1:") === 0)
+                return true
+            if (href.indexOf("http://127.0.0.1/") === 0)
+                return true
+            if (href.indexOf("http://localhost:") === 0)
+                return true
+            if (href.indexOf("http://localhost/") === 0)
+                return true
             return false
+        }
         if (
             href.indexOf("https://") === 0
             || href.indexOf("http://") === 0

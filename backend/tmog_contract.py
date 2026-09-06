@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import pwd
 import socket
+import subprocess
+import threading
 import time
+import ctypes
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -26,7 +29,8 @@ MAX_APPIMAGE_BYTES = 200_000_000
 MAX_PROCESSES = 80
 MAX_SCAN = 512
 MAX_CMDLINE = 160
-MAX_HISTORY = 48
+MAX_HISTORY = 120
+_HISTORY_RAW_MAX = 7200
 MAX_CORES = 32
 MAX_CONNS = 48
 MAX_MOUNTS = 16
@@ -70,6 +74,12 @@ _prev_rapl: tuple[float, int] = (0.0, 0)
 _inode_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _gpu_busy_path: Path | None = None
 _gpu_busy_tried = False
+_nvml: ctypes.CDLL | None = None
+_nvml_handle: ctypes.c_void_p | None = None
+_nvml_tried = False
+_nvidia_value: float | None = None
+_nvidia_thread: threading.Thread | None = None
+_nvidia_next_poll = 0.0
 _RAPL_PATH = Path("/sys/class/powercap/intel-rapl:0/energy_uj")
 _MOUNT_SKIP = frozenset(
     {
@@ -111,8 +121,11 @@ _mem_hist: list[float] = []
 _net_hist: list[float] = []
 _disk_hist: list[float] = []
 _temp_hist: list[float] = []
+_mhz_hist: list[float] = []
+_gpu_hist: list[float] = []
 _energy_hist: list[float] = []
 _core_hist: list[list[float]] = []
+_history_samples: dict[str, deque[tuple[float, float]]] = {}
 _last_proc: dict[int, dict[str, Any]] = {}
 _tombstones: dict[int, dict[str, Any]] = {}
 _TOMBSTONE_TTL = 8.0
@@ -166,6 +179,39 @@ def _push(hist: list[float], value: float) -> list[float]:
     if len(hist) > MAX_HISTORY:
         del hist[: len(hist) - MAX_HISTORY]
     return list(hist)
+
+
+def _history(name: str, value: float, now: float | None = None) -> list[float]:
+    """Return a log-time history: seconds are dense, older time is coarser."""
+    stamp = time.monotonic() if now is None else float(now)
+    samples = _history_samples.setdefault(name, deque(maxlen=_HISTORY_RAW_MAX))
+    samples.append((stamp, float(value)))
+    buckets: dict[tuple[int, int], list[float]] = {}
+    for sample_time, sample_value in samples:
+        age = max(0.0, stamp - sample_time)
+        if age < 60.0:
+            width = 1
+        elif age < 600.0:
+            width = 5
+        elif age < 3600.0:
+            width = 30
+        elif age < 21600.0:
+            width = 300
+        else:
+            width = 1800
+        key = (width, int(age // width))
+        buckets.setdefault(key, []).append(sample_value)
+    rows = sorted(
+        ((key[1] * key[0], sum(values) / len(values)) for key, values in buckets.items()),
+        key=lambda row: row[0],
+        reverse=True,
+    )
+    if len(rows) > MAX_HISTORY:
+        stride = (len(rows) + MAX_HISTORY - 1) // MAX_HISTORY
+        rows = rows[::stride]
+        if rows and rows[-1][0] != 0:
+            rows.append((0, float(value)))
+    return [round(float(row[1]), 2) for row in rows]
 
 
 def _clk() -> int:
@@ -1155,12 +1201,78 @@ def _gpu_busy() -> float | None:
                 _gpu_busy_path = card
                 break
     if _gpu_busy_path is None:
-        return None
+        value = _nvml_gpu_busy()
+        return value if value is not None else _nvidia_gpu_busy()
     try:
         raw = _gpu_busy_path.read_text(encoding="ascii").strip()
         return float(raw or "0")
     except (OSError, ValueError):
+        pass
+    value = _nvml_gpu_busy()
+    return value if value is not None else _nvidia_gpu_busy()
+
+
+class _NvmlUtilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+def _nvml_gpu_busy() -> float | None:
+    """Read NVIDIA utilization directly; never spawn nvidia-smi per frame."""
+    global _nvml, _nvml_handle, _nvml_tried
+    if _nvml_tried:
+        if _nvml is None or _nvml_handle is None:
+            return None
+    else:
+        _nvml_tried = True
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() != 0:
+                return None
+            count = ctypes.c_uint()
+            if lib.nvmlDeviceGetCount_v2(ctypes.byref(count)) != 0 or count.value < 1:
+                return None
+            handle = ctypes.c_void_p()
+            if lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)) != 0:
+                return None
+            _nvml, _nvml_handle = lib, handle
+        except (AttributeError, OSError):
+            return None
+    util = _NvmlUtilization()
+    try:
+        result = _nvml.nvmlDeviceGetUtilizationRates(
+            _nvml_handle, ctypes.byref(util)
+        )
+    except (AttributeError, OSError):
         return None
+    return float(util.gpu) if result == 0 else None
+
+
+def _nvidia_worker() -> None:
+    global _nvidia_value
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        value = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        _nvidia_value = float(value) if value else None
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        _nvidia_value = None
+
+
+def _nvidia_gpu_busy() -> float | None:
+    """Use nvidia-smi off the GUI thread when NVML is unavailable."""
+    global _nvidia_thread, _nvidia_next_poll
+    now = time.monotonic()
+    thread = _nvidia_thread
+    if (thread is None or not thread.is_alive()) and now >= _nvidia_next_poll:
+        _nvidia_next_poll = now + 2.0
+        _nvidia_thread = threading.Thread(target=_nvidia_worker, name="gg-nvidia-meter", daemon=True)
+        _nvidia_thread.start()
+    return _nvidia_value
 
 
 def pulse() -> dict[str, Any]:
@@ -1229,6 +1341,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
     overall = cpu_pcts[0] if cpu_pcts else 0.0
     mhz = _cpu_mhz()
     _refresh_slow_meters(now, force=True)
+    gpu_busy = _gpu_busy()
     per_core = cpu_pcts[1:]
     while len(_core_hist) < len(per_core):
         _core_hist.append([])
@@ -1285,6 +1398,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "mhz_max": max(mhz) if mhz else 0,
         "temps": temps,
         "temp_c": temp_c,
+        "gpu_busy": float(gpu_busy or 0.0),
         "mem_used_kb": mem["used"],
         "mem_total_kb": mem["total"],
         "mem_cached_kb": mem["cached"],
@@ -1312,16 +1426,19 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "disk_write_bps": write_bps,
         "disk_led": round(min(1.0, (read_bps + write_bps) / float(8 * 1024 * 1024)), 3),
         "tombstones": int(tasks.get("tombstones") or 0),
-        "cpu_hist": _push(_cpu_hist, overall),
+        "cpu_hist": _history("cpu", overall, now),
         "core_hist": core_hist,
-        "mem_hist": _push(
-            _mem_hist,
+        "mem_hist": _history(
+            "memory",
             (mem["used"] / mem["total"] * 100.0) if mem["total"] else 0.0,
+            now,
         ),
-        "net_hist": _push(_net_hist, (rx_bps + tx_bps) / 1024.0),
-        "disk_hist": _push(_disk_hist, (read_bps + write_bps) / 1024.0),
-        "temp_hist": _push(_temp_hist, temp_c),
-        "energy_hist": _push(_energy_hist, float(energy.get("watts") or 0.0)),
+        "net_hist": _history("network", (rx_bps + tx_bps) / 1024.0, now),
+        "disk_hist": _history("disk", (read_bps + write_bps) / 1024.0, now),
+        "temp_hist": _history("temperature", temp_c, now),
+        "mhz_hist": _history("clock", float(mhz[0] if mhz else 0.0), now),
+        "gpu_hist": _history("gpu", float(gpu_busy or 0.0), now),
+        "energy_hist": _history("energy", float(energy.get("watts") or 0.0), now),
         "processes": procs,
         "users": user_rows,
         "mounts": _mounts() if want_mounts else [],

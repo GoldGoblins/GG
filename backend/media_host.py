@@ -61,24 +61,40 @@ _backend = ""
 _catalog_memo: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CATALOG_MEMO_TTL = 45.0
 _CLIAMP_POLL_TIMEOUT = 0.04
-_CLIAMP_BANDS_TIMEOUT = 0.008
-_CLIAMP_BUFFER_MS = 1000
+# Radio streams get the maximum buffer supported by cliamp.  This absorbs
+# short network jitter instead of making the listener hear a dropout every
+# few seconds.
+_CLIAMP_BUFFER_MS = 5000
 _CLIAMP_RESUME_GAP = 6.0
-_LIVE_TTL = 0.008
+_LIVE_TTL = 0.016
+_LIVE_PUMP_INTERVAL = 0.016
 _want_source = ""
 _resume_at = 0.0
-_last_bands: list[float] = []
-_last_bands_at = 0.0
 _spectrum: list[float] = []
+_spectrum_proc: subprocess.Popen[bytes] | None = None
+_spectrum_reader: threading.Thread | None = None
+_spectrum_start_at = 0.0
+_spectrum_frame_at = 0.0
+_SPECTRUM_SEGMENTS = 18
+_SPECTRUM_FRAME_BYTES = SPECTRUM_BARS * _SPECTRUM_SEGMENTS
+_SPECTRUM_FPS = 60
+_SPECTRUM_NOISE_FLOOR = 32
+# FFmpeg's logarithmic FFT is useful for the low end, but its first half can
+# consume too much of the 120-column strip.  A sub-linear source warp keeps
+# the bass together on the left and gives the upper bands more room on screen.
+_SPECTRUM_FREQ_WARP = 0.50
 _last_live_state: dict[str, Any] = {}
 _last_live_at = 0.0
 _qml_position = 0.0
 _qml_duration = 0.0
+_qml_playing = False
+_qml_buffering = False
 _live_json = ""
+_live_payload: dict[str, Any] = {}
 _live_lock = threading.Lock()
 _cliamp_boot_lock = threading.Lock()
 _pump_thread: threading.Thread | None = None
-_GUI_LIVE_TTL = 0.008
+_GUI_LIVE_TTL = 0.016
 _RF_TTL = 5.0
 _rf_cache: tuple[float, dict[str, str]] | None = None
 _TUNER_MARKS = radio_tuner_marks()
@@ -226,7 +242,7 @@ def _cliamp_alive() -> bool:
 def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any]:
     global _last_live_state, _last_live_at
     cmd = str(payload.get("cmd") or "")
-    if cmd not in ("status", "bands"):
+    if cmd != "status":
         _last_live_state = {}
         _last_live_at = 0.0
     path = _cliamp_sock()
@@ -261,6 +277,11 @@ def _cliamp_call(payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any
 
 def start_live_pump() -> None:
     global _pump_thread
+    # QML video supplies its clock directly.  Only cliamp needs the worker
+    # that samples audio bands, so do not leave an idle polling thread behind
+    # after changing workspace or stopping media.
+    if _backend != "cliamp":
+        return
     thread = _pump_thread
     if thread is not None and thread.is_alive():
         return
@@ -278,20 +299,213 @@ def live_status_json() -> str:
     with _live_lock:
         raw = _live_json
         spec = list(_spectrum)
+        payload = dict(_live_payload)
     if not raw:
         return raw
     if not spec:
         return raw
+    if not payload:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    payload["spectrum"] = spec
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _store_spectrum_bands(bands: list[Any]) -> None:
+    global _spectrum, _spectrum_frame_at
+    if not bands:
+        return
+    now = time.monotonic()
+    _spectrum_frame_at = now
+    cooked = normalize_spectrum(bands, SPECTRUM_BARS)
+    with _live_lock:
+        _spectrum = cooked
+
+
+def _pulse_monitor_source() -> str:
+    """Resolve the actual sink monitor, with Pulse's symbolic fallback."""
+    pactl = which_first(("pactl",))
+    if pactl:
+        try:
+            raw = subprocess.check_output(
+                [pactl, "get-default-sink"],
+                env=_spawn_env(),
+                stderr=subprocess.DEVNULL,
+                timeout=0.4,
+            )
+            sink = raw.decode("utf-8", errors="replace").strip().splitlines()[0]
+            if sink and sink not in {"(none)", "No default sink"}:
+                return sink + ".monitor"
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    # pipewire-pulse and PulseAudio both understand this symbolic source.
+    return "@DEFAULT_MONITOR@"
+
+
+def _spectrum_filter() -> str:
+    """FFmpeg's established FFT/LED renderer, configured for our meter."""
+    return (
+        "showspectrum="
+        f"size={SPECTRUM_BARS}x{_SPECTRUM_SEGMENTS}:"
+        "mode=combined:color=intensity:scale=log:fscale=log:"
+        "win_func=hann:overlap=0.5:orientation=horizontal:"
+        "slide=fullframe:"
+        f"fps={_SPECTRUM_FPS},format=gray"
+    )
+
+
+def _store_spectrum_frame(frame: bytes) -> None:
+    """Collapse an FFmpeg grayscale spectrum frame into one LED level/column."""
+    if len(frame) != _SPECTRUM_FRAME_BYTES:
+        return
+    bands: list[float] = []
+    for column in range(SPECTRUM_BARS):
+        peak = 0
+        for row in range(_SPECTRUM_SEGMENTS):
+            peak = max(peak, frame[row * SPECTRUM_BARS + column])
+        # FFmpeg's dB floor is visible as a faint grey haze.  Remove that
+        # floor before handing the levels to the LED renderer so silence and
+        # low-level codec noise do not light every frequency equally.
+        level = max(
+            0.0,
+            (peak - _SPECTRUM_NOISE_FLOOR) / (255.0 - _SPECTRUM_NOISE_FLOOR),
+        )
+        bands.append(level)
+    _store_spectrum_bands(_warp_frequency_bands(bands))
+
+
+def _warp_frequency_bands(bands: list[float]) -> list[float]:
+    """Compress the low log-frequency bins without throwing away treble."""
+    if len(bands) < 2:
+        return bands
+    last = len(bands) - 1
+    out: list[float] = []
+    for index in range(len(bands)):
+        position = index / last
+        source = position ** _SPECTRUM_FREQ_WARP
+        scaled = source * last
+        low = int(scaled)
+        high = min(last, low + 1)
+        fraction = scaled - low
+        out.append(bands[low] * (1.0 - fraction) + bands[high] * fraction)
+    return out
+
+
+def _read_spectrum_stream(proc: subprocess.Popen[bytes]) -> None:
+    global _spectrum_proc, _spectrum_reader
+    stream = proc.stdout
+    if stream is None:
+        return
+    pending = bytearray()
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-    data["spectrum"] = spec
-    return json.dumps(data, separators=(",", ":"))
+        while True:
+            raw = stream.read(8192)
+            if not raw:
+                break
+            pending.extend(raw)
+            while len(pending) >= _SPECTRUM_FRAME_BYTES:
+                frame = bytes(pending[:_SPECTRUM_FRAME_BYTES])
+                del pending[:_SPECTRUM_FRAME_BYTES]
+                _store_spectrum_frame(frame)
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+        if _spectrum_proc is proc:
+            _spectrum_proc = None
+        if _spectrum_reader is threading.current_thread():
+            _spectrum_reader = None
+
+
+def _ensure_spectrum_stream() -> None:
+    """Keep one real sink-monitor FFT reader beside the cliamp daemon."""
+    global _spectrum_proc, _spectrum_reader, _spectrum_start_at
+    if _backend != "cliamp" or not _want_source:
+        return
+    proc = _spectrum_proc
+    if proc is not None and proc.poll() is None:
+        return
+    now = time.monotonic()
+    if now - _spectrum_start_at < 1.0:
+        return
+    binary = which_first(("ffmpeg",))
+    if not binary:
+        return
+    _spectrum_start_at = now
+    source = _pulse_monitor_source()
+    try:
+        proc = subprocess.Popen(
+            [
+                binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-fflags",
+                "nobuffer",
+                "-thread_queue_size",
+                "64",
+                "-f",
+                "pulse",
+                "-i",
+                source,
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-filter_complex",
+                _spectrum_filter(),
+                "-pix_fmt",
+                "gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            cwd=str(Path.home()),
+            env=_spawn_env(),
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+    _spectrum_proc = proc
+    reader = threading.Thread(
+        target=_read_spectrum_stream,
+        args=(proc,),
+        name="gg-media-spectrum",
+        daemon=True,
+    )
+    _spectrum_reader = reader
+    reader.start()
+
+
+def _stop_spectrum_stream() -> None:
+    global _spectrum_proc, _spectrum_reader, _spectrum_start_at, _spectrum_frame_at
+    proc = _spectrum_proc
+    _spectrum_proc = None
+    _spectrum_reader = None
+    _spectrum_start_at = 0.0
+    _spectrum_frame_at = 0.0
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=0.4)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def publish_live(payload: dict[str, Any] | None = None) -> str:
-    global _live_json
+    global _live_json, _live_payload
     data = dict(payload) if payload else status_payload(live=True, pump=True)
     data.pop("items", None)
     data.pop("tools", None)
@@ -302,22 +516,8 @@ def publish_live(payload: dict[str, Any] | None = None) -> str:
     raw = json.dumps(data, separators=(",", ":"))
     with _live_lock:
         _live_json = raw
+        _live_payload = dict(data)
     return raw
-
-
-def _refresh_bands() -> None:
-    global _last_bands, _last_bands_at, _spectrum
-    if _backend != "cliamp":
-        return
-    spec = _cliamp_call({"cmd": "bands"}, timeout=_CLIAMP_BANDS_TIMEOUT)
-    bands = spec.get("bands") if spec else None
-    if not isinstance(bands, list) or not bands:
-        return
-    _last_bands = bands
-    _last_bands_at = time.monotonic()
-    cooked = normalize_spectrum(bands, SPECTRUM_BARS)
-    with _live_lock:
-        _spectrum = cooked
 
 
 def _live_pump_loop() -> None:
@@ -325,20 +525,15 @@ def _live_pump_loop() -> None:
     while True:
         started = time.monotonic()
         try:
-            if _backend == "cliamp":
-                if not _cliamp_buffered():
-                    _ensure_cliamp()
-                _refresh_bands()
-                ticks += 1
-                if ticks == 1 or ticks % 8 == 0:
-                    publish_live()
-            else:
-                ticks += 1
-                if ticks == 1 or ticks % 8 == 0:
-                    publish_live()
+            if _backend != "cliamp":
+                return
+            _ensure_spectrum_stream()
+            ticks += 1
+            if ticks == 1 or ticks % 8 == 0:
+                publish_live()
         except Exception:
             pass
-        delay = 0.008 - (time.monotonic() - started)
+        delay = _LIVE_PUMP_INTERVAL - (time.monotonic() - started)
         if delay > 0:
             time.sleep(delay)
 
@@ -347,19 +542,15 @@ def _cached_cliamp() -> dict[str, Any]:
     now = time.monotonic()
     if _last_live_state and now - _last_live_at < _GUI_LIVE_TTL:
         live = dict(_last_live_state)
-        if _last_bands:
-            live["_bands"] = _last_bands
         return live
-    return _cliamp_live(want_bands=True)
+    return _cliamp_live(want_bands=False)
 
 
 def _cliamp_live(want_bands: bool) -> dict[str, Any]:
-    global _last_bands, _last_bands_at, _last_live_state, _last_live_at
+    global _last_live_state, _last_live_at
     now = time.monotonic()
     if _last_live_state and now - _last_live_at < _LIVE_TTL:
         live = dict(_last_live_state)
-        if _last_bands:
-            live["_bands"] = _last_bands
         return live
     live = _cliamp_call({"cmd": "status"}, timeout=_CLIAMP_POLL_TIMEOUT)
     _last_live_state = dict(live) if live else {}
@@ -367,15 +558,6 @@ def _cliamp_live(want_bands: bool) -> dict[str, Any]:
     if not live.get("ok"):
         return live
     state = str(live.get("state") or "")
-    if want_bands and state == "playing":
-        spec = _cliamp_call({"cmd": "bands"}, timeout=_CLIAMP_BANDS_TIMEOUT)
-        bands = spec.get("bands")
-        if isinstance(bands, list):
-            _last_bands = bands
-            _last_bands_at = now
-    if _last_bands:
-        live = dict(live)
-        live["_bands"] = _last_bands
     _maybe_resume_stream(state)
     return live
 
@@ -438,6 +620,7 @@ def _cliamp_buffered() -> bool:
 
 def _stop_cliamp_daemon() -> None:
     global _cliamp_proc
+    _stop_spectrum_stream()
     _cliamp_call({"cmd": "stop"}, timeout=0.4)
     proc = _cliamp_proc
     _cliamp_proc = None
@@ -509,6 +692,7 @@ def _ensure_cliamp() -> str:
 def _halt_audio() -> None:
     global _want_source
     _want_source = ""
+    _stop_spectrum_stream()
     if libretro_host.loaded():
         libretro_host.unload()
     if _cliamp_alive():
@@ -544,9 +728,12 @@ def _play_libretro(item: dict[str, Any]) -> dict[str, Any]:
 
 def _play_qml(item: dict[str, Any]) -> dict[str, Any]:
     global _item, _kind, _backend, _paused, _qml_position, _qml_duration
+    global _qml_playing, _qml_buffering
     _halt_audio()
     _qml_position = 0.0
     _qml_duration = 0.0
+    _qml_playing = False
+    _qml_buffering = True
     _paused = False
     _kind = "video"
     _backend = "qml"
@@ -883,7 +1070,7 @@ def tune_mhz(mhz: float) -> dict[str, Any]:
 
 
 def pause() -> dict[str, Any]:
-    global _paused
+    global _paused, _qml_playing, _qml_buffering
     if _backend == "cliamp" and _cliamp_alive():
         _cliamp_call({"cmd": "toggle"})
         status = _cliamp_call({"cmd": "status"})
@@ -891,6 +1078,14 @@ def pause() -> dict[str, Any]:
         return status_payload()
     if _backend == "qml":
         _paused = not _paused
+        if _paused:
+            _qml_playing = False
+            _qml_buffering = False
+        else:
+            # The QML player will report Playing/Buffering as soon as its
+            # decoder has caught up with the unpause request.
+            _qml_playing = False
+            _qml_buffering = True
         return status_payload()
     if _backend == "libretro":
         _paused = not _paused
@@ -920,6 +1115,30 @@ def report_clock(position: float, duration: float) -> None:
         _qml_duration = max(0.0, float(duration))
     except (TypeError, ValueError):
         _qml_duration = 0.0
+    # QML owns the decoder clock.  Publish that inexpensive state directly
+    # instead of starting the cliamp spectrum worker for video playback.
+    if _backend == "qml":
+        publish_live()
+
+
+def report_player_state(playing: bool, buffering: bool) -> bool:
+    """Receive the actual Qt Multimedia state for an in-process TV stream.
+
+    QML owns the decoder, so the subprocess-style ``_running()`` flag cannot
+    tell the status surface whether a channel is really playing or waiting for
+    network data.  Keep this state tiny and publish it immediately so the
+    catalog and utility strip stop showing a false playing state.
+    """
+    global _qml_playing, _qml_buffering
+    if _backend != "qml":
+        return False
+    next_playing = bool(playing) and not _paused
+    next_buffering = bool(buffering) and not _paused and not next_playing
+    changed = (_qml_playing, _qml_buffering) != (next_playing, next_buffering)
+    _qml_playing = next_playing
+    _qml_buffering = next_buffering
+    publish_live()
+    return changed
 
 
 def seek(seconds: float) -> dict[str, Any]:
@@ -946,10 +1165,13 @@ def seek(seconds: float) -> dict[str, Any]:
 
 def stop() -> dict[str, Any]:
     global _item, _kind, _backend, _paused, _want_source
-    global _qml_position, _qml_duration
+    global _qml_position, _qml_duration, _qml_playing, _qml_buffering
     _want_source = ""
     _qml_position = 0.0
     _qml_duration = 0.0
+    _qml_playing = False
+    _qml_buffering = False
+    _stop_spectrum_stream()
     if _backend == "cliamp" and _cliamp_alive():
         _cliamp_call({"cmd": "stop"})
     if _backend == "libretro" or libretro_host.loaded():
@@ -1075,7 +1297,13 @@ def start_cliamp() -> dict[str, Any]:
             owned.wait(timeout=2)
         except subprocess.TimeoutExpired:
             owned.kill()
-    argv = [binary, "--provider", "radio"]
+    argv = [
+        binary,
+        "--provider",
+        "radio",
+        "--buffer-ms",
+        str(_CLIAMP_BUFFER_MS),
+    ]
     _spawn(argv, ("cliamp",))
     _kind = "fetch"
     _backend = "cliamp"
@@ -1215,15 +1443,18 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         if playing:
             with _live_lock:
                 held = list(_spectrum)
-            spectrum = held or normalize_spectrum(
-                live_state.get("_bands") or _last_bands, SPECTRUM_BARS
-            )
+            spectrum = held
     else:
-        playing = _running() and not _paused
-        paused = _paused and _running()
         if _backend == "qml":
+            # A QML MediaPlayer is in-process; _running() only means that a
+            # channel is selected, not that its network decoder is playing.
+            playing = _qml_playing and not _paused
+            paused = _paused
             position = _qml_position
             duration = _qml_duration
+        else:
+            playing = _running() and not _paused
+            paused = _paused and _running()
     report_backend = _backend or ("cliamp" if live_state else "")
     if report_backend == "cliamp":
         player = "CLIAMP"
@@ -1248,7 +1479,16 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         screen = "EMBED"
     elif _kind in ("video", "game", "fetch") and _backend:
         screen = "EMBED"
-    buffering = bool(_want_source) and not playing and not paused
+    buffering = (
+        (_backend == "qml" and _qml_buffering and not paused)
+        or (bool(_want_source) and not playing and not paused)
+    )
+    buffering_item = str((_item or {}).get("id") or "") if buffering else ""
+    buffering_source = (
+        str((_item or {}).get("source") or "")
+        if _backend == "qml" and buffering
+        else str(_want_source or "") if buffering else ""
+    )
     payload = {
         "schema": SCHEMA,
         "mode": mode,
@@ -1257,8 +1497,8 @@ def status_payload(live: bool = False, *, pump: bool = False) -> dict[str, Any]:
         "playing": playing,
         "paused": paused,
         "buffering": buffering,
-        "buffering_id": str((_item or {}).get("id") or "") if buffering else "",
-        "buffering_source": str(_want_source or "") if buffering else "",
+        "buffering_id": buffering_item,
+        "buffering_source": buffering_source,
         "running": playing or paused or bool(_backend) or buffering,
         "player": player,
         "backend": report_backend or player.lower(),

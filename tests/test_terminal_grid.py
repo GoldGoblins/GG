@@ -55,6 +55,10 @@ def main() -> int:
         raise AssertionError("TUI still repaints the full grid on every cell change")
     if "max_cols" not in src:
         raise AssertionError("TUI paint still draws columns past the hole")
+    if "def _scroll_view" not in src or '"history"' not in src:
+        raise AssertionError("TUI has no local inline scrollback viewport")
+    if '"\\x1b[5~"' not in src or '"\\x1b[6~"' not in src:
+        raise AssertionError("TUI wheel still feeds Up/Down input history")
     if "_base_cell_w" not in src:
         raise AssertionError("TUI cell metrics missing")
     if "float(width) / float(cols)" in src:

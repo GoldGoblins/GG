@@ -7,6 +7,14 @@ Item {
     id: root
 
     objectName: "workspaceSettingsSurface"
+    focus: visible
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: function(event) {
+        if (event.key !== Qt.Key_Escape)
+            return
+        root.closeRequested()
+        event.accepted = true
+    }
 
     property real chatWidthRatio: 0.31
     property int telemetryWidth: 168

@@ -4,6 +4,7 @@ import QtQuick.Controls
 ScrollBar {
     id: root
 
+    property bool keepVisible: false
     policy: ScrollBar.AsNeeded
     interactive: true
     padding: 0
@@ -15,7 +16,8 @@ ScrollBar {
         implicitHeight: 4
         radius: 1
         color: root.pressed ? "#c8cdd4" : "#8a8a8a"
-        visible: root.size < 0.999 && (root.active || root.hovered)
+        visible: root.size < 0.999
+            && (root.keepVisible || root.active || root.hovered)
         opacity: root.pressed || root.hovered ? 1 : 0.8
         antialiasing: false
     }

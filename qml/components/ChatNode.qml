@@ -226,6 +226,7 @@ Item {
 
         TextEdit {
             id: bodyTextView
+            objectName: "chatMessageText"
             width: parent.width
             text: root.speechText
             color: "#e6edf3"
@@ -235,6 +236,7 @@ Item {
             persistentSelection: true
             textFormat: TextEdit.PlainText
             wrapMode: TextEdit.WordWrap
+            height: implicitHeight
             font.pixelSize: 13
         }
 

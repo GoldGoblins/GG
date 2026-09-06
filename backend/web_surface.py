@@ -315,6 +315,7 @@ def _install_site_router() -> None:
     SITE_ROOT.mkdir(parents=True, exist_ok=True)
     dest = SITE_ROOT / ".gg-router.php"
     dest.write_bytes(PHP_ROUTER.read_bytes())
+    dest.chmod(0o644)
 
 
 def _podman_php_argv(port: int) -> list[str]:
@@ -326,7 +327,7 @@ def _podman_php_argv(port: int) -> list[str]:
         "--rm",
         "--network=host",
         "-v",
-        str(SITE_ROOT) + ":/var/www/html:Z",
+        str(SITE_ROOT) + ":/var/www/html:z",
         PHP_IMAGE,
         "php",
         "-S",

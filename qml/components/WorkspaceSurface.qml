@@ -61,6 +61,35 @@ Item {
     property int _addrIndex: 0
     readonly property string currentContextReference:
         root.currentObjectId.length > 0 ? "@current" : "@workspace"
+    readonly property string slashCommandTemplate:
+        "//** GoldGoblins shared slash-command guide (helper text) **//\n"
+        + "//** /flush        Save the current session knowledge to memory. **//\n"
+        + "//** /dream        Consolidate saved memory into durable topics. **//\n"
+        + "//** /memory       Browse shared memory and session notes. **//\n"
+        + "//** /remember X   Save X as a durable shared memory note. **//\n"
+        + "//** /skills       List or load a workspace skill. **//\n"
+        + "//** /plugins      List or reload installed plugins. **//\n"
+        + "//** /hooks-list   Show the active knowledge and tool hooks. **//\n"
+        + "//** /hooks-trust  Trust this workspace for its hooks. **//\n"
+        + "//** /hooks-add X  Add a hook file or directory. **//\n"
+        + "//** /model X      Switch the active model. **//\n"
+        + "//** /resume X     Resume a saved chat session. **//\n"
+        + "//** /new          Start a new session. **//\n"
+        + "//** /load X       Load a saved workspace session. **//\n"
+        + "//** /rewind X     Rewind to an earlier prompt. **//\n"
+        + "//** /compact      Compact the current conversation. **//\n"
+        + "//** /always-approve on|off  Set approval mode. **//\n"
+        + "//** /multiline    Toggle multiline input. **//\n"
+        + "//** /feedback X   Send feedback to the active motor. **//\n"
+        + "//** /exit         Close the active TUI session. **//\n"
+        + "//** This is helper text. It is stripped when a scratch file is saved. **//\n\n"
+
+    function stripSlashCommandTemplate(body) {
+        var text = String(body || "")
+        return text.indexOf(root.slashCommandTemplate) === 0
+            ? text.slice(root.slashCommandTemplate.length)
+            : text
+    }
 
     function contextSnapshot(maximumObjects) {
         var maximum = Math.max(
@@ -361,11 +390,8 @@ Item {
         root.settingsOpen = false
     }
 
-    Shortcut {
-        sequence: "Esc"
-        enabled: root.settingsOpen
-        onActivated: root.closeSettings()
-    }
+    // Escape is handled locally by SettingsSurface via Keys, avoiding a
+    // global accelerator during QML reload.
 
     implicitWidth: 620
     implicitHeight: 620
@@ -717,7 +743,10 @@ Item {
         var host = root.scratchHost()
         if (host === null)
             return false
-        var saved = host.saveScratchFile(name, codeEditor.text)
+        var saved = host.saveScratchFile(
+            name,
+            root.stripSlashCommandTemplate(codeEditor.text)
+        )
         if (!saved || String(saved).length === 0)
             return false
         if (root.currentIndex >= 0)
@@ -1478,6 +1507,8 @@ Item {
         var body = ""
         if (host !== null && host.readScratchFile)
             body = host.readScratchFile(name)
+        if (body.length === 0)
+            body = root.slashCommandTemplate
         root.editorLoaded = false
         root.editorBaseText = body
         root.editorSourceName = name
@@ -1490,7 +1521,12 @@ Item {
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary = "SCRATCH · " + name
         if (host !== null && host.watchLivePath)
-            host.watchLivePath(host.saveScratchFile(name, body))
+            host.watchLivePath(
+                host.saveScratchFile(
+                    name,
+                    root.stripSlashCommandTemplate(body)
+                )
+            )
     }
 
     function applyExternalFile(path, text, kind) {
@@ -2853,6 +2889,8 @@ Item {
                             return root.sitePreviewNonce
                         })
                         item.wantEngine = siteHost.visible
+                        if (root.sitePreviewRunning)
+                            root.applySitePreviewUrl()
                     }
                 }
             }

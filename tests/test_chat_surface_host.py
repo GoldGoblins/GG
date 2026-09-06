@@ -133,6 +133,8 @@ def main() -> int:
         raise AssertionError("chat session list signal missing")
     if "resumeGrokTui" not in src:
         raise AssertionError("resume grok tui missing")
+    if "activateGptTui" not in src:
+        raise AssertionError("activate gpt tui missing")
     if "GIT_TERMINAL_PROMPT" not in src:
         raise AssertionError("TUI must not wait on git credentials")
     if "setInterval(15000)" not in src:

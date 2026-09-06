@@ -79,8 +79,17 @@ Item {
                 return h - ((Number(val || 0) - minv) / (maxv - minv)) * (h - 8) - 4
             }
             var last = pts.length < 2 ? 2 : pts.length
+            var logSpan = Math.log(1 + last - 1)
             function xAt(index) {
-                return (pts.length === 1 ? 1 : index / (last - 1)) * w
+                if (pts.length === 1)
+                    return w
+                // New samples enter at the right with generous spacing, then
+                // compact toward the older left-side history.  This makes
+                // fresh activity immediate without throwing away context.
+                var fraction = logSpan > 0
+                    ? 1 - Math.log(last - index) / logSpan
+                    : index / (last - 1)
+                return fraction * w
             }
             function traceHills(startAtBase) {
                 var n = pts.length
@@ -135,7 +144,11 @@ Item {
                     continue
                 if (mi > n - 1)
                     mi = n - 1
-                var mx = (n <= 1 ? 1 : mi / (last - 1)) * w
+                var mx = n <= 1
+                    ? w
+                    : (logSpan > 0
+                        ? 1 - Math.log(last - mi) / logSpan
+                        : mi / (last - 1)) * w
                 var my = yAt(m.px !== undefined && m.px !== null && Number(m.px) > 0
                     ? m.px
                     : pts[Math.round(mi)])

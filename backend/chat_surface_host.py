@@ -6,6 +6,7 @@ import os
 import pty
 import re
 import signal
+import shutil
 import struct
 import subprocess
 import termios
@@ -26,13 +27,21 @@ from PySide6.QtCore import (
     Slot,
 )
 
-from backend.chat_sessions import list_for_ui
+from backend.chat_sessions import list_for_ui, sync_owned
 from backend import crypto_host
 from backend import libretro_host
 from backend import marketplace_host
 from backend import media_host
 from backend import tmog_contract
 from backend.grok_wallet import snapshot as grok_wallet_snapshot
+from backend.codex_wallet import (
+    CODEX_SESSIONS,
+    discover_sessions as discover_codex_sessions,
+    load_session_id as load_codex_session_id,
+    save_session_id as save_codex_session_id,
+    session_id_from_file,
+    snapshot as codex_wallet_snapshot,
+)
 from backend.grok_worker_contract import (
     DEV_GROK_HOME,
     GROK_BIN,
@@ -44,6 +53,7 @@ from backend.mini_vt import MiniVt
 from backend.surface_intent import parse_surface_intent
 from backend import shell_load
 from backend import web_surface
+from backend import gpt_memory_commands
 
 BASH = "/bin/bash"
 _PTY_READ_BUDGET = 48 * 1024
@@ -70,6 +80,21 @@ SCRATCH_ROOT = (
 _SCRATCH_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 _ANSI = re.compile(
     r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))"
+)
+_GPT_SHARED_COMMANDS = (
+    "/flush",
+    "/dream",
+    "/memory",
+    "/remember",
+    "/skills",
+    "/plugins",
+    "/hooks-list",
+    "/hooks-trust",
+    "/hooks-add",
+)
+_UNRECOGNIZED_GPT_COMMAND = re.compile(
+    r"Unrecognized command ['\"](/(?:flush|dream|memory|remember|skills|plugins|hooks-list|hooks-trust|hooks-add)(?: [^'\"\r\n]*)?)['\"]",
+    re.IGNORECASE,
 )
 
 
@@ -119,6 +144,7 @@ class ChatSurfaceHost(QObject):
     chatTerminalExit = Signal(str, int)
     grokTuiChunk = Signal(str)
     grokWalletChanged = Signal(str)
+    gptWalletChanged = Signal(str)
     mandateRailChanged = Signal(str)
     webOperatorCommand = Signal(str)
     chatSessionsChanged = Signal(str)
@@ -128,6 +154,7 @@ class ChatSurfaceHost(QObject):
     mediaFrameSeqChanged = Signal()
     mediaStateChanged = Signal()
     mediaSeekChanged = Signal(float)
+    terminalScrollChanged = Signal(str, int, int, int)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -148,6 +175,12 @@ class ChatSurfaceHost(QObject):
         self._wallet_live_base: int | None = None
         self._wallet_last_turn: int | None = None
         self._wallet_json = ""
+        self._gpt_wallet_json = ""
+        self._gpt_session_id = load_codex_session_id()
+        self._gpt_started_at = 0.0
+        self._gpt_input_line = ""
+        self._gpt_pending_local_commands: list[str] = []
+        self._gpt_output_tail = ""
         self._mandate_rail_json = ""
         self._live_mandate_store = None
         self._sessions_json = ""
@@ -160,6 +193,7 @@ class ChatSurfaceHost(QObject):
         self._web_op_watch: QFileSystemWatcher | None = None
         self._desk_op_watch: QFileSystemWatcher | None = None
         self._desk_job: dict[str, Any] | None = None
+        self._desk_observation_seq = 0
         self._desk_timer = QTimer(self)
         self._desk_timer.setInterval(16)
         self._desk_timer.timeout.connect(self._desk_tick)
@@ -186,13 +220,222 @@ class ChatSurfaceHost(QObject):
         self._winch.setInterval(80)
         self._winch.timeout.connect(self._apply_tui_winsize)
         self._webengine_ready = False
+        # QML shell reloads replace the items that host the embedded terminal
+        # grids.  Keep the current host objects explicit so an old signal or
+        # grid can never survive into the new scene.
+        self._gpt_hole = None
+        self._native_hole = None
+        self._gpt_connected_hole = None
+        self._native_connected_hole = None
+        self._qml_rebind_timer = QTimer(self)
+        self._qml_rebind_timer.setSingleShot(True)
+        self._qml_rebind_timer.setInterval(120)
+        self._qml_rebind_timer.timeout.connect(self._rebind_qml_surfaces)
+        self._qml_rebind_attempts = 0
 
     def set_qml_root(self, root: QObject | None) -> None:
         self._qml_root = root
+        self._attach_gpt_tui()
         self.watchDesktopWorkspace()
         self._attach_native_tui()
         self._ensure_console_provider()
         QTimer.singleShot(0, self._emit_wallet)
+
+    def _attach_gpt_tui(self) -> None:
+        from PySide6.QtQuick import QQuickItem
+        hole = self._qml_root.findChild(QQuickItem, "gptTuiHost") if self._qml_root else None
+        if hole is None:
+            return
+        old_hole = getattr(self, "_gpt_hole", None)
+        if old_hole is not None and old_hole is not hole:
+            try:
+                old_hole.visibleChanged.disconnect(self._show_gpt_tui)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
+        grid = getattr(self, "_gpt_grid", None)
+        if grid is not None and self._grid_parent(grid) is not hole:
+            self._dispose_terminal_grid("_gpt_grid")
+        self._gpt_hole = hole
+        if self._gpt_connected_hole is not hole:
+            try:
+                hole.visibleChanged.connect(self._show_gpt_tui)
+                self._gpt_connected_hole = hole
+            except (AttributeError, TypeError, RuntimeError):
+                self._gpt_hole = None
+                return
+        self._show_gpt_tui()
+
+    def _show_gpt_tui(self) -> None:
+        hole = self._gpt_hole
+        if hole is None:
+            return
+        try:
+            if not hole.isVisible():
+                return
+        except RuntimeError:
+            self._gpt_hole = None
+            return
+        grid = getattr(self, "_gpt_grid", None)
+        if grid is not None and self._grid_parent(grid) is not hole:
+            self._dispose_terminal_grid("_gpt_grid")
+            grid = None
+        if grid is None or getattr(grid, "_thread", None) is None:
+            from backend.terminal_grid import TerminalGrid
+            grid = TerminalGrid(hole)
+            self._gpt_grid = grid
+            grid.dataProduced.connect(
+                lambda data: self.writeChatTerminal("ws.tui.gpt", data))
+            grid.scrollMetricsChanged.connect(
+                lambda offset, maximum, page: self.terminalScrollChanged.emit(
+                    "ws.tui.gpt", offset, maximum, page))
+            grid.resized.connect(self._resize_gpt_tui)
+            grid.ready.connect(self._start_gpt_tui)
+        else:
+            self._start_gpt_tui()
+        try:
+            grid.forceActiveFocus()
+        except (AttributeError, RuntimeError):
+            self._dispose_terminal_grid("_gpt_grid")
+
+    @staticmethod
+    def _grid_parent(grid: object):
+        try:
+            parent = getattr(grid, "parentItem", None)
+            return parent() if callable(parent) else None
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _dispose_terminal_grid(self, attr: str) -> None:
+        grid = getattr(self, attr, None)
+        if grid is None:
+            return
+        setattr(self, attr, None)
+        stop = getattr(grid, "_stop_worker", None)
+        if callable(stop):
+            stop()
+        try:
+            grid.setParentItem(None)
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            grid.deleteLater()
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _rebind_qml_surfaces(self) -> None:
+        """Reconnect native terminal items after an asynchronous QML reload."""
+        root = self._qml_root
+        if root is None:
+            return
+        self._attach_gpt_tui()
+        self._attach_native_tui()
+        from PySide6.QtQuick import QQuickItem
+        if root.findChild(QQuickItem, "gptTuiHost") is None and self._qml_rebind_attempts < 20:
+            self._qml_rebind_attempts += 1
+            self._qml_rebind_timer.start()
+        else:
+            self._qml_rebind_attempts = 0
+
+    def _resize_gpt_tui(self, cols: int, rows: int) -> None:
+        self._gpt_size = (max(8, min(240, cols)), max(4, min(80, rows)))
+        session = self._sessions.get("ws.tui.gpt")
+        if session is not None:
+            width, height = self._gpt_size
+            try:
+                fcntl.ioctl(session["master"], termios.TIOCSWINSZ,
+                            struct.pack("HHHH", height, width, 0, 0))
+                os.kill(session["proc"].pid, signal.SIGWINCH)
+            except OSError:
+                pass
+
+    def _start_gpt_tui(self) -> None:
+        if "ws.tui.gpt" in self._sessions:
+            return
+        grid = getattr(self, "_gpt_grid", None)
+        if grid is None:
+            return
+        binary = shutil.which("codex")
+        if not binary:
+            grid.feed_bytes(b"\r\nCodex CLI saknas. Installera Codex och starta om GG AI Desktop.\r\n")
+            return
+        width, height = getattr(self, "_gpt_size", (
+            getattr(grid, "_last_cols", 72) or 72,
+            getattr(grid, "_last_rows", 36) or 36))
+        master, slave = pty.openpty()
+        resume_id = self._gpt_session_id
+        if resume_id and resume_id not in discover_codex_sessions():
+            resume_id = ""
+            self._gpt_session_id = ""
+        # Luna's model profile defaults to the paid priority/"Fast" tier.
+        # Force standard processing here while preserving the configured
+        # reasoning effort (currently High).
+        argv = [binary, "-c", 'service_tier="default"', "--no-alt-screen"]
+        if resume_id:
+            argv.extend(["resume", resume_id])
+        self._gpt_started_at = time.time()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", height, width, 0, 0))
+            os.set_blocking(master, False)
+            env = os.environ.copy()
+            env.update(TERM="xterm-256color", COLORTERM="truecolor",
+                       LANG="C.UTF-8", LC_ALL="C.UTF-8",
+                       LINES=str(height), COLUMNS=str(width))
+            proc = subprocess.Popen(
+                argv + [
+                    "--sandbox", "workspace-write",
+                    "--ask-for-approval", "on-request",
+                ],
+                stdin=slave, stdout=slave, stderr=slave, cwd=str(GROK_CWD),
+                env=env, start_new_session=True, close_fds=True)
+        except OSError as exc:
+            os.close(master)
+            if getattr(self, "_gpt_grid", None) is grid:
+                grid.feed_bytes(
+                    ("\r\nCodex kunde inte starta: " + str(exc) + "\r\n")
+                    .encode()
+                )
+            return
+        finally:
+            os.close(slave)
+        self._watch_pty("ws.tui.gpt", proc, master)
+        QTimer.singleShot(1200, self._capture_gpt_session)
+
+    def _capture_gpt_session(self) -> None:
+        if "ws.tui.gpt" not in self._sessions:
+            return
+        newest = ""
+        newest_mtime = self._gpt_started_at - 1
+        try:
+            paths = CODEX_SESSIONS.rglob("*.jsonl")
+            for path in paths:
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime < self._gpt_started_at - 2 or mtime < newest_mtime:
+                    continue
+                sid = session_id_from_file(path)
+                if sid:
+                    newest, newest_mtime = sid, mtime
+        except OSError:
+            return
+        if newest:
+            self._gpt_session_id = save_codex_session_id(newest) or newest
+
+    @Slot(str, result=bool)
+    def activateGptTui(self, session_id: str) -> bool:
+        """Bring the persistent GPT TUI session back into view and focus."""
+        sid = str(session_id or "").strip()
+        hole = getattr(self, "_gpt_hole", None)
+        if hole is None or not hole.isVisible():
+            return False
+        if sid and sid != self._gpt_session_id:
+            self._gpt_session_id = sid
+            if "ws.tui.gpt" in self._sessions:
+                self._close("ws.tui.gpt")
+        self._show_gpt_tui()
+        return getattr(self, "_gpt_grid", None) is not None
 
     @Slot(result=str)
     def hydrateDesktop(self) -> str:
@@ -213,14 +456,19 @@ class ChatSurfaceHost(QObject):
         hole = self._tui_hole()
         if hole is None:
             return
-        try:
-            hole.visibleChanged.disconnect(self._on_tui_hole_visible)
-        except Exception:
-            pass
-        try:
-            hole.visibleChanged.connect(self._on_tui_hole_visible)
-        except Exception:
-            pass
+        old_hole = getattr(self, "_native_hole", None)
+        if old_hole is not None and old_hole is not hole:
+            try:
+                old_hole.visibleChanged.disconnect(self._on_tui_hole_visible)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
+        self._native_hole = hole
+        if self._native_connected_hole is not hole:
+            try:
+                hole.visibleChanged.connect(self._on_tui_hole_visible)
+                self._native_connected_hole = hole
+            except (AttributeError, TypeError, RuntimeError):
+                pass
         if hole.isVisible():
             self._ensure_tui_grid()
 
@@ -229,7 +477,7 @@ class ChatSurfaceHost(QObject):
         if hole is None:
             return
         grid = self._tui_grid
-        if grid is not None and getattr(grid, "parentItem", lambda: None)() is hole:
+        if grid is not None and self._grid_parent(grid) is hole:
             if hole.isVisible():
                 grid.forceActiveFocus()
             return
@@ -244,6 +492,9 @@ class ChatSurfaceHost(QObject):
 
         grid = TerminalGrid(hole)
         grid.dataProduced.connect(self.grokTuiWrite)
+        grid.scrollMetricsChanged.connect(
+            lambda offset, maximum, page: self.terminalScrollChanged.emit(
+                GROK_TUI_TERMINAL_ID, offset, maximum, page))
         grid.resized.connect(self.grokTuiResize)
         grid.ready.connect(self._on_native_tui_ready)
         self._tui_grid = grid
@@ -254,6 +505,66 @@ class ChatSurfaceHost(QObject):
         hole = self._tui_hole()
         if hole is not None and hole.isVisible():
             self.startGrokTui("ws.tui.grok")
+
+    def _run_gpt_shared_command(self, command: str) -> bool:
+        command = str(command or "").strip()
+        if not any(
+            command == item or command.startswith(item + " ")
+            for item in _GPT_SHARED_COMMANDS
+        ):
+            return False
+        grid = getattr(self, "_gpt_grid", None)
+        result = gpt_memory_commands.run(command)
+        if grid is not None:
+            grid.feed_bytes(("\r\n" + result + "\r\n").encode("utf-8"))
+        elif result:
+            self.chatTerminalOutput.emit("ws.tui.gpt", result + "\n")
+        return True
+
+    def _commands_from_gpt_output(self, text: str) -> list[str]:
+        """Find local commands even when Codex output crosses PTY reads."""
+        combined = self._gpt_output_tail + str(text or "")
+        matches = list(_UNRECOGNIZED_GPT_COMMAND.finditer(combined))
+        if matches:
+            self._gpt_output_tail = combined[matches[-1].end() :][-512:]
+        else:
+            self._gpt_output_tail = combined[-512:]
+        commands: list[str] = []
+        for match in matches:
+            reported = match.group(1)
+            reported_name = reported.partition(" ")[0].lower()
+            queued = next(
+                (
+                    index
+                    for index, command in enumerate(self._gpt_pending_local_commands)
+                    if command.partition(" ")[0].lower() == reported_name
+                ),
+                None,
+            )
+            commands.append(
+                self._gpt_pending_local_commands.pop(queued)
+                if queued is not None
+                else reported
+            )
+        return commands
+
+    def _track_gpt_input(self, payload: str) -> None:
+        """Remember submitted local commands without withholding any keys."""
+        for char in str(payload or ""):
+            if char in "\r\n":
+                command = self._gpt_input_line.strip()
+                if any(
+                    command == item or command.startswith(item + " ")
+                    for item in _GPT_SHARED_COMMANDS
+                ):
+                    self._gpt_pending_local_commands.append(command)
+                self._gpt_input_line = ""
+            elif char in "\b\x7f":
+                self._gpt_input_line = self._gpt_input_line[:-1]
+            elif char in "\x03\x15":
+                self._gpt_input_line = ""
+            elif char.isprintable():
+                self._gpt_input_line += char
 
     def _on_tui_hole_visible(self, *_args) -> None:
         hole = self._tui_hole()
@@ -652,6 +963,12 @@ class ChatSurfaceHost(QObject):
     def mediaReportClock(self, position: float, duration: float) -> None:
         media_host.report_clock(float(position), float(duration))
 
+    @Slot(bool, bool)
+    def mediaReportPlayerState(self, playing: bool, buffering: bool) -> None:
+        changed = media_host.report_player_state(bool(playing), bool(buffering))
+        if changed:
+            self.mediaStateChanged.emit()
+
     @Slot(float, result=str)
     def mediaSeek(self, seconds: float) -> str:
         payload = media_host.seek(float(seconds))
@@ -1035,6 +1352,25 @@ class ChatSurfaceHost(QObject):
 
         from PySide6.QtCore import QCoreApplication
 
+        existing = str(self._preview_origin or "").strip()
+        if existing.startswith("http://127.0.0.1:"):
+            hostport = existing.split("://", 1)[-1].rstrip("/").split("/", 1)[0]
+            port_s = hostport.split(":")[-1]
+            try:
+                port_n = int(port_s)
+            except ValueError:
+                port_n = 0
+            if port_n:
+                import socket as _socket
+
+                try:
+                    with _socket.create_connection(("127.0.0.1", port_n), 0.2):
+                        from backend.site_database import rewrite_preview_origin
+
+                        rewrite_preview_origin(existing)
+                        return existing.rstrip("/") + "/\n" + web_surface.preview_kind()
+                except OSError:
+                    pass
         self.stopSitePreview()
         web_surface.ensure_site_root()
         kind = web_surface.preview_kind()
@@ -1422,14 +1758,26 @@ class ChatSurfaceHost(QObject):
             watcher.addPath(str(child))
 
     def _emit_qml_reload(self) -> None:
-        from PySide6.QtQml import QQmlEngine
-
-        root = self._qml_root
-        if root is not None:
-            ctx = QQmlEngine.contextForObject(root)
-            if ctx is not None:
-                ctx.engine().clearComponentCache()
+        # The loaders below destroy the QML host items synchronously.  Tear
+        # down PTYs and painted terminal items first so Qt's render thread
+        # cannot paint an item whose parent is already being deleted.
+        self._qml_reload_safety_barrier()
+        # Main.qml appends a nonce to every shell URL during reload.  Avoid
+        # clearing the global QQml component cache here: doing that from a
+        # QFileSystemWatcher callback can race the scene's render pass.
+        self._qml_rebind_attempts = 0
         self.qmlLiveReload.emit()
+        self._qml_rebind_timer.start()
+
+    def _qml_reload_safety_barrier(self) -> None:
+        for identity in list(self._sessions):
+            self._close(identity)
+        self._dispose_terminal_grid("_gpt_grid")
+        self._dispose_terminal_grid("_tui_grid")
+        self._gpt_hole = None
+        self._native_hole = None
+        self._gpt_connected_hole = None
+        self._native_connected_hole = None
 
     @Slot()
     def reloadQml(self) -> None:
@@ -1611,20 +1959,83 @@ class ChatSurfaceHost(QObject):
 
     @Slot(str, str, result=bool)
     def writeChatTerminal(self, terminal_id: str, data: str) -> bool:
-        session = self._sessions.get(str(terminal_id or "").strip())
+        key = str(terminal_id or "").strip()
+        session = self._sessions.get(key)
         if session is None:
             return False
         payload = data if isinstance(data, str) else str(data)
         if payload == "":
             return True
-        key = str(terminal_id or "").strip()
+        # Always pass keystrokes through so '/' and ordinary slash text remain
+        # visible.  Codex reports its unknown command after Enter; that output
+        # is handled locally in _read, without stealing input from the PTY.
         try:
             os.write(session["master"], payload.encode("utf-8"))
         except BlockingIOError:
             return False
         except OSError:
             return False
+        if key == "ws.tui.gpt":
+            self._track_gpt_input(payload)
         return True
+
+    @Slot(str, int, result=bool)
+    def scrollChatTerminal(self, terminal_id: str, delta: int) -> bool:
+        """Scroll a rendered TUI without turning the wheel into prompt input.
+
+        The native TerminalGrid handles wheel events when Qt delivers them to
+        the painted item.  QML can also receive the event first, however, so
+        expose the same operation as a small explicit slot for the transparent
+        wheel proxy in GrokTuiHole.
+        """
+        key = str(terminal_id or "").strip()
+        grid = (
+            getattr(self, "_gpt_grid", None)
+            if key == "ws.tui.gpt"
+            else self._tui_grid
+        )
+        scroll = getattr(grid, "scrollWheel", None)
+        if not callable(scroll):
+            return False
+        try:
+            return bool(scroll(int(delta)))
+        except (RuntimeError, TypeError, ValueError):
+            return False
+
+    @Slot(str, int, result=bool)
+    def scrollChatTerminalTo(self, terminal_id: str, offset: int) -> bool:
+        """Set a terminal's inline scrollback position from its scrollbar."""
+        key = str(terminal_id or "").strip()
+        grid = (
+            getattr(self, "_gpt_grid", None)
+            if key == "ws.tui.gpt"
+            else self._tui_grid
+        )
+        scroll = getattr(grid, "scrollToOffset", None)
+        if not callable(scroll):
+            return False
+        try:
+            return bool(scroll(int(offset)))
+        except (RuntimeError, TypeError, ValueError):
+            return False
+
+    @Slot(str, result=bool)
+    def pasteChatTerminal(self, terminal_id: str) -> bool:
+        from PySide6.QtGui import QGuiApplication
+
+        clip = QGuiApplication.clipboard()
+        text = clip.text() if clip is not None else ""
+        if not text and clip is not None:
+            mime = clip.mimeData()
+            if mime is not None and mime.hasImage():
+                # Codex handles image paste itself when it receives Ctrl+V.
+                return self.writeChatTerminal(terminal_id, "\x16")
+        if not text:
+            return False
+        return self.writeChatTerminal(
+            terminal_id,
+            str(text).replace("\n", "\r"),
+        )
 
     def _tui_pid(self) -> int | None:
         session = self._sessions.get(GROK_TUI_TERMINAL_ID)
@@ -2021,11 +2432,27 @@ class ChatSurfaceHost(QObject):
         except (TypeError, ValueError):
             return 420, 240
 
+    def _gpt_tui_busy(self) -> bool:
+        """Return True while Codex is rendering an active turn."""
+        grid = getattr(self, "_gpt_grid", None)
+        if grid is None:
+            return False
+        try:
+            text = str(grid.vt().display() or "").lower()
+        except (AttributeError, RuntimeError):
+            return False
+        return "working" in text and "interrupt" in text
+
     def _desk_finish(self, cmd: dict[str, Any], **fields: Any) -> None:
         from backend import desktop_operator
 
         self._desk_job = None
         self._desk_timer.stop()
+        fields.setdefault("observation_seq", self._desk_observation_seq)
+        fields.setdefault(
+            "stable_frames",
+            2 if cmd.get("action") in {"CLICK", "TYPE", "KEY"} else 0,
+        )
         desktop_operator.write_result(desktop_operator.make_result(cmd, **fields))
 
     def _desk_start(self, cmd: dict[str, Any]) -> None:
@@ -2045,20 +2472,39 @@ class ChatSurfaceHost(QObject):
             return
         if action == "SNAPSHOT":
             path = str(desktop_operator.ROOT / desktop_operator.VIEW_NAME)
-            ok = self._desk_grab(path)
-            if not ok:
-                ok = self._desk_grab_screen(path)
+            visual = bool(cmd.get("visual"))
+            ok = False
+            if visual:
+                ok = self._desk_grab(path)
+                if not ok:
+                    ok = self._desk_grab_screen(path)
             x, y = self._desk_current_cursor()
             names = self._desk_list_names("")
             self._desk_finish(
                 cmd,
-                ok=ok,
-                reason_code="SNAPSHOT" if ok else "SNAPSHOT_FAIL",
-                text="" if ok else "grab-fail",
+                ok=True,
+                reason_code="SNAPSHOT" if ok else "OBSERVED",
+                text="" if ok else "semantic-observation",
                 x=x,
                 y=y,
                 names=names,
                 image=path if ok else "",
+            )
+            return
+        busy = self._gpt_tui_busy()
+        cancel_key = action == "KEY" and str(cmd.get("text") or "").lower() in {
+            "esc",
+            "escape",
+        }
+        if busy and not cancel_key:
+            x, y = self._desk_current_cursor()
+            self._desk_finish(
+                cmd,
+                ok=False,
+                reason_code="BUSY",
+                text="GPTUI is working; observe again after the turn finishes.",
+                x=x,
+                y=y,
             )
             return
         if action == "KEY" and not cmd.get("name"):
@@ -2117,11 +2563,15 @@ class ChatSurfaceHost(QObject):
             "step": 0,
             "steps": 22,
             "shape": shape,
+            # Two 60 Hz frames of settling gives the observer a stable target
+            # before any click/key/type side effect is emitted.
+            "settle": 2,
         }
         self._desk_set_cursor(start[0], start[1], shape)
         self._desk_timer.start()
 
     def _desk_tick(self) -> None:
+        self._desk_observation_seq += 1
         job = self._desk_job
         if job is None:
             self._desk_timer.stop()
@@ -2153,6 +2603,11 @@ class ChatSurfaceHost(QObject):
         y = int(job["sy"] + (job["ty"] - job["sy"]) * ease)
         self._desk_set_cursor(x, y, str(job["shape"]))
         if t < 1.0:
+            return
+        settle = int(job.get("settle") or 0)
+        if settle > 0:
+            job["settle"] = settle - 1
+            self._desk_timer.start()
             return
         self._desk_timer.stop()
         cmd = job["cmd"]
@@ -2337,17 +2792,28 @@ class ChatSurfaceHost(QObject):
         return False
 
     def _desk_send_move(self, x: int, y: int) -> None:
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QCoreApplication, QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
 
         win = self._desk_window()
         if win is None:
             return
-        QTest.mouseMove(win, QPoint(x, y))
+        point = QPointF(float(x), float(y))
+        QCoreApplication.postEvent(
+            win,
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                point,
+                point,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
 
     def _desk_send_click(self, x: int, y: int, button: str) -> None:
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QCoreApplication, QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
 
         win = self._desk_window()
         if win is None:
@@ -2358,11 +2824,27 @@ class ChatSurfaceHost(QObject):
             "right": Qt.MouseButton.RightButton,
         }
         qt_button = mapping.get(button, Qt.MouseButton.LeftButton)
-        QTest.mouseClick(win, qt_button, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+        point = QPointF(float(x), float(y))
+        modifiers = Qt.KeyboardModifier.NoModifier
+        for event_type, event_button in (
+            (QEvent.Type.MouseButtonPress, qt_button),
+            (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+        ):
+            QCoreApplication.postEvent(
+                win,
+                QMouseEvent(
+                    event_type,
+                    point,
+                    point,
+                    event_button,
+                    qt_button,
+                    modifiers,
+                ),
+            )
 
     def _desk_send_key(self, key: str) -> None:
-        from PySide6.QtCore import Qt
-        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
 
         win = self._desk_window()
         if win is None:
@@ -2381,10 +2863,22 @@ class ChatSurfaceHost(QObject):
             "ArrowLeft": Qt.Key.Key_Left,
             "ArrowRight": Qt.Key.Key_Right,
         }
-        qt_key = keys.get(key)
-        if qt_key is None:
-            return
-        QTest.keyClick(win, qt_key)
+        modifiers = Qt.KeyboardModifier.NoModifier
+        if key == "Ctrl+V":
+            qt_key = Qt.Key.Key_V
+            modifiers = Qt.KeyboardModifier.ControlModifier
+        elif key == "Shift+Insert":
+            qt_key = Qt.Key.Key_Insert
+            modifiers = Qt.KeyboardModifier.ShiftModifier
+        else:
+            qt_key = keys.get(key)
+            if qt_key is None:
+                return
+        for event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QCoreApplication.postEvent(
+                win,
+                QKeyEvent(event_type, qt_key, modifiers),
+            )
 
     def _desk_send_char(self, ch: str) -> None:
         from PySide6.QtCore import QCoreApplication, QEvent, Qt
@@ -2469,16 +2963,26 @@ class ChatSurfaceHost(QObject):
             if turn is not None and turn != self._wallet_last_turn:
                 self._wallet_last_turn = int(turn)
                 self._wallet_live_base = int(used)
+        gpt_text = json.dumps(
+            codex_wallet_snapshot(), separators=(",", ":")
+        )
+        if gpt_text != self._gpt_wallet_json:
+            self._gpt_wallet_json = gpt_text
+            self.gptWalletChanged.emit(gpt_text)
+        codex_ids = discover_codex_sessions()
+        if codex_ids:
+            sync_owned(codex_ids, engine="GPT_TUI")
         text = json.dumps(payload, separators=(",", ":"))
-        if text == self._wallet_json:
-            return
-        self._wallet_json = text
-        self.grokWalletChanged.emit(text)
+        if text != self._wallet_json:
+            self._wallet_json = text
+            self.grokWalletChanged.emit(text)
         current = ""
         if isinstance(payload, dict):
             session_path = str(payload.get("session") or "")
             if session_path:
                 current = Path(session_path).name
+        if self._gpt_session_id and "ws.tui.gpt" in self._sessions:
+            current = self._gpt_session_id
         listing = json.dumps(
             list_for_ui(current_id=current),
             separators=(",", ":"),
@@ -2488,16 +2992,13 @@ class ChatSurfaceHost(QObject):
             self.chatSessionsChanged.emit(listing)
 
     def shutdown(self) -> None:
+        self._qml_rebind_timer.stop()
+        self._qml_reload_safety_barrier()
         self.stopSitePreview()
         embed = self._tui_embed
         self._tui_embed = None
         if embed is not None:
             embed.stop()
-        grid = self._tui_grid
-        self._tui_grid = None
-        if grid is not None:
-            grid.setParentItem(None)
-            grid.deleteLater()
         tmog = self._tmog_embed
         self._tmog_embed = None
         if tmog is not None:
@@ -2515,8 +3016,6 @@ class ChatSurfaceHost(QObject):
         if draw is not None:
             draw.stop()
         media_host.stop()
-        for key in list(self._sessions):
-            self._close(key)
 
     def _pty_readable(self, terminal_id: str) -> None:
         if not isinstance(terminal_id, str):
@@ -2573,10 +3072,16 @@ class ChatSurfaceHost(QObject):
         if chunks:
             self._chat_io_at = time.monotonic()
             raw = b"".join(chunks)
-            if terminal_id == GROK_TUI_TERMINAL_ID:
-                grid = self._tui_grid
+            commands: list[str] = []
+            if terminal_id == "ws.tui.gpt":
+                visible = _strip_ansi(raw.decode("utf-8", errors="replace"))
+                commands = self._commands_from_gpt_output(visible)
+            if terminal_id in (GROK_TUI_TERMINAL_ID, "ws.tui.gpt"):
+                grid = getattr(self, "_gpt_grid", None) if terminal_id == "ws.tui.gpt" else self._tui_grid
                 if grid is not None:
                     grid.feed_bytes(raw)
+                for command in commands:
+                    self._run_gpt_shared_command(command)
             else:
                 text = raw.decode("utf-8", errors="replace")
                 screen = session.get("screen")

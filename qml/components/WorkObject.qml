@@ -117,19 +117,34 @@ Item {
 
         Flickable {
             id: bodyFlick
+            objectName: root.objectType === "TERMINAL"
+                ? "terminalOutputScroll"
+                : "workObjectBodyScroll"
             visible: !root.grokTui
             width: parent.width
             height: root.fillHost
                 ? Math.max(
                     72,
-                    root.height - terminalInputRow.height - 40
+                    // Leave one full status-line row plus bottom breathing
+                    // room inside GgFrame's clipped content area.  Without
+                    // this inset the input/status pair sits under the frame
+                    // edge and the last line is visibly cut in half.
+                    root.height - terminalInputRow.height - 56
                 )
                 : Math.min(
                     root.bodyMaxHeight,
                     Math.max(72, bodyView.implicitHeight)
                 )
             contentWidth: width
-            contentHeight: bodyView.implicitHeight
+            // TextArea does not always grow its implicit height while a
+            // terminal is receiving PTY chunks.  Track the real document
+            // height so output is readable, selectable and scrollable instead
+            // of collapsing to the first prompt line.
+            contentHeight: Math.max(
+                bodyFlick.height,
+                bodyView.contentHeight,
+                bodyView.implicitHeight
+            )
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             interactive: contentHeight > height
@@ -139,10 +154,20 @@ Item {
 
             TextArea {
                 id: bodyView
+                objectName: root.objectType === "TERMINAL"
+                    ? "terminalOutput"
+                    : "workObjectBody"
                 width: bodyFlick.width
+                height: Math.max(
+                    bodyFlick.height,
+                    bodyView.contentHeight,
+                    bodyView.implicitHeight
+                )
                 text: root.bodyText
                 readOnly: !root.liveSurface || root.objectType === "TERMINAL"
                 selectByMouse: true
+                selectByKeyboard: true
+                persistentSelection: true
                 color: root.objectType === "CODE" || root.objectType === "TERMINAL"
                     ? "#d8dee9" : "#e6edf3"
                 font.family: root.objectType === "CODE" || root.objectType === "TERMINAL"
@@ -169,11 +194,13 @@ Item {
             }
 
             ScrollBar.vertical: GgScrollBar {
+                keepVisible: root.objectType === "TERMINAL"
             }
         }
 
         Row {
             id: terminalInputRow
+            objectName: "terminalInputRow"
             visible:
                 root.liveSurface
                 && root.objectType === "TERMINAL"
@@ -193,6 +220,7 @@ Item {
 
             GgField {
                 id: commandInput
+                objectName: "terminalCommandInput"
                 width: parent.width - 18
                 Keys.onReturnPressed: root.sendTerminalLine()
                 Keys.onEnterPressed: root.sendTerminalLine()
@@ -216,6 +244,7 @@ Item {
         }
 
         ActivityStrip {
+            id: activityStrip
             visible: root.activityState === "RUNNING"
                 || root.activityState === "STREAMING"
                 || root.activityState === "STARTING"

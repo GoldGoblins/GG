@@ -251,7 +251,11 @@ def main() -> int:
         'property int alphaUtilityHeight: 112',
         'objectName: "topBarSettingsButton"',
         'objectName: "topBarReloadButton"',
+        'objectName: "topBarFullscreenButton"',
         'text: "RELOAD"',
+        'text: root.appFullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN"',
+        'property bool appFullscreen: false',
+        'Window.FullScreen',
         'objectName: "shellLoadOverlay"',
         'objectName: "shellLoadFileLog"',
         'shellLoadLabel: "LOADING..."',
@@ -334,6 +338,7 @@ def main() -> int:
         'objectName: "telemetryCryptoWallet"',
         'leftLegend: "CRYPTO"',
         "signal chatSessionChosen(string sessionId, string engine)",
+        "cursorShape: Qt.PointingHandCursor",
         "cryptoStatusJson",
         "CTX  ",
         "ALL  ",
@@ -511,6 +516,10 @@ def main() -> int:
     require(
         "function hrefAllowed(" in web_pane,
         "WEB pane missing local href allow check.",
+    )
+    require(
+        'href.indexOf("http://127.0.0.1:") === 0' in web_pane,
+        "SITE pane hrefAllowed still rejects localhost PHP preview.",
     )
     require(
         "engineActive: true" in web_pane,
@@ -1254,7 +1263,9 @@ def main() -> int:
         'objectName: "settingsTabCloseButton"'
         in visible_repair_workspace
     )
-    assert 'sequence: "Esc"' in visible_repair_workspace
+    assert 'sequence: "Esc"' not in visible_repair_workspace
+    assert "Keys.onPressed: function(event)" in visible_repair_settings
+    assert "Qt.Key_Escape" in visible_repair_settings
     assert (
         "signal accentColorRequested(color value)"
         in visible_repair_workspace

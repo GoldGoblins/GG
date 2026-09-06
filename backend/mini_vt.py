@@ -120,6 +120,8 @@ def rgb_of(code: int, is_fg: bool = True) -> tuple[int, int, int]:
 class MiniVt:
     """Small VT cursor screen. Replaces a TUI, does not append a log."""
 
+    HISTORY_LIMIT = 2000
+
     def __init__(self, rows: int = 36, cols: int = 72) -> None:
         self.rows = max(2, int(rows))
         self.cols = max(4, int(cols))
@@ -134,6 +136,8 @@ class MiniVt:
         self.wrap = True
         self._pending_wrap = False
         self.buf = [self._blank_row() for _ in range(self.rows)]
+        self.history: list[list[tuple[str, int, int, int]]] = []
+        self.history_version = 0
         self.r = 0
         self.c = 0
         self._mode = "text"
@@ -178,6 +182,8 @@ class MiniVt:
         self._pending_wrap = False
         self._alt = None
         self.alt_screen = False
+        self.history.clear()
+        self.history_version += 1
 
     def feed(self, data: str) -> None:
         for ch in str(data or ""):
@@ -201,11 +207,26 @@ class MiniVt:
         if not pressed and not motion:
             if self.mouse_sgr:
                 return f"\x1b[<{code};{x};{y}m"
-            return ""
+            # Legacy tracking uses button code 3 for release.  X10 itself
+            # only reports presses, while 1000+ tracking expects the release
+            # packet; emitting it is harmless for X10 and keeps ordinary
+            # clicks complete for TUIs that do not use SGR.
+            code = 3
         if self.mouse_sgr:
             suffix = "M" if pressed or motion else "m"
             return f"\x1b[<{code};{x};{y}{suffix}"
-        return ""
+        # Some TUIs enable the legacy X10/UTF-8 mouse protocol instead of
+        # SGR.  Returning an empty string here made wheel and click events
+        # silently disappear, so the visible terminal could not scroll even
+        # though it had mouse reporting enabled.  The legacy packet is
+        # ESC [ M followed by button, column and row bytes (coordinates are
+        # one-based and limited to the protocol's 223-cell range).
+        legacy_code = 32 + code
+        legacy_x = 32 + min(223, x)
+        legacy_y = 32 + min(223, y)
+        return "\x1b[M" + bytes((legacy_code, legacy_x, legacy_y)).decode(
+            "latin1"
+        )
 
     def cursor_report(self) -> str:
         return f"\x1b[{self.r + 1};{self.c + 1}R"
@@ -410,7 +431,16 @@ class MiniVt:
         region = self.buf[top : bot + 1]
         for _ in range(count):
             if region:
-                region.pop(0)
+                removed = region.pop(0)
+                if (
+                    top == 0
+                    and bot == self.rows - 1
+                    and not self.alt_screen
+                ):
+                    self.history.append(removed[:])
+                    self.history_version += 1
+                    if len(self.history) > self.HISTORY_LIMIT:
+                        del self.history[:-self.HISTORY_LIMIT]
             region.append(self._blank_row())
         self.buf[top : bot + 1] = region
 

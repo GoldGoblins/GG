@@ -161,12 +161,19 @@ Item {
             }
         }
 
-        Text {
+        TextEdit {
+            objectName: "chatActivityBodyText"
             visible: root.bodyText.length > 0
             width: parent.width
             text: root.bodyText
             color: "#c7d0d9"
-            wrapMode: Text.WordWrap
+            readOnly: true
+            selectByMouse: true
+            selectByKeyboard: true
+            persistentSelection: true
+            textFormat: TextEdit.PlainText
+            wrapMode: TextEdit.WordWrap
+            height: implicitHeight
             font.family: "monospace"
             font.pixelSize: 12
         }
@@ -174,7 +181,7 @@ Item {
         Repeater {
             model: root.stageRows
 
-            delegate: Text {
+            delegate: TextEdit {
                 required property var modelData
 
                 width: eventColumn.width
@@ -188,7 +195,13 @@ Item {
                             : ""
                     )
                 color: "#c8cdd4"
-                wrapMode: Text.WordWrap
+                readOnly: true
+                selectByMouse: true
+                selectByKeyboard: true
+                persistentSelection: true
+                textFormat: TextEdit.PlainText
+                wrapMode: TextEdit.WordWrap
+                height: implicitHeight
                 font.family: "monospace"
                 font.pixelSize: 12
             }

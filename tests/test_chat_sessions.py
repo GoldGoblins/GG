@@ -45,6 +45,26 @@ def main() -> int:
     for sid, _engine in PROJECT_SESSIONS:
         if sid not in ids:
             raise AssertionError("project chat missing from CHATS: " + sid)
+    # A 27-row catalog models the live GoldGoblins catalog without writing
+    # outside the temporary test directory.
+    seeded_rows = [
+        {"n": n, "session_id": "grok-" + str(n), "engine": "GROK_TUI"}
+        for n in range(1, 28)
+    ]
+    seeded_rows.append(
+        {"n": 28, "session_id": "01a0724a-b286-7bf2-bb44-07abd60be740", "engine": "GPT_TUI"}
+    )
+    catalog.write_text(
+        json.dumps({"sessions": seeded_rows}), encoding="utf-8"
+    )
+    rows = list_for_ui(path=catalog)
+    if not any(
+        row["n"] == 28
+        and row["engine"] == "GPT_TUI"
+        and row["label"] == "session 28  ·  GPTUI"
+        for row in rows
+    ):
+        raise AssertionError("GPTUI session 28 missing")
     print("CHAT_SESSIONS_TEST=PASS")
     return 0
 

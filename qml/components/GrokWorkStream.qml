@@ -559,18 +559,26 @@ Item {
                         font.pixelSize: 12
                     }
 
-                    Text {
+                    TextEdit {
+                        objectName: "grokThoughtText"
                         visible: streamRow.isThought
                             && streamRow.modelData.text.length > 0
                         width: parent.width
                         text: streamRow.modelData.text
                         color: "#9aa7b3"
-                        wrapMode: Text.WordWrap
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
 
-                    Text {
+                    TextEdit {
+                        objectName: "grokSpeechText"
                         visible: streamRow.isSpeech
                             && root.textWithoutFences(
                                 streamRow.modelData.text
@@ -578,7 +586,13 @@ Item {
                         width: parent.width
                         text: root.textWithoutFences(streamRow.modelData.text)
                         color: "#e6edf3"
-                        wrapMode: Text.WordWrap
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.pixelSize: 13
                     }
 
@@ -659,26 +673,41 @@ Item {
                         height: visible ? implicitHeight : 0
                     }
 
-                    Text {
+                    TextEdit {
+                        objectName: "grokUserText"
                         visible: streamRow.isUser
                         width: parent.width
                         text: streamRow.modelData.text
                         color: "#d8dee9"
-                        wrapMode: Text.WordWrap
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.pixelSize: 13
                     }
 
-                    Text {
+                    TextEdit {
+                        objectName: "grokErrorText"
                         visible: streamRow.isError
                         width: parent.width
                         text: streamRow.modelData.text
                         color: "#c98989"
-                        wrapMode: Text.WordWrap
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
 
-                    Text {
+                    TextEdit {
+                        objectName: "grokBoxedText"
                         visible: root.isBoxedKind(streamRow.modelData.kind)
                             && !streamRow.isTerminal
                             && !streamRow.isCode
@@ -688,7 +717,13 @@ Item {
                         width: parent.width
                         text: root.boxedLine(streamRow.modelData)
                         color: "#9aa7b3"
-                        wrapMode: Text.WordWrap
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
@@ -724,14 +759,21 @@ Item {
                     onContentHeightChanged: root.stickWorkLogToEnd()
                     onHeightChanged: root.stickWorkLogToEnd()
 
-                    Text {
+                    TextEdit {
                         id: workLogBody
+                        objectName: "grokWorkLogText"
                         width: workLogFlick.width
                         text: root.workLogText
                         color: root.workLogHasError ? "#c98989" : "#9aa7b3"
+                        readOnly: true
+                        selectByMouse: true
+                        selectByKeyboard: true
+                        persistentSelection: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WordWrap
+                        height: implicitHeight
                         font.family: "monospace"
                         font.pixelSize: 12
-                        wrapMode: Text.WordWrap
                     }
 
                     ScrollBar.vertical: GgScrollBar {

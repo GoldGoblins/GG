@@ -63,6 +63,7 @@ class _VtHost(QObject):
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._pulse: QTimer | None = None
         self._dirty = False
+        self._history_sent_version = -1
 
     @Slot()
     def start(self) -> None:
@@ -105,9 +106,15 @@ class _VtHost(QObject):
             return
         self._dirty = False
         vt = self._vt
+        history = None
+        if vt.history_version != self._history_sent_version:
+            history = [row[:] for row in vt.history]
+            self._history_sent_version = vt.history_version
         self.snapshotReady.emit(
             {
                 "buf": [row[:] for row in vt.buf],
+                "history": history,
+                "history_version": vt.history_version,
                 "r": vt.r,
                 "c": vt.c,
                 "rows": vt.rows,
@@ -117,6 +124,7 @@ class _VtHost(QObject):
                 "mouse_mode": vt.mouse_mode,
                 "mouse_sgr": vt.mouse_sgr,
                 "bracket_paste": vt.bracket_paste,
+                "alt_screen": vt.alt_screen,
             }
         )
 
@@ -134,6 +142,9 @@ class _VtHost(QObject):
 class TerminalGrid(QQuickPaintedItem):
     dataProduced = Signal(str)
     resized = Signal(int, int)
+    # offset, maximum offset, visible page height.  The QML host uses this
+    # for a real scrollbar instead of guessing from the painted surface.
+    scrollMetricsChanged = Signal(int, int, int)
     ready = Signal()
     _bytesIn = Signal(object)
     _resizeTo = Signal(int, int)
@@ -163,6 +174,13 @@ class TerminalGrid(QQuickPaintedItem):
         self._last_rows = 0
         self._ready_emitted = False
         self._snap: dict | None = None
+        self._selection_anchor: tuple[int, int] | None = None
+        self._selection_cursor: tuple[int, int] | None = None
+        self._selecting = False
+        self._selection_moved = False
+        self._selection_passthrough_click = False
+        self._view_offset = 0
+        self._last_scroll_metrics: tuple[int, int, int] | None = None
         self.setFillColor(_color(DEFAULT_BG_RGB))
         self.setAntialiasing(False)
         self.setOpaquePainting(True)
@@ -216,18 +234,35 @@ class TerminalGrid(QQuickPaintedItem):
         if thread is None:
             return
         self._thread = None
+        # Disconnect queued deliveries before stopping the worker.  During
+        # application shutdown a queued snapshot can otherwise target a
+        # QQuick item after its scene has already been torn down (the observed
+        # Python SIGSEGV on window close).
+        try:
+            self._host.snapshotReady.disconnect(self._apply_snapshot)
+        except (AttributeError, TypeError, RuntimeError):
+            pass
+        try:
+            self._host.repliesReady.disconnect(self.dataProduced.emit)
+        except (AttributeError, TypeError, RuntimeError):
+            pass
         if thread.isRunning():
             thread.quit()
-            if not thread.wait(1500):
-                thread.terminate()
-                thread.wait(400)
-        self._host = None
+            # The worker only owns a lightweight timer/event loop, so a normal
+            # quit is sufficient and avoids terminating Qt from underneath a
+            # queued callback.
+            thread.wait(3000)
 
     def itemChange(self, change, value):  # type: ignore[no-untyped-def]
         if change == QQuickItem.ItemChange.ItemSceneChange:
             window = getattr(value, "window", None)
             if window is None:
                 self._stop_worker()
+        elif change == QQuickItem.ItemChange.ItemParentHasChanged and value is None:
+            # QML loaders can remove the host item before the scene-change
+            # notification arrives.  Stop queued VT deliveries as soon as
+            # the painted item loses its parent as well.
+            self._stop_worker()
         if change in (
             QQuickItem.ItemChange.ItemVisibleHasChanged,
             QQuickItem.ItemChange.ItemActiveFocusHasChanged,
@@ -331,6 +366,154 @@ class TerminalGrid(QQuickPaintedItem):
             max(1, int(round(self._cell_h)) + 1),
         )
 
+    def _selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        anchor = self._selection_anchor
+        cursor = self._selection_cursor
+        if (
+            anchor is None
+            or cursor is None
+            or not self._selection_moved
+        ):
+            return None
+        anchor_before = (
+            anchor[1] < cursor[1]
+            or (anchor[1] == cursor[1] and anchor[0] <= cursor[0])
+        )
+        if anchor_before:
+            return anchor, cursor
+        return cursor, anchor
+
+    def _selection_contains(self, row: int, col: int) -> bool:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return False
+        start, end = bounds
+        if row < start[1] or row > end[1]:
+            return False
+        if start[1] == end[1]:
+            return start[0] <= col <= end[0]
+        if row == start[1]:
+            return col >= start[0]
+        if row == end[1]:
+            return col <= end[0]
+        return True
+
+    def _selected_text(self) -> str:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return ""
+        source = self._display_rows()
+        start, end = bounds
+        lines: list[str] = []
+        for row in range(start[1], min(end[1], len(source) - 1) + 1):
+            cells = source[row]
+            left = start[0] if row == start[1] else 0
+            right = end[0] if row == end[1] else len(cells) - 1
+            text = "".join(
+                (cells[col][0] if cells[col][0] else " ")
+                for col in range(max(0, left), min(right, len(cells) - 1) + 1)
+            )
+            lines.append(text.rstrip())
+        return "\n".join(lines)
+
+    def _display_rows(self) -> list[list[tuple[str, int, int, int]]]:
+        """Return the viewport rows, including bounded inline scrollback."""
+        snap = self._snap or {}
+        current = snap.get("buf") or self._vt.buf
+        history = snap.get("history") or getattr(self._vt, "history", [])
+        if bool(snap.get("alt_screen")) or not history:
+            self._view_offset = 0
+            return current
+        rows = int(snap.get("rows") or len(current) or self._last_rows or 1)
+        combined = list(history) + list(current)
+        max_offset = max(0, len(combined) - rows)
+        self._view_offset = max(0, min(self._view_offset, max_offset))
+        end = len(combined) - self._view_offset
+        start = max(0, end - rows)
+        visible = combined[start:end]
+        if len(visible) < rows:
+            visible = ([self._vt._blank_row()] * (rows - len(visible))) + visible
+        return visible
+
+    def _scroll_view(self, lines: int) -> bool:
+        snap = self._snap or {}
+        if bool(snap.get("alt_screen")):
+            return False
+        history = snap.get("history") or getattr(self._vt, "history", [])
+        if not history:
+            return False
+        rows = int(snap.get("rows") or self._last_rows or 1)
+        current = snap.get("buf") or self._vt.buf
+        max_offset = max(0, len(history) + len(current) - rows)
+        previous = self._view_offset
+        self._view_offset = max(0, min(max_offset, previous + int(lines)))
+        changed = self._view_offset != previous
+        if changed:
+            self._emit_scroll_metrics()
+            self.update()
+        return changed
+
+    @Slot(int, result=bool)
+    def scrollToOffset(self, offset: int) -> bool:
+        """Move the inline scrollback viewport to an absolute line offset."""
+        snap = self._snap or {}
+        if bool(snap.get("alt_screen")):
+            return False
+        history = snap.get("history") or getattr(self._vt, "history", [])
+        if not history:
+            return False
+        rows = int(snap.get("rows") or self._last_rows or 1)
+        current = snap.get("buf") or self._vt.buf
+        maximum = max(0, len(history) + len(current) - rows)
+        previous = self._view_offset
+        self._view_offset = max(0, min(maximum, int(offset)))
+        changed = self._view_offset != previous
+        if changed:
+            self._emit_scroll_metrics()
+            self.update()
+        return changed
+
+    def _emit_scroll_metrics(self) -> None:
+        snap = self._snap or {}
+        history = snap.get("history") or getattr(self._vt, "history", [])
+        rows = int(snap.get("rows") or self._last_rows or 1)
+        current = snap.get("buf") or self._vt.buf
+        if bool(snap.get("alt_screen")) or not history:
+            metrics = (0, 0, max(1, rows))
+        else:
+            maximum = max(0, len(history) + len(current) - rows)
+            metrics = (
+                max(0, min(maximum, int(self._view_offset))),
+                maximum,
+                max(1, rows),
+            )
+        if metrics == self._last_scroll_metrics:
+            return
+        self._last_scroll_metrics = metrics
+        self.scrollMetricsChanged.emit(*metrics)
+
+    def _begin_selection(self, event) -> None:
+        col, row = self._cell_at(event.position().x(), event.position().y())
+        self._selection_anchor = (col, row)
+        self._selection_cursor = (col, row)
+        self._selecting = True
+        self._selection_moved = False
+        self.update()
+
+    def _extend_selection(self, event) -> None:
+        if not self._selecting:
+            return
+        col, row = self._cell_at(event.position().x(), event.position().y())
+        next_cursor = (col, row)
+        if next_cursor != self._selection_cursor:
+            self._selection_cursor = next_cursor
+            self._selection_moved = True
+            self.update()
+
+    def _finish_selection(self) -> None:
+        self._selecting = False
+        self.update()
+
     def _schedule(self) -> None:
         self._touch()
 
@@ -358,6 +541,7 @@ class TerminalGrid(QQuickPaintedItem):
             self._last_rows = rows
             self._resizeTo.emit(rows, cols)
             self.resized.emit(cols, rows)
+        self._emit_scroll_metrics()
         self._touch()
 
     @Slot(str)
@@ -386,17 +570,32 @@ class TerminalGrid(QQuickPaintedItem):
         if not isinstance(snap, dict):
             return
         previous = self._snap
+        if snap.get("history") is None and previous is not None:
+            snap = dict(snap)
+            snap["history"] = previous.get("history") or []
         self._snap = snap
         vt = self._vt
         vt.app_cursor = bool(snap.get("app_cursor"))
         vt.mouse_mode = int(snap.get("mouse_mode") or 0)
         vt.mouse_sgr = bool(snap.get("mouse_sgr"))
         vt.bracket_paste = bool(snap.get("bracket_paste"))
+        vt.alt_screen = bool(snap.get("alt_screen"))
         new_buf = snap.get("buf") or []
         old_buf = (previous or {}).get("buf") or []
+        old_history = (previous or {}).get("history") or []
+        new_history = snap.get("history") or []
+        if bool(snap.get("alt_screen")):
+            self._view_offset = 0
+        elif self._view_offset > 0 and len(new_history) > len(old_history):
+            # Keep the same document lines under the cursor while new output
+            # grows below the user's manually scrolled viewport.
+            self._view_offset += len(new_history) - len(old_history)
+        self._emit_scroll_metrics()
         if (not old_buf) or len(old_buf) != len(new_buf):
             self._touch()
             return
+        if old_history != new_history:
+            self._touch()
         self._touch(self._row_rect(int((previous or {}).get("r") or 0)))
         self._touch(self._row_rect(int(snap.get("r") or 0)))
         for index, row in enumerate(new_buf):
@@ -414,21 +613,22 @@ class TerminalGrid(QQuickPaintedItem):
         painter.setFont(self._font)
         cell_w = self._cell_w
         cell_h = self._cell_h
-        clip = painter.clipBoundingRect()
+        clip = (painter.clipBoundingRect() if painter.hasClipping()
+                else QRectF(0, 0, self.width(), self.height()))
         clip_top = clip.top()
         clip_bottom = clip.bottom()
-        bg = _color(DEFAULT_BG_RGB)
+        screen_bg = _color(DEFAULT_BG_RGB)
         max_cols = self._last_cols if self._last_cols > 0 else max(
             1, int(float(self.width()) / max(1.0, float(cell_w)))
         )
         snap = self._snap
         if snap is not None:
-            buf = snap.get("buf") or []
+            buf = self._display_rows()
             cursor_r = int(snap.get("r") or 0)
             cursor_c = int(snap.get("c") or 0)
             cursor_visible = bool(snap.get("cursor_visible"))
         else:
-            buf = self._vt.buf
+            buf = self._display_rows()
             cursor_r = self._vt.r
             cursor_c = self._vt.c
             cursor_visible = self._vt.cursor_visible
@@ -442,7 +642,7 @@ class TerminalGrid(QQuickPaintedItem):
             if y0 + cell_h < clip_top or y0 > clip_bottom:
                 continue
             try:
-                painter.fillRect(QRectF(0, y0, width, cell_h), bg)
+                painter.fillRect(QRectF(0, y0, width, cell_h), screen_bg)
             except (OverflowError, ValueError):
                 continue
             x = 0
@@ -477,6 +677,14 @@ class TerminalGrid(QQuickPaintedItem):
                 rect = QRectF(x * cell_w, y * cell_h, span * cell_w, cell_h)
                 if bg_rgb != DEFAULT_BG_RGB:
                     painter.fillRect(rect, _color(bg_rgb))
+                if any(self._selection_contains(y, sx) for sx in range(x, nx)):
+                    selection_bg = QColor(53, 91, 120)
+                    for sx in range(x, nx):
+                        if self._selection_contains(y, sx):
+                            painter.fillRect(
+                                QRectF(sx * cell_w, y * cell_h, cell_w, cell_h),
+                                selection_bg,
+                            )
                 visible = "".join(part for part in text if part)
                 if visible and not (run_flags & HIDDEN) and visible.strip() != "":
                     if run_flags & BOLD and run_flags & ITALIC:
@@ -516,6 +724,7 @@ class TerminalGrid(QQuickPaintedItem):
         if (
             cursor_visible
             and self._cursor_on
+            and self._view_offset == 0
             and 0 <= cursor_r < rows
             and 0 <= cursor_c < cols
             and cursor_c < max_cols
@@ -530,6 +739,25 @@ class TerminalGrid(QQuickPaintedItem):
                 painter.drawText(cx, int(cy + self._ascent), ch)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        mods = event.modifiers()
+        if event.key() == Qt.Key.Key_PageUp:
+            if self._scroll_view(-max(1, self._last_rows - 2)):
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_PageDown:
+            if self._scroll_view(max(1, self._last_rows - 2)):
+                event.accept()
+                return
+        if (
+            event.key() == Qt.Key.Key_C
+            and mods & Qt.KeyboardModifier.ControlModifier
+            and mods & Qt.KeyboardModifier.ShiftModifier
+        ):
+            selected = self._selected_text()
+            if selected:
+                QGuiApplication.clipboard().setText(selected)
+                event.accept()
+                return
         mapped = self._map_key(event)
         if mapped is None:
             super().keyPressEvent(event)
@@ -548,6 +776,20 @@ class TerminalGrid(QQuickPaintedItem):
 
     def mousePressEvent(self, event) -> None:
         self.forceActiveFocus()
+        shift_select = bool(
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        )
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Start a local drag selection even when the TUI has enabled
+            # mouse reporting.  A click without movement is handed back to
+            # the TUI on release, so buttons and links still work normally;
+            # an actual drag remains available without requiring Shift.
+            self._begin_selection(event)
+            self._selection_passthrough_click = (
+                self._vt.mouse_mode != 0 and not shift_select
+            )
+            event.accept()
+            return
         report = self._mouse(event, pressed=True)
         if report:
             self.dataProduced.emit(report)
@@ -562,6 +804,34 @@ class TerminalGrid(QQuickPaintedItem):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._selecting
+        ):
+            self._extend_selection(event)
+            passthrough = self._selection_passthrough_click
+            moved = self._selection_moved
+            anchor = self._selection_anchor
+            self._finish_selection()
+            self._selection_passthrough_click = False
+            if not moved:
+                # Preserve a normal TUI click when the gesture was not a
+                # selection drag.  In mouse-reporting mode the terminal
+                # protocol receives both the press and release at the
+                # original cell; otherwise this is simply a focus click.
+                if passthrough and anchor is not None:
+                    col, row = anchor
+                    press = self._vt.mouse_report(col, row, 0, True)
+                    release = self._vt.mouse_report(col, row, 0, False)
+                    if press:
+                        self.dataProduced.emit(press)
+                    if release:
+                        self.dataProduced.emit(release)
+                self._selection_anchor = None
+                self._selection_cursor = None
+                self.update()
+            event.accept()
+            return
         report = self._mouse(event, pressed=False)
         if report:
             self.dataProduced.emit(report)
@@ -570,6 +840,10 @@ class TerminalGrid(QQuickPaintedItem):
         super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._selecting:
+            self._extend_selection(event)
+            event.accept()
+            return
         if self._vt.mouse_mode >= 1002 and event.buttons():
             report = self._mouse(event, pressed=True, motion=True)
             if report:
@@ -578,22 +852,37 @@ class TerminalGrid(QQuickPaintedItem):
                 return
         super().mouseMoveEvent(event)
 
-    def wheelEvent(self, event) -> None:
-        delta = event.angleDelta().y()
+    @Slot(int, result=bool)
+    def scrollWheel(self, delta: int) -> bool:
+        delta = int(delta)
         if delta == 0:
-            event.ignore()
-            return
+            return False
+        # Inline Codex sessions intentionally keep terminal scrollback local
+        # to this renderer.  Consume the wheel here so it cannot become a
+        # prompt keystroke, while retaining the TUI mouse path for alternate
+        # screen overlays that own their own pager.
+        steps = max(1, abs(int(delta / 120)))
+        if self._scroll_view((3 if delta > 0 else -3) * steps):
+            return True
         if self._vt.mouse_mode:
             button = 64 if delta > 0 else 65
-            col, row = self._cell_at(event.position().x(), event.position().y())
+            col, row = self._cell_at(self.width() / 2, self.height() / 2)
             report = self._vt.mouse_report(col, row, button, True)
             if report:
                 self.dataProduced.emit(report)
+            return bool(report)
+        # Arrow keys are input-history navigation in Grok/Codex TUI.  Page
+        # keys belong to the rendered session view, so wheel scrolling must
+        # use them instead of feeding Up/Down into the prompt.
+        seq = "\x1b[5~" if delta > 0 else "\x1b[6~"
+        self.dataProduced.emit(seq * steps)
+        return True
+
+    def wheelEvent(self, event) -> None:
+        if self.scrollWheel(event.angleDelta().y()):
             event.accept()
             return
-        steps = max(1, abs(int(delta / 120)))
-        seq = "\x1b[A" if delta > 0 else "\x1b[B"
-        self.dataProduced.emit(seq * steps)
+        event.ignore()
         event.accept()
 
     def _cell_at(self, px: float, py: float) -> tuple[int, int]:
@@ -622,6 +911,20 @@ class TerminalGrid(QQuickPaintedItem):
             return ""
         return clip.text() or ""
 
+    def _clipboard_payload(self) -> str:
+        clip = QGuiApplication.clipboard()
+        if clip is None:
+            return ""
+        text = clip.text() or ""
+        if text:
+            return text
+        mime = clip.mimeData()
+        if mime is not None and mime.hasImage():
+            # Preserve Codex's native image-paste shortcut when the clipboard
+            # has no text representation.
+            return "\x16"
+        return ""
+
     def _emit_paste(self, text: str) -> None:
         payload = text.replace("\n", "\r")
         if self._vt.bracket_paste:
@@ -642,9 +945,15 @@ class TerminalGrid(QQuickPaintedItem):
             if paste:
                 self._emit_paste(paste)
             return ""
-        if ctrl and shift and key == Qt.Key.Key_V:
-            paste = self._clipboard_text()
+        # Treat both Ctrl+Shift+V (terminal convention) and plain Ctrl+V as
+        # text paste.  Forwarding Ctrl+V to Codex makes it invoke image paste,
+        # which produces the misleading "Failed to paste image" error when
+        # the clipboard contains ordinary text or no image at all.
+        if ctrl and key == Qt.Key.Key_V:
+            paste = self._clipboard_payload()
             if paste:
+                if paste == "\x16":
+                    return paste
                 self._emit_paste(paste)
             return ""
         if ctrl and shift and key == Qt.Key.Key_C:

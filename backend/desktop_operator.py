@@ -36,6 +36,8 @@ KEYS = frozenset(
         "ArrowDown",
         "ArrowLeft",
         "ArrowRight",
+        "Ctrl+V",
+        "Shift+Insert",
     }
 )
 BUTTONS = frozenset({"left", "middle", "right"})
@@ -96,6 +98,7 @@ def validate_command(value: Any) -> dict[str, Any]:
         text = ""
     if not isinstance(text, str):
         raise DesktopOperatorError("TEXT_INVALID")
+    visual = bool(value.get("visual", False))
     if len(text) > 4000:
         raise DesktopOperatorError("TEXT_TOO_LONG")
     if len(name) > 120:
@@ -134,6 +137,7 @@ def validate_command(value: Any) -> dict[str, Any]:
         "risk_class": risk_class_for(action),
         "general_action_authority": GENERAL_ACTION_AUTHORITY,
         "visible_cursor": True,
+        "visual": visual,
     }
 
 
@@ -145,6 +149,7 @@ def make_command(
     x: int = 0,
     y: int = 0,
     button: str = "left",
+    visual: bool = False,
 ) -> dict[str, Any]:
     return validate_command(
         {
@@ -156,6 +161,7 @@ def make_command(
             "x": x,
             "y": y,
             "button": button,
+            "visual": visual,
         }
     )
 
@@ -170,6 +176,8 @@ def make_result(
     y: int = 0,
     names: list[Any] | None = None,
     image: str = "",
+    observation_seq: int = 0,
+    stable_frames: int = 0,
 ) -> dict[str, Any]:
     view = ROOT / VIEW_NAME
     if not image and view.is_file():
@@ -189,6 +197,8 @@ def make_result(
         "image": image,
         "general_action_authority": GENERAL_ACTION_AUTHORITY,
         "visible_cursor": True,
+        "observation_seq": max(0, int(observation_seq)),
+        "stable_frames": max(0, int(stable_frames)),
     }
 
 
@@ -294,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
     p_key = sub.add_parser("key")
     p_key.add_argument("key")
     sub.add_parser("snapshot")
+    sub.choices["snapshot"].add_argument(
+        "--visual",
+        action="store_true",
+        help="capture a screenshot; default is semantic observation only",
+    )
     p_find = sub.add_parser("find")
     p_find.add_argument("query")
     args = parser.parse_args(argv)
@@ -342,7 +357,10 @@ def main(argv: list[str] | None = None) -> int:
         elif action == "key":
             result = submit(make_command("KEY", text=args.key), timeout=timeout)
         elif action == "snapshot":
-            result = submit(make_command("SNAPSHOT"), timeout=timeout)
+            result = submit(
+                make_command("SNAPSHOT", visual=bool(args.visual)),
+                timeout=timeout,
+            )
         elif action == "find":
             result = submit(make_command("FIND", text=args.query), timeout=timeout)
         else:

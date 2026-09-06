@@ -4,7 +4,9 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
-This directory **is** the program. GROK TUI (Grok 4.6) is the intended motor.
+This directory **is** the program. GROK TUI and GPTUI are two motors in the
+same workspace. They use the same files, shared session catalog and laser-
+Merkle knowledge tree; switching the motor does not switch the workspace.
 Local Qwen GGUF files are not in git and are not required for GROK TUI.
 
 ```text
@@ -365,3 +367,9 @@ LOCAL CHAT BRIDGE
 → TYPED CONTROL, STOP, RESUME AND EXACT APPROVAL
 → OBSERVE → REPAIR → VERIFY
 ```
+
+## GPTUI (Codex)
+
+Select **GPTUI** beside **GROK TUI** in the lower-left chat footer (also in Settings). Codex CLI runs inside Universal Operational Stream with its own PTY and terminal grid. Switching engines preserves both running terminal sessions. The selected engine is saved with desktop settings.
+
+Requires `codex` on PATH. Sign in through Codex when prompted; use `/model` to select a model available to your account and `/resume` to reopen a Codex conversation. GPTUI sessions are saved in the same local chat catalog as Grok and resume in the shared GoldGoblins workspace. Both motors read the workspace `AGENTS.md`, which points at the live knowledge-tree HEAD and its verified sources. Codex starts with workspace-write sandboxing and on-request approvals. Restart GG AI Desktop after installing this Python backend change.

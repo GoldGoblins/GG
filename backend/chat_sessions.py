@@ -21,6 +21,7 @@ ENGINE_LABEL = {
     "GROK_TUI": "GROK TUI",
     "GROK_WORKER": "GROK",
     "LOCAL_QWEN": "QWEN",
+    "GPT_TUI": "GPTUI",
 }
 
 
@@ -54,6 +55,12 @@ def load_catalog(path: Path | None = None) -> dict[str, Any]:
 
 
 def _ensure_project_sessions(catalog: dict[str, Any]) -> bool:
+    original_count = len(catalog.get("sessions") or [])
+    catalog["sessions"] = [
+        row
+        for row in catalog.get("sessions") or []
+        if str(row.get("session_id") or "").strip() != "ws.tui.gpt"
+    ]
     have = {
         str(row.get("session_id") or "").strip()
         for row in catalog.get("sessions") or []
@@ -66,7 +73,7 @@ def _ensure_project_sessions(catalog: dict[str, Any]) -> bool:
             n = 0
         if n >= next_n:
             next_n = n + 1
-    changed = False
+    changed = len(catalog["sessions"]) != original_count
     for sid, engine in PROJECT_SESSIONS:
         if sid in have:
             continue

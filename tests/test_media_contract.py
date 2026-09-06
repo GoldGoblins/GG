@@ -35,6 +35,8 @@ def main() -> int:
         raise AssertionError("cliamp/torlink probe missing")
     if "RADIO_API" not in src or "IPTV_PLAYLISTS" not in src:
         raise AssertionError("live radio/tv catalogs missing")
+    if "def _iptv_playlists" not in src or "ThreadPoolExecutor" not in src:
+        raise AssertionError("TV catalog still fetches playlists serially")
     if "sort_radio_rows" not in src or "sort_title_rows" not in src:
         raise AssertionError("radio/tv catalogs are not sorted")
     if "RADIO_BROWSER_COUNTRIES" not in src:
@@ -156,8 +158,26 @@ def main() -> int:
     eq = media_contract.normalize_eq([3, -6], 10)
     if eq[0] != 3.0 or eq[1] != -6.0 or len(eq) != 10:
         raise AssertionError("eq " + str(eq))
-    if '"cmd": "bands"' not in host_src and "'cmd': 'bands'" not in host_src:
-        raise AssertionError("cliamp spectrum ipc missing")
+    if '"cmd": "bands"' in host_src or "'cmd': 'bands'" in host_src:
+        raise AssertionError("spectrum still polls CLIAMP's internal bands")
+    if '"-f",\n                "pulse"' not in host_src:
+        raise AssertionError("spectrum is not reading the Pulse/PipeWire monitor")
+    if '"@DEFAULT_MONITOR@"' not in host_src:
+        raise AssertionError("default sink monitor fallback missing")
+    if "showspectrum=" not in host_src or "fps={_SPECTRUM_FPS}" not in host_src:
+        raise AssertionError("FFmpeg 60Hz FFT spectrum missing")
+    if "orientation=horizontal" not in host_src or "slide=fullframe" not in host_src:
+        raise AssertionError("spectrum frame is not frequency-oriented")
+    if ",format=gray" not in host_src:
+        raise AssertionError("spectrum grayscale frame conversion missing")
+    if "_SPECTRUM_FREQ_WARP = 0.50" not in host_src:
+        raise AssertionError("spectrum frequency warp is missing")
+    if "def _warp_frequency_bands" not in host_src:
+        raise AssertionError("spectrum frequency bins are not remapped")
+    if "def _read_spectrum_stream" not in host_src:
+        raise AssertionError("spectrum stream reader missing")
+    if "def _store_spectrum_frame" not in host_src:
+        raise AssertionError("spectrum frame reducer missing")
     if "status_payload(live" not in host_src and "live: bool = False" not in host_src:
         raise AssertionError("live media status path missing")
     if "_CLIAMP_POLL_TIMEOUT" not in host_src or "_catalog_memo" not in host_src:
@@ -168,6 +188,8 @@ def main() -> int:
         raise AssertionError("gui live status still waits on the cliamp socket")
     if "--buffer-ms" not in host_src:
         raise AssertionError("cliamp radio buffer missing")
+    if "_CLIAMP_BUFFER_MS = 5000" not in host_src:
+        raise AssertionError("radio buffer is not at cliamp's maximum")
     if "_maybe_resume_stream" not in host_src or "_cliamp_buffered" not in host_src:
         raise AssertionError("radio stream watchdog / buffered daemon missing")
     if "_CLIAMP_RESUME_GAP" not in host_src:
@@ -256,6 +278,26 @@ def main() -> int:
         raise AssertionError("qml video still live-polls at 250ms")
     if "playbackState" not in qml:
         raise AssertionError("MediaPlayer play() retriggered while already playing")
+    if "function schedulePlayerRetry()" not in qml or "function watchPlayer()" not in qml:
+        raise AssertionError("TV player has no stalled-stream recovery")
+    if "MediaPlayer.InvalidMedia" not in qml:
+        raise AssertionError("TV player has no invalid-media recovery")
+    if "onBufferProgressChanged" in qml:
+        raise AssertionError("TV player reports every buffer tick to Python")
+    if 'objectName: "mediaFullscreenButton"' not in qml or "toggleFullscreen" not in qml:
+        raise AssertionError("TV fullscreen button missing")
+    if "opacity: fullscreenMouse.containsMouse ? 1.0 : 0.0" not in qml:
+        raise AssertionError("TV fullscreen button is not hover-transparent")
+    if "property bool videoFullscreen" not in qml:
+        raise AssertionError("TV video fullscreen state missing")
+    if 'objectName: "mediaVideoFullscreenWindow"' not in qml:
+        raise AssertionError("TV fullscreen video window missing")
+    if "videoOutput: root.videoFullscreen ? fullscreenVideo : holeVideo" not in qml:
+        raise AssertionError("TV video output is not switched for fullscreen")
+    if "showFullScreen()" not in qml or "visible: false" not in qml or "Key_Escape" not in qml:
+        raise AssertionError("TV fullscreen exit path missing")
+    if "LoadedMedia" not in qml or "BufferedMedia" not in qml:
+        raise AssertionError("TV player starts before media is ready")
     if "onMediaStateChanged" not in qml:
         raise AssertionError("media pane still polls instead of following mediaStateChanged")
     if 'leftLegend: "MEDIA"' in qml:
@@ -277,18 +319,16 @@ def main() -> int:
         raise AssertionError("utility strip never resyncs mode after a missed mediaStateChanged")
     if "function refreshMeters(" not in utility:
         raise AssertionError("meter paint still rewrites chrome statusJson")
-    if "interval: 33" in utility:
-        raise AssertionError("utility meters still fight the GUI thread at 33ms")
+    if "interval: 8" in utility:
+        raise AssertionError("utility meters exceed the 60Hz visual cadence")
     if "interval: 125" in utility:
         raise AssertionError("spectrum meters still lag at 125ms")
     if "interval: 50" in utility:
         raise AssertionError("spectrum still ticks at 20Hz")
-    if "interval: 16" in utility:
-        raise AssertionError("spectrum still capped at 60Hz")
-    if "interval: 8" not in utility:
-        raise AssertionError("spectrum dropped 125Hz live meters")
-    if "_refresh_bands" not in host_src:
-        raise AssertionError("spectrum still waits on status ipc before FFT")
+    if "interval: 16" not in utility:
+        raise AssertionError("spectrum dropped the 60Hz visual cadence")
+    if "_ensure_spectrum_stream" not in host_src or "_store_spectrum_frame" not in host_src:
+        raise AssertionError("spectrum does not have an independent 60Hz FFT stream")
     if "utilityFreqBand" not in utility:
         raise AssertionError("FM frequency band missing")
     if "mediaTuneMhz" not in utility:
@@ -338,6 +378,10 @@ def main() -> int:
         raise AssertionError("mediaStateChanged signal missing")
     if "def mediaSeek" not in play_src or "def mediaReportClock" not in play_src:
         raise AssertionError("qml clock/seek slots missing")
+    if "def mediaReportPlayerState" not in play_src:
+        raise AssertionError("qml player state slot missing")
+    if "def report_player_state" not in host_src or "_qml_buffering" not in host_src:
+        raise AssertionError("qml player buffering state missing")
     if "def seek(" not in host_src or "def report_clock(" not in host_src:
         raise AssertionError("media host seek/clock missing")
     if "_CLIAMP_BUFFER_MS = 750" in host_src:
@@ -346,6 +390,8 @@ def main() -> int:
         raise AssertionError("cliamp stream buffer still 3000ms")
     if "_LIVE_TTL" not in host_src:
         raise AssertionError("cliamp live status still uncached")
+    if "_LIVE_PUMP_INTERVAL = 0.016" not in host_src:
+        raise AssertionError("cliamp spectrum worker dropped below 60Hz")
     if "def publish_live" not in host_src:
         raise AssertionError("play/mode still does not publish live meter JSON")
     if "media_host.publish_live" not in play_src:
@@ -392,6 +438,8 @@ def main() -> int:
     tv = media_host.play_item("tv:qml-test")
     if tv.get("backend") != "qml":
         raise AssertionError("tv backend " + json.dumps(tv))
+    if tv.get("playing") or tv.get("buffering") is not True:
+        raise AssertionError("qml player did not start in buffering state " + json.dumps(tv))
     if tv.get("now", {}).get("source") != "https://example.com/live.ts":
         raise AssertionError("tv source " + json.dumps(tv))
     if media_host.player_pid() != 0 or media_host._proc is not None:

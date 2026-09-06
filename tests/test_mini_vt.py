@@ -46,11 +46,25 @@ def main() -> int:
     if report != "\x1b[<0;3;4M":
         raise AssertionError("sgr mouse report wrong: " + repr(report))
 
+    legacy = MiniVt(4, 10)
+    legacy.feed("\x1b[?1000h")
+    report = legacy.mouse_report(2, 3, 64, True)
+    if report != "\x1b[M`#$":
+        raise AssertionError("legacy mouse report wrong: " + repr(report))
+    release = legacy.mouse_report(2, 3, 0, False)
+    if release != "\x1b[M##$":
+        raise AssertionError("legacy mouse release wrong: " + repr(release))
+
     screen = MiniVt(4, 10)
     screen.feed("1234567890abcdef")
     body = screen.display()
     if "abcdef" not in body:
         raise AssertionError("wrap/scroll lost tail: " + repr(body))
+
+    inline = MiniVt(3, 12)
+    inline.feed("one\ntwo\nthree\nfour\n")
+    if not inline.history:
+        raise AssertionError("inline VT did not retain scrollback")
 
     print("MINI_VT_TEST=PASS")
     return 0

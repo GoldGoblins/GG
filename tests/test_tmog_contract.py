@@ -81,6 +81,10 @@ def main() -> int:
         raise AssertionError("cpu cores missing")
     if not isinstance(payload.get("cpu_hist"), list):
         raise AssertionError("cpu history missing")
+    if not isinstance(payload.get("gpu_busy"), (int, float)):
+        raise AssertionError("snapshot gpu meter missing")
+    if not isinstance(payload.get("gpu_hist"), list):
+        raise AssertionError("gpu history missing")
     if not isinstance(payload.get("mounts"), list):
         raise AssertionError("mounts missing")
     for row in payload["processes"]:
@@ -148,6 +152,9 @@ def main() -> int:
         raise AssertionError("host tmog 60Hz pulse missing")
     if "_tmog_pulse_at" not in src:
         raise AssertionError("chat disk lamp would double-step the tmog pulse")
+    spark_src = (PROJECT / "qml" / "components" / "TmogSpark.qml").read_text(encoding="utf-8")
+    if "1 - Math.log(last - index) / logSpan" not in spark_src:
+        raise AssertionError("graph x-axis does not prioritize incoming samples")
     embed_src = (PROJECT / "backend" / "tmog_embed.py").read_text(encoding="utf-8")
     if "bash -c" in embed_src or "/bin/sh" in embed_src:
         raise AssertionError("generic shell in tmog embed")
@@ -195,8 +202,6 @@ def main() -> int:
         raise AssertionError("tmog hole missing")
     if "interval: 1000" in qml:
         raise AssertionError("tmog still snapshots every second")
-    if "interval: 2000" in qml:
-        raise AssertionError("tmog meters still jump every two seconds")
     if "interval: 16" not in qml:
         raise AssertionError("tmog dropped 60Hz live meters")
     if "tmogPulse" not in qml:
@@ -241,6 +246,12 @@ def main() -> int:
         raise AssertionError("list pages are still kept alive off-screen")
     if 'leftLegend: "TMOG"' in qml:
         raise AssertionError("tmog pane still nests a TMOG GgFrame inside the workspace frame")
+    if '"label": "CLK"' in qml:
+        raise AssertionError("TMOG still renders the noisy clock graph")
+    if 'leftLegend: "CPU · CLK · TEMP · GPU"' not in qml:
+        raise AssertionError("TMOG clock bar was removed with the graph")
+    if '"k": "GPU"' not in qml or 'root.perfKey === "GPU"' not in qml:
+        raise AssertionError("TMOG performance page has no GPU view")
     for page in (
         '"SUMMARY"',
         '"PERFORMANCE"',

@@ -104,6 +104,28 @@ Item {
                         root.engineTargetChangedByUser("GROK_TUI")
                 }
             }
+            Text {
+                text: " | "
+                color: "#a8b0b8"
+                font.family: "monospace"
+                font.pixelSize: 12
+            }
+            Text {
+                text: "GPTUI"
+                color: root.engineTarget === "GPT_TUI"
+                    ? "#d8dee9"
+                    : "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: root.engineTarget === "GPT_TUI"
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked:
+                        root.engineTargetChangedByUser("GPT_TUI")
+                }
+            }
         }
 
         GgCheck {
@@ -117,7 +139,7 @@ Item {
 
         Text {
             width: parent.width
-            text: "Same QWEN | GROK | GROK TUI switch as under INPUT. Motor only. "
+            text: "Same QWEN | GROK | GROK TUI | GPTUI switch as under INPUT. Motor only. "
                 + "The open tab name is optional chrome, not something "
                 + "you type."
             color: "#8a8a8a"

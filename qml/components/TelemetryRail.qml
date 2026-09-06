@@ -10,6 +10,7 @@ Item {
     property string modelState: "READY"
     property string engineTarget: "GROK_TUI"
     property string grokWalletJson: "{}"
+    property string gptWalletJson: "{}"
     property string bridgeState: "CONNECTED"
     property string toolAuthority: "GREEN TYPED"
     property string writeAuthority: "YELLOW CURRENT"
@@ -52,7 +53,11 @@ Item {
             "weekly_percent": null
         }
         try {
-            var parsed = JSON.parse(root.grokWalletJson || "{}")
+            var parsed = JSON.parse(
+                root.engineTarget === "GPT_TUI"
+                    ? (root.gptWalletJson || "{}")
+                    : (root.grokWalletJson || "{}")
+            )
             if (!parsed || typeof parsed !== "object")
                 return empty
             parsed.context_label = parsed.context_label || "—"
@@ -205,6 +210,7 @@ Item {
                 Text {
                     width: parent.width
                     text: (
+                        root.engineTarget === "GPT_TUI" ? "GPTUI" :
                         root.engineTarget === "GROK_TUI"
                             ? "GROK TUI"
                             : (
@@ -223,7 +229,7 @@ Item {
                 Column {
                     width: parent.width
                     spacing: 2
-                    visible: root.engineTarget === "GROK_TUI"
+                    visible: root.engineTarget === "GROK_TUI" || root.engineTarget === "GPT_TUI"
                     objectName: "grokWallet"
 
                     Text {
@@ -260,6 +266,29 @@ Item {
                         color: root.wallet.live_tokens > 0 ? "#c8a97e" : "#c8cdd4"
                         font.family: "monospace"
                         font.pixelSize: 12
+                    }
+                    Rectangle {
+                        width: parent.width
+                        height: 6
+                        color: "#2a2a2a"
+                        radius: 1
+
+                        Rectangle {
+                            height: parent.height
+                            width: parent.width * Math.max(
+                                0,
+                                Math.min(1, Number(root.wallet.live_tokens || 0) / 100)
+                            )
+                            color: "#c8a97e"
+                            radius: 1
+                        }
+                    }
+                    Text {
+                        width: parent.width
+                        text: "LIVE RESET  " + (root.wallet.live_reset_label || "—")
+                        color: "#8b949e"
+                        font.family: "monospace"
+                        font.pixelSize: 11
                     }
                     Text {
                         width: parent.width
@@ -433,20 +462,28 @@ Item {
                 Repeater {
                     model: root.chatSessions
 
-                    delegate: Text {
+                    delegate: Rectangle {
                         required property var modelData
                         width: chatColumn.width
-                        text: String(modelData.label || "")
-                        color: String(modelData.session_id) === root.activeChatSession
-                            ? "#d8dee9"
-                            : "#8b949e"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        font.bold: String(modelData.session_id) === root.activeChatSession
-                        wrapMode: Text.NoWrap
-                        elide: Text.ElideRight
+                        height: 18
+                        color: chatMouse.containsMouse ? "#242424" : "transparent"
+
+                        Text {
+                            anchors.fill: parent
+                            text: String(modelData.label || "")
+                            color: String(modelData.session_id) === root.activeChatSession
+                                ? "#d8dee9"
+                                : "#8b949e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: String(modelData.session_id) === root.activeChatSession
+                            verticalAlignment: Text.AlignVCenter
+                            wrapMode: Text.NoWrap
+                            elide: Text.ElideRight
+                        }
 
                         MouseArea {
+                            id: chatMouse
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.chatSessionChosen(
