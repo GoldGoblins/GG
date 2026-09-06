@@ -373,6 +373,8 @@ def main() -> int:
         'text: "GROK TUI"',
         'objectName: "chatDiskLamp"',
         'objectName: "chatLampRail"',
+        'anchors.verticalCenter: chatLampRail.verticalCenter',
+        'text: " | "',
         "chatIoActive",
         "anchors.bottom: engineFooter.top",
         "implicitHeight: root.engineTarget === \"GROK_TUI\"",
@@ -384,6 +386,10 @@ def main() -> int:
             marker in composer,
             "Alpha A1 composer marker missing: " + marker,
         )
+    require(
+        "engineFooterLegendPlate" not in composer,
+        "Composer still uses the GPTUI-only footer mask plate.",
+    )
 
     for marker in (
         "property bool compactMode: true",
