@@ -33,6 +33,33 @@ class _BridgeProbe:
     pass
 
 
+class _FocusItemProbe:
+    def __init__(self, parent=None) -> None:  # type: ignore[no-untyped-def]
+        self._parent = parent
+
+    def parentItem(self):  # type: ignore[no-untyped-def]
+        return self._parent
+
+
+class _FocusWindowProbe:
+    def __init__(self, active=None) -> None:  # type: ignore[no-untyped-def]
+        self.active = active
+
+    def activeFocusItem(self):  # type: ignore[no-untyped-def]
+        return self.active
+
+
+class _GridProbe:
+    def __init__(self) -> None:
+        self.window_probe = _FocusWindowProbe()
+
+    def isVisible(self) -> bool:
+        return True
+
+    def window(self):  # type: ignore[no-untyped-def]
+        return self.window_probe
+
+
 def main() -> int:
     from backend.chat_surface_host import ChatSurfaceHost
     from main import ChatBridge
@@ -66,6 +93,31 @@ def main() -> int:
         raise AssertionError("quiet PTY did not request focus restoration")
     host._sessions.clear()
     host.shutdown()
+
+    # A quiet PTY must not reclaim focus after the operator has moved to a
+    # different control.  A descendant of the terminal grid remains safe to
+    # refocus, which preserves the startup/response handoff.
+    focus_host = ChatSurfaceHost()
+    focus_host._sessions["ws.tui.gpt"] = {}
+    focus_grid = _GridProbe()
+    focus_host._gpt_grid = focus_grid
+    focus_host._gpt_hole = _FocusItemProbe()
+    focus_requests = []
+    focus_host.chatTerminalFocusRequested.connect(focus_requests.append)
+    focus_grid.window_probe.active = _FocusItemProbe()
+    focus_host._tui_focus_terminal = "ws.tui.gpt"
+    focus_host._emit_tui_focus_request()
+    if focus_requests:
+        raise AssertionError("PTY focus restoration stole another control's focus")
+    focus_grid.window_probe.active = _FocusItemProbe(focus_grid)
+    focus_host._tui_focus_terminal = "ws.tui.gpt"
+    focus_host._emit_tui_focus_request()
+    if focus_requests != ["ws.tui.gpt"]:
+        raise AssertionError("terminal-owned focus was not restorable")
+    focus_host._gpt_grid = None
+    focus_host._gpt_hole = None
+    focus_host._sessions.clear()
+    focus_host.shutdown()
 
     # Exercise the real host ingress, not only the bridge callback. The
     # typed characters arrive before Enter, so an intercepted approval must
@@ -103,6 +155,26 @@ def main() -> int:
         raise AssertionError("approval still cancels the native TUI")
     if b"\x15" not in b"".join(writes):
         raise AssertionError("approval did not clear the native input line")
+
+    paste_writes: list[bytes] = []
+    try:
+        surface_module.os.write = lambda _fd, data: (
+            paste_writes.append(bytes(data)) or len(data)
+        )
+        host.set_tui_chat_line_handler(lambda _id, _text: False)
+        url = "https://x.com/davepl1968/status/2097312063714729991"
+        if not host._write_chat_terminal(
+            "ws.tui.gpt", url, user_input=True
+        ):
+            raise AssertionError("pasted URL was not accepted")
+        if not host._write_chat_terminal(
+            "ws.tui.gpt", "\r", user_input=True
+        ):
+            raise AssertionError("Enter after pasted URL was not accepted")
+    finally:
+        surface_module.os.write = old_write
+    if b"".join(paste_writes) != url.encode("utf-8") + b"\r":
+        raise AssertionError("pasted URL or its Enter was truncated")
     host._sessions.clear()
     host.shutdown()
 
@@ -111,7 +183,10 @@ def main() -> int:
             QObject.__init__(self)
             self._root = _RootProbe()
             self._pending_mandates = {
-                "pending": {"status": "WAITING_APPROVAL"}
+                "pending": {
+                    "status": "WAITING_APPROVAL",
+                    "approval_mode": "CHAT_NATIVE_TASK_SCOPED",
+                }
             }
             self._resident_chat = SimpleNamespace(
                 _surface_host=_SurfaceProbe()
@@ -146,6 +221,28 @@ def main() -> int:
         raise AssertionError(
             "bare ja without a waiting task was swallowed by the TUI ingress"
         )
+    bridge._pending_mandates = {
+        "pending-a": {
+            "status": "WAITING_APPROVAL",
+            "approval_mode": "CHAT_NATIVE_TASK_SCOPED",
+        },
+        "pending-b": {
+            "status": "WAITING_APPROVAL",
+            "approval_mode": "CHAT_NATIVE_TASK_SCOPED",
+        },
+    }
+    previous_submissions = list(bridge.submissions)
+    if bridge._handle_tui_chat_line("ws.tui.gpt", "ja"):
+        raise AssertionError(
+            "ambiguous native approval was consumed and line-killed"
+        )
+    if bridge.submissions != previous_submissions:
+        raise AssertionError("ambiguous approval was dispatched")
+    if not any(
+        "skickades inte vidare" in text
+        for _terminal_id, text in bridge._resident_chat._surface_host.notices
+    ):
+        raise AssertionError("ambiguous approval warning was not visible")
     print("TUI_CHAT_INPUT_TEST=PASS")
     return 0
 

@@ -8,10 +8,24 @@ Item {
     property var surfaceHost: null
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
+    readonly property color ink: "#e6edf3"
+    readonly property color text: "#c8cdd4"
+    readonly property color muted: "#8b949e"
+    readonly property color panel: "#181818"
+    readonly property color panelRaised: "#202020"
+    readonly property color selectedPanel: "#34383d"
+    readonly property color ledgerGold: "#c8a97e"
+    readonly property color ledgerGreen: "#8db89a"
+    property bool sidebarCollapsed: false
     property string statusJson: "{}"
     property int selectedPid: -1
     property string page: "SUMMARY"
     property string perfKey: "CPU"
+    property string processSortKey: "cpu_pct"
+    property bool processSortDescending: true
+    property real rangeStart: 0.72
+    property real rangeEnd: 1.0
+    property bool rangeActive: false
     readonly property var emptyHist: [0]
     readonly property int liveCap: 120
     property int liveTicks: 0
@@ -62,9 +76,12 @@ Item {
         "USERS",
         "SERVICES",
         "FREQ",
+        "FLIGHT",
         "CONNECTIONS",
         "APPS",
-        "DISK"
+        "DRIVERS",
+        "DISK",
+        "BENCHMARKS"
     ]
 
     readonly property var status: {
@@ -92,6 +109,166 @@ Item {
     }
 
     readonly property var energy: root.status.energy || {}
+
+    function navLabel(value) {
+        var labels = {
+            "SUMMARY": "Summary",
+            "PERFORMANCE": "Performance",
+            "PROCESSES": "Processes",
+            "SYSTEM": "System Info",
+            "STARTUP": "Startup apps",
+            "USERS": "Users",
+            "SERVICES": "Services",
+            "FREQ": "Power & Freq",
+            "FLIGHT": "Flight Recorder",
+            "CONNECTIONS": "Connections",
+            "APPS": "Installed Apps",
+            "DRIVERS": "Drivers",
+            "DISK": "Disk Space",
+            "BENCHMARKS": "Benchmarks"
+        }
+        return labels[String(value || "")] || String(value || "")
+    }
+
+    function navIcon(value) {
+        var icons = {
+            "SUMMARY": "⌂",
+            "PERFORMANCE": "▥",
+            "PROCESSES": "▤",
+            "SYSTEM": "ⓘ",
+            "STARTUP": "▷",
+            "USERS": "♙",
+            "SERVICES": "⚙",
+            "FREQ": "ϟ",
+            "FLIGHT": "✈",
+            "CONNECTIONS": "◎",
+            "APPS": "▦",
+            "DRIVERS": "⌁",
+            "DISK": "▣",
+            "BENCHMARKS": "◒"
+        }
+        return icons[String(value || "")] || "·"
+    }
+
+    function isProPage(value) {
+        return ["FREQ", "FLIGHT", "CONNECTIONS", "APPS", "DRIVERS", "DISK", "BENCHMARKS"]
+            .indexOf(String(value || "")) >= 0
+    }
+
+    function sortedProcesses(limit) {
+        var rows = root.processes ? root.processes.slice() : []
+        var key = root.processSortKey
+        rows.sort(function(a, b) {
+            var av = key === "name"
+                ? String(a.comm || "").toLowerCase()
+                : Number(a[key] || 0)
+            var bv = key === "name"
+                ? String(b.comm || "").toLowerCase()
+                : Number(b[key] || 0)
+            if (av < bv)
+                return root.processSortDescending ? 1 : -1
+            if (av > bv)
+                return root.processSortDescending ? -1 : 1
+            return Number(a.pid || 0) - Number(b.pid || 0)
+        })
+        if (limit !== undefined)
+            return rows.slice(0, Math.max(0, Number(limit)))
+        return rows
+    }
+
+    function toggleProcessSort(key) {
+        if (root.processSortKey === key)
+            root.processSortDescending = !root.processSortDescending
+        else {
+            root.processSortKey = key
+            root.processSortDescending = key !== "name"
+        }
+    }
+
+    function pressureLoad() {
+        var pressure = root.status.pressure || {}
+        if (pressure.cpu_some !== undefined && pressure.cpu_some !== null)
+            return Math.min(100, Number(pressure.cpu_some || 0))
+        var cores = Math.max(1, Number(root.status.core_count || 1))
+        return Math.min(100, Number(root.n("load1") || 0) / cores * 100)
+    }
+
+    function memoryPressure() {
+        var pressure = root.status.pressure || {}
+        if (pressure.memory_some !== undefined && pressure.memory_some !== null)
+            return Number(pressure.memory_some).toFixed(1) + "%"
+        return "—"
+    }
+
+    function gpuLabel() {
+        var rows = root.status.gpus
+        if (rows && rows.length !== undefined && rows.length > 0)
+            return String(rows[0].name || rows[0].model || "GPU 0")
+        return "GPU 0"
+    }
+
+    function rangeLabel() {
+        if (!root.rangeActive)
+            return "SELECT A HISTORY RANGE"
+        var samples = root.status.flight_history
+        var count = samples && samples.length !== undefined ? samples.length : 120
+        var span = Math.max(1, Math.round((root.rangeEnd - root.rangeStart) * count))
+        return "RANGE " + span + " SAMPLES"
+    }
+
+    function flightRows() {
+        var samples = root.status.flight_history
+        if (!root.rangeActive
+                || !samples
+                || samples.length === undefined
+                || samples.length === 0)
+            return root.sortedProcesses(17)
+        var lo = Math.floor(Math.min(root.rangeStart, root.rangeEnd) * samples.length)
+        var hi = Math.ceil(Math.max(root.rangeStart, root.rangeEnd) * samples.length)
+        lo = Math.max(0, Math.min(samples.length - 1, lo))
+        hi = Math.max(lo + 1, Math.min(samples.length, hi))
+        var table = ({})
+        var i
+        for (i = lo; i < hi; i++) {
+            var rows = samples[i].processes || []
+            var j
+            for (j = 0; j < rows.length; j++) {
+                var row = rows[j] || {}
+                var pid = String(row.pid || "")
+                if (!pid)
+                    continue
+                if (!table[pid]) {
+                    table[pid] = {
+                        pid: Number(row.pid || 0),
+                        comm: String(row.comm || ""),
+                        cpu_pct: 0,
+                        rss_kb: 0,
+                        samples: 0
+                    }
+                }
+                table[pid].cpu_pct += Number(row.cpu_pct || 0)
+                table[pid].rss_kb = Math.max(table[pid].rss_kb, Number(row.rss_kb || 0))
+                table[pid].samples += 1
+            }
+        }
+        var out = []
+        var keys = Object.keys(table)
+        for (i = 0; i < keys.length; i++) {
+            var item = table[keys[i]]
+            item.cpu_pct = item.samples ? item.cpu_pct / item.samples : 0
+            out.push(item)
+        }
+        out.sort(function(a, b) {
+            return Number(b.cpu_pct || 0) - Number(a.cpu_pct || 0)
+        })
+        return out.slice(0, 17)
+    }
+
+    function clearRange() {
+        root.rangeActive = false
+        root.rangeStart = 0.72
+        root.rangeEnd = 1.0
+    }
 
     function refresh() {
         if (!root.surfaceHost || !root.surfaceHost.tmogSnapshot)
@@ -158,10 +335,10 @@ Item {
         return s
     }
 
-    function swallow() {
-        if (!root.surfaceHost || !root.surfaceHost.startTmog)
+    function openFullTmog() {
+        if (!root.surfaceHost || !root.surfaceHost.openTmog)
             return
-        root.surfaceHost.startTmog()
+        root.surfaceHost.openTmog()
         root.refresh()
     }
 
@@ -200,19 +377,19 @@ Item {
 
     function arr(name) {
         if (name === "cpu_hist")
-            return root.liveCpuHist
+            return root.liveCpuHist.length ? root.liveCpuHist : (root.status.cpu_hist || root.emptyHist)
         if (name === "gpu_hist")
-            return root.liveGpuHist
+            return root.liveGpuHist.length ? root.liveGpuHist : (root.status.gpu_hist || root.emptyHist)
         if (name === "mem_hist")
-            return root.liveMemHist
+            return root.liveMemHist.length ? root.liveMemHist : (root.status.mem_hist || root.emptyHist)
         if (name === "temp_hist")
-            return root.liveTempHist
+            return root.liveTempHist.length ? root.liveTempHist : (root.status.temp_hist || root.emptyHist)
         if (name === "disk_hist")
-            return root.liveDiskHist
+            return root.liveDiskHist.length ? root.liveDiskHist : (root.status.disk_hist || root.emptyHist)
         if (name === "net_hist")
-            return root.liveNetHist
+            return root.liveNetHist.length ? root.liveNetHist : (root.status.net_hist || root.emptyHist)
         if (name === "energy_hist")
-            return root.liveEnergyHist
+            return root.liveEnergyHist.length ? root.liveEnergyHist : (root.status.energy_hist || root.emptyHist)
         if (name === "core_hist")
             return root.liveCoreHists
         var rows = root.status[name]
@@ -224,35 +401,39 @@ Item {
     function n(name, fallback) {
         var fb = fallback === undefined ? 0 : fallback
         if (name === "cpu_busy")
-            return root.liveCpu
+            return root.liveTicks > 0 ? root.liveCpu : Number(root.status.cpu_busy || fb)
         if (name === "gpu_busy")
-            return root.liveGpu
+            return root.liveTicks > 0 ? root.liveGpu : Number(root.status.gpu_busy || fb)
         if (name === "mem_used_kb")
-            return root.liveMemUsed
+            return root.liveTicks > 0 ? root.liveMemUsed : Number(root.status.mem_used_kb || fb)
         if (name === "mem_total_kb")
-            return root.liveMemTotal || fb
+            return root.liveTicks > 0
+                ? (root.liveMemTotal || fb)
+                : Number(root.status.mem_total_kb || fb)
         if (name === "temp_c")
-            return root.liveTemp
+            return root.liveTicks > 0 ? root.liveTemp : Number(root.status.temp_c || fb)
         if (name === "load1")
-            return root.liveLoad1
+            return root.liveTicks > 0 ? root.liveLoad1 : Number(root.status.load1 || fb)
         if (name === "load5")
-            return root.liveLoad5
+            return root.liveTicks > 0 ? root.liveLoad5 : Number(root.status.load5 || fb)
         if (name === "load15")
-            return root.liveLoad15
+            return root.liveTicks > 0 ? root.liveLoad15 : Number(root.status.load15 || fb)
         if (name === "mhz")
-            return root.liveMhz
+            return root.liveTicks > 0 ? root.liveMhz : Number(root.status.mhz || fb)
         if (name === "mhz_max")
-            return root.liveMhzMax
+            return root.liveTicks > 0 ? root.liveMhzMax : Number(root.status.mhz_max || fb)
         if (name === "disk_read_bps")
-            return root.liveDiskRead
+            return root.liveTicks > 0 ? root.liveDiskRead : Number(root.status.disk_read_bps || fb)
         if (name === "disk_write_bps")
-            return root.liveDiskWrite
+            return root.liveTicks > 0 ? root.liveDiskWrite : Number(root.status.disk_write_bps || fb)
         if (name === "net_rx_bps")
-            return root.liveNetRx
+            return root.liveTicks > 0 ? root.liveNetRx : Number(root.status.net_rx_bps || fb)
         if (name === "net_tx_bps")
-            return root.liveNetTx
+            return root.liveTicks > 0 ? root.liveNetTx : Number(root.status.net_tx_bps || fb)
         if (name === "energy_w")
-            return root.liveEnergy
+            return root.liveTicks > 0
+                ? root.liveEnergy
+                : Number(root.status.energy && root.status.energy.watts || fb)
         if (name === "disk_led")
             return Math.min(1, (root.liveDiskRead + root.liveDiskWrite) / (8 * 1024 * 1024))
         var v = root.status[name]
@@ -397,72 +578,332 @@ Item {
     Component.onCompleted: root.refresh()
 
     Item {
+        id: chrome
         anchors.fill: parent
         anchors.leftMargin: 8
         anchors.rightMargin: 12
         anchors.topMargin: 8
         anchors.bottomMargin: 10
 
-        Column {
-            id: navCol
+        Rectangle {
+            anchors.fill: parent
+            color: "#161616"
+            border.color: "#333333"
+            border.width: 1
+        }
+
+        Rectangle {
+            id: sidebar
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
-            width: 108
-            spacing: 3
+            width: root.sidebarCollapsed ? 48 : Math.max(154, Math.min(210, parent.width * 0.17))
+            color: "#181818"
+            border.color: "#333333"
+            border.width: 1
 
-                    Repeater {
-                        model: root.nav
-                        delegate: Text {
-                            required property string modelData
-                            width: navCol.width
-                            text: modelData
-                            color: root.page === modelData ? "#d8dee9" : "#a8b0b8"
-                            font.family: "monospace"
+            Behavior on width {
+                NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+            }
+
+            Column {
+                id: navCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: navBottom.top
+                anchors.margins: 10
+                spacing: 3
+
+                Item {
+                    width: navCol.width
+                    height: 30
+                    Text {
+                        anchors.centerIn: parent
+                        text: "☰"
+                        color: root.ink
+                        font.pixelSize: 20
+                        font.family: "sans-serif"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
+                    }
+                }
+
+                Repeater {
+                    model: root.nav.slice(0, 7)
+                    delegate: Item {
+                        required property string modelData
+                        width: navCol.width
+                        height: 30
+                        Rectangle {
+                            anchors.fill: parent
+                            color: root.page === modelData ? root.selectedPanel
+                                : (hit.containsMouse ? "#202a35" : "transparent")
+                            radius: 4
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navIcon(modelData)
+                            color: root.page === modelData ? root.ledgerGold : root.muted
+                            font.family: "sans-serif"
+                            font.pixelSize: 15
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 38
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navLabel(modelData)
+                            color: root.page === modelData ? root.ink : root.text
+                            font.family: "sans-serif"
                             font.pixelSize: 12
                             font.bold: root.page === modelData
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.page = modelData
-                            }
+                            elide: Text.ElideRight
                         }
-                    }
-
-                    Item { width: 1; height: 8 }
-
-                    Text {
-                        width: navCol.width
-                        visible: root.status.appimage_found === true
-                        text: "OPEN APPIMAGE"
-                        color: "#c8a97e"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        wrapMode: Text.WordWrap
+                        Text {
+                            visible: root.sidebarCollapsed
+                            anchors.centerIn: parent
+                            text: root.navIcon(modelData)
+                            color: root.page === modelData ? root.ledgerGold : root.muted
+                            font.family: "sans-serif"
+                            font.pixelSize: 15
+                        }
                         MouseArea {
+                            id: hit
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.swallow()
+                            onClicked: root.page = modelData
                         }
                     }
                 }
 
+                Item { width: 1; height: 7 }
+
+                Rectangle {
+                    width: navCol.width
+                    height: 1
+                    color: "#3a3a3a"
+                }
+
+                Text {
+                    width: navCol.width
+                    text: root.sidebarCollapsed ? "" : "PRO"
+                    color: root.ledgerGold
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                    font.bold: true
+                    leftPadding: 12
+                    topPadding: 4
+                    bottomPadding: 2
+                }
+
+                Repeater {
+                    model: root.nav.slice(7)
+                    delegate: Item {
+                        required property string modelData
+                        width: navCol.width
+                        height: 30
+                        Rectangle {
+                            anchors.fill: parent
+                            color: root.page === modelData ? root.selectedPanel
+                                : (hit.containsMouse ? "#202a35" : "transparent")
+                            radius: 4
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navIcon(modelData)
+                            color: root.page === modelData ? root.ledgerGold : root.muted
+                            font.family: "sans-serif"
+                            font.pixelSize: 15
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 38
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navLabel(modelData)
+                            color: root.page === modelData ? root.ink : root.text
+                            font.family: "sans-serif"
+                            font.pixelSize: 12
+                            font.bold: root.page === modelData
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            visible: root.sidebarCollapsed
+                            anchors.centerIn: parent
+                            text: root.navIcon(modelData)
+                            color: root.page === modelData ? root.ledgerGold : root.muted
+                            font.family: "sans-serif"
+                            font.pixelSize: 15
+                        }
+                        MouseArea {
+                            id: hit
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.page = modelData
+                        }
+                    }
+                }
+            }
+
+            Item {
+                id: navBottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: root.sidebarCollapsed ? 50 : 74
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: 1
+                    color: "#3a3a3a"
+                }
+                Text {
+                    visible: !root.sidebarCollapsed
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 42
+                    text: "TMOG"
+                    color: "#6f9d9a"
+                    font.family: "sans-serif"
+                    font.pixelSize: 16
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                }
+                Text {
+                    visible: !root.sidebarCollapsed
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 12
+                    text: "⚙  SETTINGS       ◈  COLORS"
+                    color: root.muted
+                    font.family: "sans-serif"
+                    font.pixelSize: 11
+                }
+                Text {
+                    visible: root.sidebarCollapsed
+                    anchors.centerIn: parent
+                    text: "⚙"
+                    color: root.muted
+                    font.pixelSize: 16
+                }
+            }
+        }
+
         Rectangle {
             id: navSep
-            anchors.left: navCol.right
-            anchors.leftMargin: 8
+            anchors.left: sidebar.right
+            anchors.leftMargin: 12
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             width: 1
-            color: "#2a2a2a"
+            color: "#3a3a3a"
+        }
+
+        Item {
+            id: mainHeader
+            anchors.left: navSep.right
+            anchors.leftMargin: 18
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: 54
+
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: String(root.page)
+                color: root.ink
+                font.family: "monospace"
+                font.pixelSize: 18
+                font.bold: false
+            }
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 2
+                anchors.top: parent.top
+                anchors.topMargin: 5
+                text: "GG / TMOG · BETA 3 · LIVE"
+                color: root.muted
+                font.family: "monospace"
+                font.pixelSize: 9
+                visible: parent.height > 40
+            }
+            Rectangle {
+                anchors.right: fullTmogButton.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                width: refreshLabel.implicitWidth + 24
+                height: 28
+                color: refreshHit.pressed ? "#20262d" : "#181b1f"
+                border.color: refreshHit.containsMouse ? root.ledgerGold : "#3c444d"
+                border.width: 1
+                radius: 3
+                Text {
+                    id: refreshLabel
+                    anchors.centerIn: parent
+                    text: "↻  REFRESH"
+                    color: root.text
+                    font.family: "monospace"
+                    font.pixelSize: 11
+                }
+                MouseArea {
+                    id: refreshHit
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.refresh()
+                }
+            }
+            Rectangle {
+                id: fullTmogButton
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: fullTmogLabel.implicitWidth + 24
+                height: 28
+                color: fullTmogHit.pressed ? "#2d382f" : "#1a2820"
+                border.color: fullTmogHit.containsMouse ? root.ledgerGreen : "#486553"
+                border.width: 1
+                radius: 3
+                Text {
+                    id: fullTmogLabel
+                    anchors.centerIn: parent
+                    text: "OPEN FULL TMOG"
+                    color: root.ledgerGreen
+                    font.family: "monospace"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea {
+                    id: fullTmogHit
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openFullTmog()
+                }
+            }
         }
 
         Item {
             id: field
             anchors.left: navSep.right
-            anchors.leftMargin: 8
+            anchors.leftMargin: 18
             anchors.right: parent.right
-            anchors.top: parent.top
+            anchors.top: mainHeader.bottom
+            anchors.topMargin: 4
             anchors.bottom: parent.bottom
 
                     Loader {
@@ -481,12 +922,13 @@ Item {
                             id: barsCard
                             anchors.left: parent.left
                             anchors.top: parent.top
-                            width: Math.max(92, parent.width * 0.14)
+                            width: Math.max(128, parent.width * 0.18)
                             height: parent.height * 0.42
-                            leftLegend: "CPU · CLK · TEMP · GPU"
+                            leftLegend: "SYS"
                             rightLegend: root.n("cpu_busy").toFixed(1) + "%"
 
                             Row {
+                                id: sysBars
                                 anchors.fill: parent
                                 spacing: 6
 
@@ -505,7 +947,10 @@ Item {
                                             ? "#8db89a"
                                             : (index === 1 ? "#d58b8b"
                                                 : (index === 2 ? "#c8a97e" : "#78a8d8"))
-                                        width: 22
+                                        width: Math.max(
+                                            2,
+                                            (sysBars.width - sysBars.spacing * 3) / 4
+                                        )
                                         height: parent.height
                                         Rectangle {
                                             anchors.fill: parent
@@ -604,23 +1049,33 @@ Item {
                             id: topCard
                             anchors.right: parent.right
                             anchors.top: parent.top
-                            width: Math.max(180, parent.width * 0.28)
+                            width: Math.max(238, parent.width * 0.30)
                             height: barsCard.height
-                            leftLegend: "TOP CPU"
-                            rightLegend: String(Math.min(8, root.processes.length))
+                            leftLegend: "TOP CPU PROCESSES"
+                            rightLegend: String(Math.min(17, root.processes.length))
 
                             Column {
                                 anchors.fill: parent
                                 spacing: 2
+                                Text {
+                                    width: parent.width
+                                    text: "PID       NAME              CPU    GPU   MEMORY"
+                                    color: "#8793a0"
+                                    font.family: "monospace"
+                                    font.pixelSize: 9
+                                    elide: Text.ElideRight
+                                }
                                 Repeater {
-                                    model: root.processes.slice(0, 8)
+                                    model: root.sortedProcesses(17)
                                     delegate: TmogRow {
                                         required property var modelData
                                         width: parent.width
-                                        text: String(modelData.pid)
-                                            + "  " + String(modelData.cpu_pct) + "%"
-                                            + "  " + root.kib(modelData.rss_kb)
+                                        text: String(modelData.pid).padStart(7, " ")
                                             + "  " + String(modelData.comm || "")
+                                                .padEnd(16, " ").slice(0, 16)
+                                            + "  " + String(modelData.cpu_pct).padStart(5, " ") + "%"
+                                            + "  " + "—".padStart(4, " ")
+                                            + "  " + root.kib(modelData.rss_kb).padStart(7, " ")
                                         selected: Number(modelData.pid) === root.selectedPid
                                         onChosen: root.selectedPid = Number(modelData.pid)
                                         onMenuRequested: {
@@ -639,8 +1094,8 @@ Item {
                             anchors.right: parent.right
                             anchors.top: barsCard.bottom
                             anchors.topMargin: 10
-                            height: parent.height * 0.24
-                            leftLegend: "MEMORY"
+                            height: parent.height * 0.25
+                            leftLegend: "MEMORY UTILIZATION"
                             rightLegend: root.kib(root.n("mem_used_kb"))
                                 + " / " + root.kib(root.n("mem_total_kb"))
 
@@ -676,138 +1131,144 @@ Item {
                             spacing: 8
 
                             TmogCard {
-                                width: (parent.width - 40) / 6
+                                id: pressureCard
+                                width: (parent.width - 24) / 4
                                 height: parent.height
-                                leftLegend: "LOAD"
-                                rightLegend: String(root.n("load1"))
+                                leftLegend: "SYSTEM PRESSURE"
+                                rightLegend: root.pressureLoad().toFixed(1) + "%"
                                 Column {
-                                    anchors.centerIn: parent
-                                    spacing: 4
+                                    anchors.fill: parent
+                                    spacing: 7
                                     Text {
-                                        text: String(root.n("load1"))
-                                        color: "#d8dee9"
+                                        width: parent.width
+                                        text: "LOW · Load demand " + root.pressureLoad().toFixed(1)
+                                            + "% · Memory stalls " + root.memoryPressure()
+                                        color: root.text
                                         font.family: "monospace"
-                                        font.pixelSize: 16
+                                        font.pixelSize: 10
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    TmogMeter {
+                                        width: parent.width
+                                        height: 12
+                                        ratio: root.pressureLoad() / 100
+                                        onColor: root.ledgerGreen
+                                        segments: 22
                                     }
                                     Text {
-                                        text: String(root.n("load5")) + "  "
+                                        width: parent.width
+                                        text: "LOAD " + String(root.n("load1")) + "  "
+                                            + String(root.n("load5")) + "  "
                                             + String(root.n("load15"))
-                                        color: "#c8cdd4"
+                                        color: root.muted
                                         font.family: "monospace"
-                                        font.pixelSize: 12
+                                        font.pixelSize: 10
                                     }
-                                }
-                            }
-                            TmogCard {
-                                width: (parent.width - 40) / 6
-                                height: parent.height
-                                leftLegend: "TASKS"
-                                rightLegend: String(root.n("process_count"))
-                                Column {
-                                    anchors.centerIn: parent
                                     Text {
-                                        text: String(root.n("tasks_running"))
+                                        width: parent.width
+                                        text: "TASKS " + String(root.n("tasks_running"))
                                             + " / " + String(root.n("process_count"))
-                                        color: "#d8dee9"
+                                        color: root.text
                                         font.family: "monospace"
-                                        font.pixelSize: 14
-                                    }
-                                    Text {
-                                        text: "running / total"
-                                        color: "#a8b0b8"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
+                                        font.pixelSize: 11
                                     }
                                 }
                             }
                             TmogCard {
-                                width: (parent.width - 40) / 6
-                                height: parent.height
-                                leftLegend: "ENERGY"
-                                rightLegend: root.energy.watts === undefined
-                                    || root.energy.watts === null
-                                    ? "—"
-                                    : String(root.energy.watts) + " W"
-                                Column {
-                                    anchors.fill: parent
-                                    spacing: 6
-                                    TmogMeter {
-                                        width: parent.width
-                                        ratio: root.energy.battery_pct
-                                            ? Number(root.energy.battery_pct) / 100
-                                            : 0
-                                        onColor: "#c8a97e"
-                                    }
-                                    Text {
-                                        text: String(root.energy.source || "AC")
-                                        color: "#c8cdd4"
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                    }
-                                    TmogSpark {
-                                        width: parent.width
-                                        height: parent.height - 36
-                                        values: root.arr("temp_hist")
-                                        stroke: "#c8a97e"
-                                        fill: "#2a2418"
-                                        yMax: 105
-                                    }
-                                }
-                            }
-                            TmogCard {
-                                width: (parent.width - 40) / 6
-                                height: parent.height
-                                leftLegend: "THERMALS"
-                                rightLegend: root.n("temp_c").toFixed(0) + " C"
-                                Column {
-                                    anchors.fill: parent
-                                    spacing: 6
-                                    TmogMeter {
-                                        width: parent.width
-                                        ratio: Math.min(1, root.n("temp_c") / 105)
-                                        onColor: "#c8a97e"
-                                    }
-                                    TmogSpark {
-                                        width: parent.width
-                                        height: parent.height - 22
-                                        values: root.arr("temp_hist")
-                                        yMax: 105
-                                        stroke: "#c8a97e"
-                                        fill: "#2a2418"
-                                    }
-                                }
-                            }
-                            TmogCard {
-                                width: (parent.width - 40) / 6
-                                height: parent.height
-                                leftLegend: "DISK"
-                                rightLegend: root.bps(root.n("disk_read_bps"))
-                                Column {
-                                    anchors.fill: parent
-                                    TmogSpark {
-                                        width: parent.width
-                                        height: parent.height
-                                        values: root.arr("disk_hist")
-                                        yMax: root.liveDiskYMax
-                                        stroke: "#8db89a"
-                                        fill: "#1c2a22"
-                                    }
-                                }
-                            }
-                            TmogCard {
-                                width: (parent.width - 40) / 6
+                                width: (parent.width - 24) / 4
                                 height: parent.height
                                 leftLegend: "NETWORK"
-                                rightLegend: root.bps(root.n("net_rx_bps") + root.n("net_tx_bps"))
+                                rightLegend: String(root.status.net_iface || "—")
                                 Column {
                                     anchors.fill: parent
+                                    spacing: 5
                                     TmogSpark {
                                         width: parent.width
-                                        height: parent.height
+                                        height: Math.max(34, parent.height - 34)
                                         values: root.arr("net_hist")
                                         yMax: root.liveNetYMax
                                         stroke: "#8a8a8a"
-                                        fill: "#1c1c1c"
+                                        fill: "#1c2024"
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: "R " + root.bps(root.n("net_rx_bps"))
+                                            + " · S " + root.bps(root.n("net_tx_bps"))
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                }
+                            }
+                            TmogCard {
+                                width: (parent.width - 24) / 4
+                                height: parent.height
+                                leftLegend: "DISK"
+                                lamp: true
+                                lampOn: root.diskLampOn
+                                rightLegend: root.bps(root.n("disk_read_bps")
+                                    + root.n("disk_write_bps"))
+                                Column {
+                                    anchors.fill: parent
+                                    spacing: 5
+                                    TmogSpark {
+                                        width: parent.width
+                                        height: Math.max(34, parent.height - 34)
+                                        values: root.arr("disk_hist")
+                                        yMax: root.liveDiskYMax
+                                        stroke: root.ledgerGreen
+                                        fill: "#1c2a22"
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: "R " + root.bps(root.n("disk_read_bps"))
+                                            + " · W " + root.bps(root.n("disk_write_bps"))
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                }
+                            }
+                            TmogCard {
+                                width: (parent.width - 24) / 4
+                                height: parent.height
+                                leftLegend: "GPUs"
+                                rightLegend: root.n("gpu_busy").toFixed(0) + "%"
+                                Column {
+                                    anchors.fill: parent
+                                    spacing: 7
+                                    Text {
+                                        width: parent.width
+                                        text: root.gpuLabel()
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                    TmogMeter {
+                                        width: parent.width
+                                        ratio: root.n("gpu_busy") / 100
+                                        onColor: "#78a8d8"
+                                        segments: 22
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: "TEMP " + root.n("temp_c").toFixed(0)
+                                            + " C · POWER "
+                                            + (root.energy.watts === null || root.energy.watts === undefined
+                                                ? "—" : String(root.energy.watts) + " W")
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    TmogSpark {
+                                        width: parent.width
+                                        height: Math.max(30, parent.height - 74)
+                                        values: root.arr("gpu_hist")
+                                        yMax: 100
+                                        stroke: "#78a8d8"
+                                        fill: "#182536"
                                     }
                                 }
                             }
@@ -934,11 +1395,14 @@ Item {
                                     segments: 36
                                 }
 
-                                TmogSpark {
+                                TmogHistoryGraph {
+                                    id: perfHistoryGraph
                                     width: parent.width
                                     height: root.perfKey === "CPU"
-                                        ? Math.max(72, parent.height * 0.28)
+                                        ? Math.max(96, parent.height * 0.30)
                                         : Math.max(120, parent.height * 0.55)
+                                    selectable: true
+                                    rangeActive: root.rangeActive
                                     values: root.perfKey === "GPU"
                                         ? root.arr("gpu_hist")
                                         : (root.perfKey === "MEMORY"
@@ -977,6 +1441,49 @@ Item {
                                             : (root.perfKey === "THERMALS" || root.perfKey === "ENERGY"
                                                 ? "#2a2418"
                                                 : "#1c2a22"))
+                                    rangeStart: root.rangeStart
+                                    rangeEnd: root.rangeEnd
+                                    onRangeSelected: function(start, end) {
+                                        root.rangeStart = start
+                                        root.rangeEnd = end
+                                        root.rangeActive = true
+                                    }
+                                }
+
+                                Row {
+                                    width: parent.width
+                                    spacing: 10
+                                    Text {
+                                        text: root.rangeLabel()
+                                        color: root.rangeActive ? root.ledgerGold : root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                    Text {
+                                        text: "DRAG OVER GRAPH TO INSPECT"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                    Text {
+                                        visible: root.rangeActive
+                                        text: "· process sample at selected interval"
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                    Text {
+                                        visible: root.rangeActive
+                                        text: "CLEAR"
+                                        color: root.ledgerGold
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.clearRange()
+                                        }
+                                    }
                                 }
 
                                 Flow {
@@ -1081,15 +1588,63 @@ Item {
                                 id: procCol
                                 width: parent.width
                                 spacing: 2
-                                Text {
+                                Row {
                                     width: parent.width
-                                    text: "NAME            PID     STATUS      USER        CPU    RSS     THR"
-                                    color: "#a8b0b8"
-                                    font.family: "monospace"
-                                    font.pixelSize: 12
+                                    height: 22
+                                    Text {
+                                        width: Math.max(150, parent.width * 0.32)
+                                        text: "NAME" + (root.processSortKey === "name" ? " ↕" : "")
+                                        color: root.processSortKey === "name" ? root.ledgerGold : root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.toggleProcessSort("name")
+                                        }
+                                    }
+                                    Text {
+                                        width: 76
+                                        text: "PID"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                    }
+                                    Text {
+                                        width: 96
+                                        text: "STATUS"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                    }
+                                    Text {
+                                        width: 110
+                                        text: "USER"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                    }
+                                    Text {
+                                        width: 72
+                                        text: "CPU" + (root.processSortKey === "cpu_pct" ? " ↕" : "")
+                                        color: root.processSortKey === "cpu_pct" ? root.ledgerGold : root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.toggleProcessSort("cpu_pct")
+                                        }
+                                    }
+                                    Text {
+                                        text: "RSS     THR"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                    }
                                 }
                                 Repeater {
-                                    model: root.processes
+                                    model: root.sortedProcesses()
                                     delegate: TmogRow {
                                         required property var modelData
                                         width: parent.width
@@ -1164,6 +1719,145 @@ Item {
                             }
                             }
                             }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "FLIGHT"
+                                leftLegend: "FLIGHT RECORDER"
+                                rightLegend: root.rangeLabel()
+                                Column {
+                                    anchors.fill: parent
+                                    spacing: 8
+                                    Text {
+                                        width: parent.width
+                                        text: "Select a CPU or memory history range to inspect the live sample."
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    TmogHistoryGraph {
+                                        width: parent.width
+                                        height: Math.max(120, parent.height * 0.34)
+                                        selectable: true
+                                        rangeActive: root.rangeActive
+                                        values: root.arr("cpu_hist")
+                                        overlayValues: root.arr("mem_hist")
+                                        stroke: root.ledgerGreen
+                                        overlayStroke: "#b6a6c8"
+                                        fill: "#1c2a22"
+                                        yMax: 100
+                                        rangeStart: root.rangeStart
+                                        rangeEnd: root.rangeEnd
+                                        onRangeSelected: function(start, end) {
+                                            root.rangeStart = start
+                                            root.rangeEnd = end
+                                            root.rangeActive = true
+                                        }
+                                    }
+                                    Row {
+                                        spacing: 16
+                                        Text {
+                                            text: "CPU " + root.n("cpu_busy").toFixed(1) + "%"
+                                            color: root.ledgerGreen
+                                            font.family: "monospace"
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            text: "MEM " + root.kib(root.n("mem_used_kb"))
+                                            color: "#b6a6c8"
+                                            font.family: "monospace"
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            text: "RANGE " + root.rangeLabel()
+                                            color: root.ledgerGold
+                                            font.family: "monospace"
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            visible: root.rangeActive
+                                            text: "CLEAR"
+                                            color: root.ledgerGold
+                                            font.family: "monospace"
+                                            font.pixelSize: 11
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.clearRange()
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: "PROCESSES ACTIVE IN SELECTED RANGE"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 10
+                                    }
+                                    Repeater {
+                                        model: root.flightRows()
+                                        delegate: TmogRow {
+                                            required property var modelData
+                                            width: parent.width
+                                            text: String(modelData.pid).padStart(7, " ")
+                                                + "  " + String(modelData.comm || "")
+                                                    .padEnd(24, " ").slice(0, 24)
+                                                + "  CPU " + String(modelData.cpu_pct) + "%"
+                                                + "  RSS " + root.kib(modelData.rss_kb)
+                                            onChosen: root.selectedPid = Number(modelData.pid)
+                                            onMenuRequested: {
+                                                root.selectedPid = Number(modelData.pid)
+                                                root.armMenu("proc", modelData)
+                                                tmogMenu.popup()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
+                                visible: root.page === "DRIVERS"
+                                leftLegend: "DRIVERS"
+                                rightLegend: String(root.arr("drivers").length)
+                                Flickable {
+                                    anchors.fill: parent
+                                    clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    contentWidth: width
+                                    contentHeight: driverCol.height
+                                    flickableDirection: Flickable.VerticalFlick
+                                    Column {
+                                        id: driverCol
+                                        width: parent.width
+                                        spacing: 2
+                                        Text {
+                                            width: parent.width
+                                            text: "DRIVER MODULE                         SIZE       USERS"
+                                            color: root.muted
+                                            font.family: "monospace"
+                                            font.pixelSize: 11
+                                        }
+                                        Repeater {
+                                            model: root.arr("drivers")
+                                            delegate: TmogRow {
+                                                required property var modelData
+                                                width: parent.width
+                                                text: String(modelData.name || "")
+                                                    .padEnd(36, " ").slice(0, 36)
+                                                    + "  " + String(modelData.size || "0")
+                                                        .padStart(10, " ")
+                                                    + "  " + String(modelData.users || "0")
+                                                onMenuRequested: {
+                                                    root.armMenu("driver", modelData)
+                                                    tmogMenu.popup()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             TmogCard {
@@ -1437,6 +2131,73 @@ Item {
 
                             TmogCard {
                                 anchors.fill: parent
+                                visible: root.page === "BENCHMARKS"
+                                leftLegend: "BENCHMARKS"
+                                rightLegend: "BETA 3"
+                                Column {
+                                    anchors.fill: parent
+                                    spacing: 10
+                                    Text {
+                                        width: parent.width
+                                        text: "LIVE HARDWARE BASELINE"
+                                        color: root.ledgerGold
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: (root.status.cpu_model || "CPU") + "\n"
+                                            + String(root.status.core_count || 0) + " logical cores · "
+                                            + String(root.n("mhz")) + " MHz\n"
+                                            + "memory " + root.kib(root.n("mem_used_kb"))
+                                            + " / " + root.kib(root.n("mem_total_kb"))
+                                        color: root.text
+                                        font.family: "monospace"
+                                        font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    TmogMeter {
+                                        width: parent.width
+                                        height: 14
+                                        ratio: root.n("cpu_busy") / 100
+                                        onColor: root.ledgerGreen
+                                        segments: 30
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: "CPU " + root.n("cpu_busy").toFixed(1) + "%  ·  "
+                                            + "TEMP " + root.n("temp_c").toFixed(1) + " C  ·  "
+                                            + "GPU " + root.n("gpu_busy").toFixed(1) + "%"
+                                        color: root.muted
+                                        font.family: "monospace"
+                                        font.pixelSize: 11
+                                    }
+                                    Rectangle {
+                                        width: Math.min(parent.width, 200)
+                                        height: 28
+                                        color: "#1a2820"
+                                        border.color: "#486553"
+                                        border.width: 1
+                                        radius: 3
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "OPEN FULL TMOG BENCHMARKS"
+                                            color: root.ledgerGreen
+                                            font.family: "monospace"
+                                            font.pixelSize: 10
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.openFullTmog()
+                                        }
+                                    }
+                                }
+                            }
+
+                            TmogCard {
+                                anchors.fill: parent
                                 visible: root.page === "SERVICES"
                                 leftLegend: "SERVICES"
                                 rightLegend: String(root.arr("services").length) + " running"
@@ -1523,6 +2284,7 @@ Item {
             text: "Copy name"
             visible: root.menuKind === "proc" || root.menuKind === "app"
                 || root.menuKind === "svc" || root.menuKind === "user"
+                || root.menuKind === "driver"
             height: visible ? implicitHeight : 0
             onTriggered: root.copyText(root.rowLabel(root.menuRow))
         }

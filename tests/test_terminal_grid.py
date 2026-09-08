@@ -95,6 +95,17 @@ def main() -> int:
         raise AssertionError("grid did not emit cursor report")
     if user_input:
         raise AssertionError("terminal reply leaked into user input signal")
+    pasted_url = "https://x.com/davepl1968/status/2097312063714729991"
+    clipboard.setText(pasted_url)
+    paste_event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_V,
+        Qt.KeyboardModifier.ControlModifier,
+        "\x16",
+    )
+    grid.keyPressEvent(paste_event)
+    if user_input != [pasted_url]:
+        raise AssertionError("Ctrl+V did not preserve the complete URL")
     enter = QKeyEvent(
         QEvent.Type.KeyPress,
         Qt.Key.Key_Return,
@@ -102,7 +113,7 @@ def main() -> int:
         "\r",
     )
     grid.keyPressEvent(enter)
-    if user_input != ["\r"]:
+    if user_input != [pasted_url, "\r"]:
         raise AssertionError("Return did not stay on the user input signal")
     mapped = grid._map_key
 

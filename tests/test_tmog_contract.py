@@ -50,6 +50,10 @@ def main() -> int:
     json.dumps(payload, separators=(",", ":"))
     if not isinstance(payload.get("processes"), list):
         raise AssertionError("process list missing")
+    if not isinstance(payload.get("pressure"), dict):
+        raise AssertionError("pressure snapshot missing")
+    if not isinstance(payload.get("gpus"), list):
+        raise AssertionError("gpu rows missing")
     if not any(str(row.get("comm") or "") for row in payload["processes"]):
         raise AssertionError("process comm still empty after two-pass fill")
     light = snapshot("PERFORMANCE")
@@ -68,6 +72,12 @@ def main() -> int:
         raise AssertionError("summary still ships per-core history")
     if summary.get("cores"):
         raise AssertionError("summary still ships per-core rows")
+    flight = snapshot("FLIGHT")
+    if not isinstance(flight.get("flight_history"), list):
+        raise AssertionError("flight history missing")
+    drivers = snapshot("DRIVERS")
+    if not isinstance(drivers.get("drivers"), list):
+        raise AssertionError("driver rows missing")
     if any(
         str(row.get("chip") or "").lower().startswith("nvme")
         for row in (summary.get("temps") or [])
@@ -231,6 +241,10 @@ def main() -> int:
         raise AssertionError("list pages still grow a short frame instead of filling the pane")
     if "TmogRow" not in qml:
         raise AssertionError("list rows are still unstyled Text")
+    if "TmogHistoryGraph" not in qml or "toggleProcessSort" not in qml:
+        raise AssertionError("tmog history/process interactions missing")
+    if "FLIGHT RECORDER" not in qml or "DRIVERS" not in qml:
+        raise AssertionError("tmog pro views missing")
     card_src = (PROJECT / "qml" / "components" / "TmogCard.qml").read_text(encoding="utf-8")
     if "clip: true" not in card_src:
         raise AssertionError("TmogCard inner no longer clips overflow to the frame")
@@ -248,8 +262,8 @@ def main() -> int:
         raise AssertionError("tmog pane still nests a TMOG GgFrame inside the workspace frame")
     if '"label": "CLK"' in qml:
         raise AssertionError("TMOG still renders the noisy clock graph")
-    if 'leftLegend: "CPU · CLK · TEMP · GPU"' not in qml:
-        raise AssertionError("TMOG clock bar was removed with the graph")
+    if 'leftLegend: "SYS"' not in qml or 'barKey: index === 0' not in qml:
+        raise AssertionError("TMOG system meter bar was removed")
     if '"k": "GPU"' not in qml or 'root.perfKey === "GPU"' not in qml:
         raise AssertionError("TMOG performance page has no GPU view")
     for page in (

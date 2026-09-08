@@ -3546,6 +3546,7 @@ Item {
         }
 
         Text {
+            objectName: "workspaceKindTMOG"
             text: "TMOG"
             color: root.hostKind === "TMOG" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"

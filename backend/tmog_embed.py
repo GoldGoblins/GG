@@ -113,6 +113,44 @@ class TmogEmbed(QObject):
         QTimer.singleShot(400, self._try_attach)
         return True
 
+    def open_full(self) -> bool:
+        """Launch the real TMoG window without native-window reparenting.
+
+        The embedded path above is useful for a controlled native surface, but
+        the full application must keep ownership of its own Qt window.  A
+        foreign-window reparent can make the host application's last-window
+        state look closed on some X11/Qt combinations.
+        """
+        app = QApplication.instance()
+        if app is None or not isinstance(app, QApplication):
+            self._error = "TMOG_QT_WIDGETS_MISSING"
+            return False
+        image = resolve_appimage()
+        if image is None:
+            self._error = "TMOG_APPIMAGE_MISSING"
+            return False
+        if self.running():
+            return True
+        self.stop()
+        env = os.environ.copy()
+        env["QT_QPA_PLATFORM"] = "xcb"
+        env.pop("APPIMAGE", None)
+        try:
+            self._proc = subprocess.Popen(
+                [str(image)],
+                cwd=str(image.parent),
+                env=env,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            self._proc = None
+            self._error = "TMOG_SPAWN_FAILED:" + type(exc).__name__
+            return False
+        self._error = ""
+        self._attached = False
+        return True
+
     def hide(self) -> None:
         self._timer.stop()
         holder = self._holder

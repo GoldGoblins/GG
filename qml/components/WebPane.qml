@@ -73,6 +73,20 @@ Item {
             root.engineArmed = true
     }
 
+    Connections {
+        target: WebEngine.defaultProfile
+        function onDownloadRequested(download) {
+            var win = root.Window.window
+            var host = win && win.surfaceHost ? win.surfaceHost : null
+            var directory = host && host.webDownloadDirectory
+                ? String(host.webDownloadDirectory())
+                : ""
+            if (directory.length > 0)
+                download.downloadDirectory = directory
+            download.accept()
+        }
+    }
+
     function hrefAllowed(target) {
         var href = String(target || "")
         if (href === "about:blank" || href.indexOf("about:blank") === 0)

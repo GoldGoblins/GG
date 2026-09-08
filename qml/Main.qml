@@ -375,12 +375,24 @@ ApplicationWindow {
             || utilitySurface.status === Loader.Null
         )
             return
-        root.bindWorkspace(workspaceLoader.item)
-        if (utilitySurface.item)
-            root.bindUtility(utilitySurface.item)
-        root.hydrateDesktopShell()
+        try {
+            root.bindWorkspace(workspaceLoader.item)
+            if (utilitySurface.item)
+                root.bindUtility(utilitySurface.item)
+        } catch (err) {
+            root.shellLoadCurrent = "LOAD FAILED"
+            root.appendShellLog("shell bind · " + String(err))
+        }
         root._shellHydrated = true
         root.shellLoading = false
+        // The visual shell is ready now. Run the optional wallet/session
+        // refresh after the first paint so a slow scan cannot strand the
+        // full-window loading overlay at 100%.
+        var hydratedNonce = root.shellNonce
+        Qt.callLater(function() {
+            if (root.shellNonce === hydratedNonce && root._shellHydrated)
+                root.hydrateDesktopShell()
+        })
     }
 
     function applyCryptoWalletLabel() {
@@ -412,20 +424,25 @@ ApplicationWindow {
         root.appendShellLog("hydrate · snippets")
         root.appendShellLog("hydrate · media")
         root.shellLoadCurrent = "desktop state"
-        var raw = ""
-        if (root.surfaceHost && root.surfaceHost.hydrateDesktop)
-            raw = root.surfaceHost.hydrateDesktop()
-        if (raw)
-            root.cryptoStatusJson = raw
-        else
-            root.pullCryptoStatus()
-        root.applyCryptoWalletLabel()
-        if (workspace && workspace.refreshSiteFiles)
-            workspace.refreshSiteFiles()
-        if (workspace && workspace.applyCryptoWalletLabel)
-            workspace.applyCryptoWalletLabel()
-        if (utilitySurface.item && utilitySurface.item.refresh)
-            utilitySurface.item.refresh()
+        try {
+            var raw = ""
+            if (root.surfaceHost && root.surfaceHost.hydrateDesktop)
+                raw = root.surfaceHost.hydrateDesktop()
+            if (raw)
+                root.cryptoStatusJson = raw
+            else
+                root.pullCryptoStatus()
+            root.applyCryptoWalletLabel()
+            if (workspace && workspace.refreshSiteFiles)
+                workspace.refreshSiteFiles()
+            if (workspace && workspace.applyCryptoWalletLabel)
+                workspace.applyCryptoWalletLabel()
+            if (utilitySurface.item && utilitySurface.item.refresh)
+                utilitySurface.item.refresh()
+        } catch (err) {
+            // Optional hydration must never block the usable desktop shell.
+            root.appendShellLog("hydrate · " + String(err))
+        }
     }
 
     Component.onCompleted: Qt.callLater(function() {

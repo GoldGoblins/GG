@@ -799,7 +799,11 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def hydrateDesktop(self) -> str:
         self._attach_native_tui()
-        self._emit_wallet()
+        # Wallet/session telemetry can scan a growing JSONL rollout. Queue it
+        # after the QML shell has returned to the event loop so reload never
+        # leaves the full-window hydration overlay visible while that scan
+        # runs.
+        QTimer.singleShot(0, lambda: self._emit_wallet())
         return self.cryptoRailStatus()
 
     def _tui_hole(self):
@@ -881,6 +885,60 @@ class ChatSurfaceHost(QObject):
             self.chatTerminalOutput.emit("ws.tui.gpt", result + "\n")
         return True
 
+    def _tui_grid_for_terminal(self, terminal_id: str) -> object | None:
+        key = str(terminal_id or "").strip()
+        if key == "ws.tui.gpt":
+            return getattr(self, "_gpt_grid", None)
+        if key == GROK_TUI_TERMINAL_ID:
+            return self._tui_grid
+        return None
+
+    def _tui_focus_is_owned_by_terminal(
+        self,
+        terminal_id: str,
+        grid: object,
+    ) -> bool:
+        """Return whether refocusing this terminal would preserve user input.
+
+        PTY output is asynchronous.  By the time the debounced focus request
+        fires, the user may already be typing in another control.  Walking
+        the active Quick item back to the terminal host lets us restore focus
+        after startup without stealing it from a field the user selected.
+        """
+        try:
+            window_getter = getattr(grid, "window", None)
+            window = window_getter() if callable(window_getter) else None
+            active_getter = getattr(window, "activeFocusItem", None)
+            active = active_getter() if callable(active_getter) else None
+            # During startup/offscreen tests there may be no active item yet;
+            # the normal activation path is allowed to establish focus then.
+            if active is None:
+                return True
+
+            allowed: list[object] = [grid]
+            hole = (
+                getattr(self, "_gpt_hole", None)
+                if str(terminal_id or "").strip() == "ws.tui.gpt"
+                else getattr(self, "_native_hole", None)
+            )
+            if hole is not None:
+                allowed.append(hole)
+
+            item = active
+            for _ in range(64):
+                if any(item is candidate or item == candidate for candidate in allowed):
+                    return True
+                parent_getter = getattr(item, "parentItem", None)
+                if not callable(parent_getter):
+                    return False
+                parent = parent_getter()
+                if parent is None or parent is item:
+                    return False
+                item = parent
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        return False
+
     def _arm_tui_focus(self, terminal_id: str) -> None:
         key = str(terminal_id or "").strip()
         if key not in {GROK_TUI_TERMINAL_ID, "ws.tui.gpt"}:
@@ -892,6 +950,15 @@ class ChatSurfaceHost(QObject):
         key = self._tui_focus_terminal
         self._tui_focus_terminal = ""
         if key in self._sessions:
+            grid = self._tui_grid_for_terminal(key)
+            if grid is not None:
+                try:
+                    if not grid.isVisible():
+                        return
+                except (AttributeError, RuntimeError):
+                    return
+                if not self._tui_focus_is_owned_by_terminal(key, grid):
+                    return
             self.chatTerminalFocusRequested.emit(key)
 
     def _commands_from_gpt_output(self, text: str) -> list[str]:
@@ -1033,6 +1100,17 @@ class ChatSurfaceHost(QObject):
     def browseUrlAllowed(self, url: str) -> bool:
         return web_surface.browse_url_allowed(url)
 
+    @Slot(result=str)
+    def webDownloadDirectory(self) -> str:
+        """Return the user's existing visible-browser download directory."""
+        for folder in (Path.home() / "Hämtningar", Path.home() / "Downloads"):
+            try:
+                if folder.is_dir() and not folder.is_symlink():
+                    return str(folder)
+            except OSError:
+                continue
+        return str(Path.home() / "Downloads")
+
     @Slot(str, result=str)
     def normalizeBrowseUrl(self, url: str) -> str:
         return web_surface.normalize_browse_url(url)
@@ -1093,6 +1171,19 @@ class ChatSurfaceHost(QObject):
             embed = TmogEmbed(root)
             self._tmog_embed = embed
         return bool(embed.start())
+
+    @Slot(result=bool)
+    def openTmog(self) -> bool:
+        root = self._qml_root
+        if root is None:
+            return False
+        embed = self._tmog_embed
+        if embed is None:
+            from backend.tmog_embed import TmogEmbed
+
+            embed = TmogEmbed(root)
+            self._tmog_embed = embed
+        return bool(embed.open_full())
 
     @Slot()
     def hideTmog(self) -> None:

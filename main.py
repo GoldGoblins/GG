@@ -6071,12 +6071,16 @@ class ChatBridge(QObject):
         except (AttributeError, RuntimeError, TypeError):
             return
 
-    def _tui_approval_notice(self, action: str) -> str:
-        waiting = [
+    def _waiting_chat_native_mandates(self) -> list[dict[str, object]]:
+        return [
             pending
             for pending in self._pending_mandates.values()
             if pending.get("status") == "WAITING_APPROVAL"
+            and pending.get("approval_mode") == "CHAT_NATIVE_TASK_SCOPED"
         ]
+
+    def _tui_approval_notice(self, action: str) -> str:
+        waiting = self._waiting_chat_native_mandates()
         if not waiting:
             return "GG: Det finns ingen väntande godkännandeuppgift."
         if len(waiting) != 1:
@@ -6107,16 +6111,21 @@ class ChatBridge(QObject):
         chat_approval = parse_chat_approval(value)
         resume_request = parse_chat_resume_request(value)
         action_request = parse_chat_action_request(value)
-        waiting_approval = any(
-            pending.get("status") == "WAITING_APPROVAL"
-            for pending in self._pending_mandates.values()
-        )
-        # A bare "ja"/"nej" is special only when this Workbench actually
-        # owns a waiting approval. Otherwise it is ordinary conversation in
-        # the native TUI and must be left for the model; consuming it here
-        # made a normal answer visibly disappear.
-        if chat_approval is not None and not waiting_approval:
-            return False
+        waiting_approval = self._waiting_chat_native_mandates()
+        # A bare "ja"/"nej" is special only for one unambiguous native-chat
+        # task.  If none exists, or more than one exists, leave the line in
+        # Codex's editor so the user's input is never silently erased and an
+        # unrelated surface can never receive the approval accidentally.
+        if chat_approval is not None:
+            if not waiting_approval:
+                return False
+            if len(waiting_approval) != 1:
+                self._show_tui_notice(
+                    terminal_key,
+                    "GG: Flera godkännandeuppgifter väntar; ja/nej "
+                    "skickades inte vidare som godkännande.",
+                )
+                return False
         if chat_approval is None and resume_request is not None:
             if self._latest_chat_native_pending(
                 {"WAITING_APPROVAL", "APPROVED_VALID", "EXECUTION_RUNNING"}
@@ -7637,11 +7646,7 @@ class ChatBridge(QObject):
         context_reference: str,
         workspace_object_id: str,
     ) -> bool:
-        waiting = [
-            pending
-            for pending in self._pending_mandates.values()
-            if pending.get("status") == "WAITING_APPROVAL"
-        ]
+        waiting = self._waiting_chat_native_mandates()
         if not waiting:
             return False
         if len(waiting) != 1:
@@ -7654,7 +7659,10 @@ class ChatBridge(QObject):
                 "BLOCKED",
                 24,
             )
-            return True
+            # The line must remain ordinary chat input when the approval is
+            # ambiguous.  Returning True would make the terminal send Ctrl-U
+            # and the visible "ja"/"nej" would disappear on Enter.
+            return False
 
         pending = waiting[0]
         pending_id = str(pending.get("pending_id") or "")

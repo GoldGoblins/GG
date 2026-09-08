@@ -128,6 +128,7 @@ _core_hist: list[list[float]] = []
 _history_samples: dict[str, deque[tuple[float, float]]] = {}
 _last_proc: dict[int, dict[str, Any]] = {}
 _tombstones: dict[int, dict[str, Any]] = {}
+_flight_history: deque[dict[str, Any]] = deque(maxlen=MAX_HISTORY)
 _TOMBSTONE_TTL = 8.0
 
 
@@ -752,6 +753,21 @@ def _processes(
         row.pop("_dir", None)
         kept.append(row)
     _last_proc = {int(row["pid"]): dict(row) for row in kept}
+    _flight_history.append(
+        {
+            "t": round(float(now), 3),
+            "processes": [
+                {
+                    "pid": int(row.get("pid") or 0),
+                    "comm": str(row.get("comm") or ""),
+                    "cpu_pct": float(row.get("cpu_pct") or 0.0),
+                    "rss_kb": int(row.get("rss_kb") or 0),
+                }
+                for row in kept[:17]
+                if not row.get("tombstone")
+            ],
+        }
+    )
     shown = stones + kept
     counts = {
         "running": running,
@@ -1212,6 +1228,85 @@ def _gpu_busy() -> float | None:
     return value if value is not None else _nvidia_gpu_busy()
 
 
+def _pressure() -> dict[str, float | None]:
+    """Read Linux pressure stall averages without spawning a helper process."""
+    values: dict[str, float | None] = {"cpu_some": None, "memory_some": None}
+    for key, path in (
+        ("cpu_some", Path("/proc/pressure/cpu")),
+        ("memory_some", Path("/proc/pressure/memory")),
+    ):
+        line = _read_text(path, 512).splitlines()
+        if not line:
+            continue
+        for token in line[0].split():
+            if not token.startswith("avg10="):
+                continue
+            try:
+                values[key] = round(float(token.split("=", 1)[1]), 2)
+            except ValueError:
+                pass
+            break
+    return values
+
+
+def _gpu_rows(gpu_busy: float | None, temp_c: float) -> list[dict[str, Any]]:
+    """Return lightweight GPU identity rows for the summary and system views."""
+    rows: list[dict[str, Any]] = []
+    drm = Path("/sys/class/drm")
+    try:
+        cards = sorted(drm.glob("card[0-9]"))
+    except OSError:
+        cards = []
+    for index, card in enumerate(cards):
+        device = card / "device"
+        try:
+            driver = device / "driver"
+            driver_name = driver.resolve().name if driver.exists() else ""
+        except OSError:
+            driver_name = ""
+        vendor = _read_text(device / "vendor", 32).strip()
+        device_id = _read_text(device / "device", 32).strip()
+        name = driver_name or card.name
+        if vendor and device_id:
+            name += " " + vendor + ":" + device_id
+        rows.append(
+            {
+                "id": index,
+                "name": name[:64],
+                "busy": round(float(gpu_busy or 0.0), 1) if index == 0 else 0.0,
+                "temp_c": round(float(temp_c), 1) if index == 0 else 0.0,
+            }
+        )
+        if len(rows) >= 4:
+            break
+    if not rows and gpu_busy is not None:
+        rows.append(
+            {
+                "id": 0,
+                "name": "GPU 0",
+                "busy": round(float(gpu_busy), 1),
+                "temp_c": round(float(temp_c), 1),
+            }
+        )
+    return rows
+
+
+def _drivers() -> list[dict[str, Any]]:
+    """List loaded kernel modules, matching TMOG's driver inspection purpose."""
+    rows: list[dict[str, Any]] = []
+    for line in _read_text(Path("/proc/modules"), 65536).splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        size = parts[1] if len(parts) > 1 else "0"
+        users = parts[2] if len(parts) > 2 else "0"
+        rows.append({"name": name[:48], "size": size, "users": users})
+        if len(rows) >= MAX_NAMES:
+            break
+    return rows
+
+
 class _NvmlUtilization(ctypes.Structure):
     _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
 
@@ -1326,12 +1421,14 @@ def snapshot(page: str = "") -> dict[str, Any]:
     hit = _last_snap
     if hit is not None and hit[1] == kind and now - hit[0] < _SNAP_DEBOUNCE:
         return hit[2]
-    want_procs = full or kind in {"SUMMARY", "PROCESSES", "USERS"}
+    want_procs = full or kind in {"SUMMARY", "PROCESSES", "USERS", "FLIGHT"}
     want_conns = full or kind == "CONNECTIONS"
     want_mounts = full or kind == "DISK"
     want_names = full or kind in {"STARTUP", "APPS", "SERVICES"}
     want_cores = full or kind in {"PERFORMANCE", "FREQ"}
     want_core_hist = full or kind == "PERFORMANCE"
+    want_gpus = full or kind in {"SUMMARY", "PERFORMANCE", "SYSTEM"}
+    want_drivers = full or kind == "DRIVERS"
     dt = now - _prev_mono if _prev_mono else 0.0
     clk = _clk()
     mem = _meminfo()
@@ -1362,6 +1459,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
     temps = _temps(1 if kind == "SUMMARY" else 3)
     temp_c = temps[0]["c"] if temps else 0.0
     energy = _energy(now)
+    pressure = _pressure()
     rx, tx, iface = _net_bytes()
     rx_bps, tx_bps = _io_rate(_net_win, now, rx, tx, IO_WINDOW, _last_net)
     dread, dwrite = _disk_bytes()
@@ -1371,7 +1469,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
     procs: list[dict[str, Any]] = []
     users: dict[str, int] = {}
     if want_procs:
-        fill_limit = 8 if kind == "SUMMARY" else MAX_PROCESSES
+        fill_limit = 17 if kind in {"SUMMARY", "FLIGHT"} else MAX_PROCESSES
         procs, tasks, users = _processes(
             now,
             dt,
@@ -1389,6 +1487,7 @@ def snapshot(page: str = "") -> dict[str, Any]:
     ]
     ident = _host_identity()
     app = _cached_appimage()
+    gpus = _gpu_rows(gpu_busy, temp_c) if want_gpus else []
     payload = {
         "schema": SCHEMA,
         "cpu_busy": overall,
@@ -1409,6 +1508,9 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "swap_used_kb": mem["swap_used"],
         "swap_total_kb": mem["swap_total"],
         "energy": energy,
+        "pressure": pressure,
+        "gpus": gpus,
+        "drivers": _drivers() if want_drivers else [],
         "load1": load1,
         "load5": load5,
         "load15": load15,
@@ -1446,6 +1548,9 @@ def snapshot(page: str = "") -> dict[str, Any]:
         "startup": _startup_entries() if want_names else [],
         "apps": _app_entries() if want_names else [],
         "services": _service_entries() if want_names else [],
+        "flight_history": list(_flight_history)
+        if full or kind in {"PERFORMANCE", "FLIGHT"}
+        else [],
         "appimage": app,
         "appimage_found": bool(app),
         "page": kind or "FULL",

@@ -19,10 +19,10 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
-## Patch notes · 2026-09-08 · native TUI input and approval stability
+## Patch notes · 2026-09-08 · TMoG parity, native input and approval stability
 
-What GitHub had until this push: GPTUI scrollback, copy and the existing
-task-scoped approval flow.
+What GitHub had until this push: GPTUI scrollback, copy, the existing
+task-scoped approval flow and the first functional TMoG surface.
 
 What this patch adds:
 
@@ -40,8 +40,20 @@ control rather than Ctrl-C, so the TUI prompt remains usable.
 handoff, visible approval feedback and first-try `ja`/`nej` handling. The
 desktop flow was also verified through the visible pointer and keyboard path.
 
-Unchanged: `docs/gg-ai-desktop.png` is intentionally unchanged; no
-credentials, session state or model weights are added to git.
+**TMoG is a real dashboard surface.** Summary, Performance, Processes, System
+Info, Startup apps, Users, Services, Power & Freq, Flight Recorder,
+Connections, Installed Apps, Drivers, Disk Space and Benchmarks now have the
+same live rows, meters, sorting and history-oriented structure as the actual
+TMOG view, presented in the GG Obsidian/Ledger visual language.
+
+**Full TMOG is safe to open.** `OPEN FULL TMOG` launches the real TMOG window
+as an independent process instead of trying to reparent a native window into
+Qt. That keeps the desktop alive when the button is pressed. Reload hydration
+also completes without leaving the visible hydration state stuck.
+
+**Screenshot.** `docs/gg-ai-desktop.png` is updated from the current desktop
+capture, including GPTUI and the expanded TMOG dashboard. No credentials,
+session state or model weights are added to git.
 
 ## Patch notes · 2026-09-06 · GPTUI scrollback, copy and approval flow
 

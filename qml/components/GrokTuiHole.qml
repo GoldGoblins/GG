@@ -80,7 +80,10 @@ FocusScope {
     function showNotice(text) {
         root.noticeText = String(text || "")
         noticeTimer.restart()
-        Qt.callLater(root.focusTerminal)
+        // A notice can arrive while the operator is typing in another
+        // control.  Do not let feedback from the PTY steal that focus.
+        if (root.activeFocus)
+            Qt.callLater(root.focusTerminal)
     }
 
     Connections {
