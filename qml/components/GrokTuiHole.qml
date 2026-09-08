@@ -6,23 +6,7 @@ FocusScope {
     id: root
     objectName: "grokTuiHost"
     clip: true
-    focus: true
-    Keys.priority: Keys.BeforeItem
-
-    Keys.onPressed: function(event) {
-        var paste = (
-            event.key === Qt.Key_V
-            && (event.modifiers & Qt.ControlModifier)
-        ) || (
-            event.key === Qt.Key_Insert
-            && (event.modifiers & Qt.ShiftModifier)
-        )
-        if (!paste)
-            return
-        if (root.surfaceHost && root.surfaceHost.pasteChatTerminal)
-            root.surfaceHost.pasteChatTerminal(root.terminalId)
-        event.accepted = true
-    }
+    focus: visible
 
     property var surfaceHost: null
     // Both engines use the same terminal surface and input styling.  The
@@ -31,6 +15,7 @@ FocusScope {
     property int scrollOffset: 0
     property int scrollMaximum: 0
     property int scrollPage: 1
+    property string noticeText: ""
 
     function applyScrollMetrics(offset, maximum, page) {
         var safeMaximum = Math.max(0, Number(maximum) || 0)
@@ -82,17 +67,46 @@ FocusScope {
         ))
     }
 
+    function focusTerminal() {
+        if (
+            !root.visible
+            || !root.surfaceHost
+            || !root.surfaceHost.focusChatTerminal
+        )
+            return false
+        return Boolean(root.surfaceHost.focusChatTerminal(root.terminalId))
+    }
+
+    function showNotice(text) {
+        root.noticeText = String(text || "")
+        noticeTimer.restart()
+        Qt.callLater(root.focusTerminal)
+    }
+
     Connections {
         target: root.surfaceHost
         function onTerminalScrollChanged(id, offset, maximum, page) {
             if (id === root.terminalId)
                 root.applyScrollMetrics(offset, maximum, page)
         }
+        function onChatTerminalNotice(id, text) {
+            if (id === root.terminalId)
+                root.showNotice(text)
+        }
+        function onChatTerminalFocusRequested(id) {
+            if (id === root.terminalId && root.visible)
+                Qt.callLater(root.focusTerminal)
+        }
     }
 
     onVisibleChanged: {
-        if (visible)
+        if (visible) {
             root.forceActiveFocus()
+            // The Python-created TerminalGrid is attached just after the
+            // visibility change.  Refocus it on the next QML turn so the
+            // hidden composer cannot win the first-input race.
+            Qt.callLater(root.focusTerminal)
+        }
     }
 
     Item {
@@ -125,6 +139,41 @@ FocusScope {
         target: null
         onWheel: function(wheel) {
             wheel.accepted = root.scrollFromWheel(wheel)
+        }
+    }
+
+    Timer {
+        id: noticeTimer
+        interval: 5000
+        repeat: false
+        onTriggered: root.noticeText = ""
+    }
+
+    Rectangle {
+        id: terminalNotice
+        objectName: "grokTuiNotice"
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: 8
+        height: visible ? 34 : 0
+        z: 1200
+        visible: root.noticeText.length > 0
+        color: "#24292f"
+        border.color: "#6a6a6a"
+        border.width: 1
+        radius: 3
+
+        Text {
+            id: noticeLabel
+            anchors.fill: parent
+            anchors.margins: 6
+            text: root.noticeText
+            color: "#e6edf3"
+            font.family: "monospace"
+            font.pixelSize: 12
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
         }
     }
 

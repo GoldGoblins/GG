@@ -10,7 +10,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 if str(PROJECT) not in sys.path:
     sys.path.insert(0, str(PROJECT))
 
-from backend.chat_sessions import list_for_ui, remember_session
+from backend.chat_sessions import list_for_ui, remember_session, sync_owned
 
 
 def main() -> int:
@@ -65,6 +65,29 @@ def main() -> int:
         for row in rows
     ):
         raise AssertionError("GPTUI session 28 missing")
+    remember_session("gpt-new", engine="GPT_TUI", path=catalog)
+    rows = list_for_ui(path=catalog)
+    if not any(
+        row["n"] == 29
+        and row["session_id"] == "gpt-new"
+        and row["label"] == "session 29  ·  GPTUI"
+        for row in rows
+    ):
+        raise AssertionError("new GPTUI session did not receive next number")
+    sync_owned(["gpt-bulk-3", "gpt-bulk-2", "gpt-bulk-2"], engine="GPT_TUI", path=catalog)
+    payload = json.loads(catalog.read_text(encoding="utf-8"))
+    bulk = [
+        row for row in payload["sessions"]
+        if row.get("session_id", "").startswith("gpt-bulk-")
+    ]
+    if len(bulk) != 2 or len({row["session_id"] for row in bulk}) != 2:
+        raise AssertionError("bulk session sync duplicated or dropped rows")
+    leaked = [
+        path for path in folder.glob(".chat-sessions.json.*")
+        if path.name != ".chat-sessions.json.lock"
+    ]
+    if leaked:
+        raise AssertionError("atomic catalog temporary file leaked")
     print("CHAT_SESSIONS_TEST=PASS")
     return 0
 

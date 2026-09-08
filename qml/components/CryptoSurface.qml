@@ -627,14 +627,19 @@ Item {
                         var bt = root.trader.backtest || {}
                         var best = bt.best_trade || {}
                         var worst = bt.worst_trade || {}
+                        var currency = String(bt.quote_currency || "SOL")
                         return String(bt.verdict || "")
                             + "  " + String(bt.fills || 0) + " fills"
                             + "  vault " + String(bt.banked_sol || "") + " SOL"
                             + "  win " + String(bt.win_rate || "0") + "%"
                             + "  avg " + String(bt.avg_fills_day || "") + "/d"
-                            + (best.profit ? ("  best " + String(best.profit) + " SOL") : "")
-                            + (worst.profit ? ("  worst " + String(worst.profit) + " SOL") : "")
-                            + (bt.pnl_sol ? ("  pnl " + String(bt.pnl_sol) + " SOL") : "")
+                            + (best.profit ? ("  best " + String(best.profit) + " " + currency) : "")
+                            + (worst.profit ? ("  worst " + String(worst.profit) + " " + currency) : "")
+                            + (bt.pnl_usd
+                                ? ("  pnl " + String(bt.pnl_usd) + " USD")
+                                : (bt.pnl_sol ? ("  pnl " + String(bt.pnl_sol) + " SOL") : ""))
+                            + (bt.max_drawdown_usd
+                                ? ("  maxDD " + String(bt.max_drawdown_usd) + " USD") : "")
                             + (bt.range ? ("  " + String(bt.range)) : "")
                     }
                     color: String((root.trader.backtest || {}).verdict || "") === "GOOD"
@@ -655,9 +660,19 @@ Item {
                         var start = String(bt.start_sol || "2.000000000")
                         var end = String(bt.equity_sol || bt.tokens || "")
                         var pnl = String(bt.pnl_sol || "")
+                        var startUsd = String(bt.start_usd || "")
+                        var endUsd = String(bt.end_usd || "")
+                        var pnlUsd = String(bt.pnl_usd || "")
                         var usd = String(bt.usd || "")
-                        var parts = ["start " + start + " → " + end + " SOL  pnl " + pnl + " SOL"
-                            + (usd ? ("  powder $" + usd) : "")]
+                        var headline = startUsd
+                            ? ("start $" + startUsd + " → $" + endUsd + " USD  pnl " + pnlUsd
+                                + (bt.return_pct !== undefined ? (" (" + String(bt.return_pct) + "%)") : ""))
+                            : ("start " + start + " → " + end + " SOL  pnl " + pnl + " SOL")
+                        if (bt.max_drawdown_usd)
+                            headline += "  maxDD $" + String(bt.max_drawdown_usd)
+                        if (usd)
+                            headline += "  powder $" + usd
+                        var parts = [headline]
                         var years = bt.years || []
                         var yp = []
                         var i

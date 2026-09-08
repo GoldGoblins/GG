@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend import task_scoped_action_grant
 from backend import web_surface
 
 
@@ -27,6 +28,19 @@ _USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 class SftpOperatorError(ValueError):
     pass
+
+
+def _validate_task_scoped_authorization(
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        return task_scoped_action_grant.validate_authorization(value)
+    except task_scoped_action_grant.TaskScopedActionGrantError as exc:
+        raise SftpOperatorError(
+            "TASK_SCOPED_AUTHORIZATION_INVALID:" + str(exc)
+        ) from exc
 
 
 def ensure_root() -> Path:
@@ -159,16 +173,50 @@ def require_agent() -> None:
         raise SftpOperatorError("SSH_AGENT_SOCKET_INVALID")
 
 
-def plan(action: str, relative: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def plan(
+    action: str,
+    relative: str,
+    config: dict[str, Any] | None = None,
+    *,
+    task_scoped_authorization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cfg = validate_config(config) if config is not None else load_config()
     script = batch_script(cfg, action, relative)
+    if task_scoped_authorization is None:
+        task_scoped_authorization = (
+            task_scoped_action_grant.runtime_authorize_effect(
+                "sftp." + str(action or "").strip().lower(),
+                host=str(cfg["host"]),
+            )
+        )
+    authorization = _validate_task_scoped_authorization(
+        task_scoped_authorization
+    )
     return {
         "schema": "gg.sftp-operator-plan.v1",
         "action": action,
         "relative": relative,
         "argv": argv(cfg),
         "batch": script,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        "action_authority": (
+            authorization["action_authority"]
+            if authorization is not None
+            else "NONE"
+        ),
+        "general_action_authority": (
+            authorization["general_action_authority"]
+            if authorization is not None
+            else GENERAL_ACTION_AUTHORITY
+        ),
+        "scope_authority": (
+            authorization["scope_authority"]
+            if authorization is not None
+            else "NONE"
+        ),
+        "network_authority": (
+            "TASK_SCOPED" if authorization is not None else "NONE"
+        ),
+        "task_scoped_authorization": authorization,
         "password": False,
         "risk_class": "RED",
     }

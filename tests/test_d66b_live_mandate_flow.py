@@ -176,6 +176,12 @@ def explicit_mandate_contract() -> None:
         "exact evaluation context not preserved",
     )
     expect(pending["action_intent"] == action_intent, "pending action intent drift")
+    approval_message = str(bridge._messages[-1][2])
+    expect("Svara bara `ja`" in approval_message, "chat approval prompt missing")
+    expect("REQUEST_CAPTURE_SHA256" not in approval_message, "request hash leaked to chat")
+    expect("APPROVAL_SCOPE_REVISION" not in approval_message, "scope hash leaked to chat")
+    expect("/approve-mandate" not in approval_message, "slash approval command leaked to chat")
+    expect("/reject-mandate" not in approval_message, "slash rejection command leaked to chat")
 
     scope = str(pending["approval_scope_revision"])
     parsed = workbench.parse_mandate_command(

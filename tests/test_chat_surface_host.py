@@ -109,8 +109,8 @@ def main() -> int:
         raise AssertionError("live workspace watch missing")
     if "grokWalletChanged" not in src:
         raise AssertionError("wallet signal missing")
-    if "mandateRailChanged" not in src:
-        raise AssertionError("mandate rail signal missing")
+    if "mandateRailChanged" in src or "_emit_mandate_rail" in src:
+        raise AssertionError("legacy mandate rail layer still present")
     if "webOperatorCommand" not in src:
         raise AssertionError("web operator command signal missing")
     if "webOperatorReport" not in src:
@@ -125,8 +125,8 @@ def main() -> int:
         raise AssertionError("site-import drop watcher missing")
     if "ensure_import_drop" not in src:
         raise AssertionError("import drop root unused")
-    if "rail_snapshot" not in src:
-        raise AssertionError("mandate rail snapshot unused")
+    if "rail_snapshot" in src:
+        raise AssertionError("legacy mandate rail snapshot still present")
     if "grok_wallet" not in src:
         raise AssertionError("wallet module unused")
     if "chatSessionsChanged" not in src:

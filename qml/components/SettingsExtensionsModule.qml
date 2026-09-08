@@ -22,8 +22,9 @@ Item {
         anchors.topMargin: 22
         anchors.bottomMargin: 12
         text: "Future themes and visual modules can integrate here. "
-            + "A1.2 grants no arbitrary QML, Python, shell, network or "
-            + "capability execution."
+            + "Give instructions directly in the chat. If an operation "
+            + "needs confirmation, answer ja or nej there; the app then "
+            + "continues with the task you described."
         color: "#c8cdd4"
         wrapMode: Text.WordWrap
         font.pixelSize: 12

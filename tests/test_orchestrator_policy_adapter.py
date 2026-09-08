@@ -74,7 +74,7 @@ def static_adapter_contract() -> None:
 
     expect(
         adapter.ORCHESTRATOR_SHA256
-        == "2a5c6c744c7a6c34dd9cf583868250851ac2c564e339da2407fe0e41ee6964b3",
+        == "f6fbddd9cdaf31984ae9c6c99bab66aa3622fc098c4946081460ed6a51b97123",
         "orchestrator SHA pin drift",
     )
 

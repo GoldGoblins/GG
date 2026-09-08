@@ -19,6 +19,30 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-08 · native TUI input and approval stability
+
+What GitHub had until this push: GPTUI scrollback, copy and the existing
+task-scoped approval flow.
+
+What this patch adds:
+
+**First-try native input.** GPTUI and GROK TUI keep keyboard focus after PTY
+output and after a submitted line, so the next message does not need a second
+attempt.
+
+**Approval answers stay in the right lane.** A bare `ja`/`nej` is routed to
+the task-scoped approval handler only when a matching approval is actually
+waiting. Otherwise it remains ordinary conversation. When a waiting approval
+is intercepted, the native line is cleared with the terminal line-kill
+control rather than Ctrl-C, so the TUI prompt remains usable.
+
+**Coverage.** Regression coverage now exercises native host ingress, focus
+handoff, visible approval feedback and first-try `ja`/`nej` handling. The
+desktop flow was also verified through the visible pointer and keyboard path.
+
+Unchanged: `docs/gg-ai-desktop.png` is intentionally unchanged; no
+credentials, session state or model weights are added to git.
+
 ## Patch notes · 2026-09-06 · GPTUI scrollback, copy and approval flow
 
 Previous public patch (`5edae4f`, documenting published source `aefff5b`)
@@ -43,7 +67,10 @@ alternate-screen mouse handling remains unchanged.
 in the shared chat stream are the active task instruction, while
 `AGENTS.md`, approval contracts and explicit red/yellow boundaries remain
 the agent's guardrails. An operation approval is requested in the stream and
-applies only to the current operation.
+applies only to the current operation. A concrete action written in normal
+chat creates that request automatically; the user answers only `ja`/`yes` or
+`nej`/`no`. Hashes and slash approval commands are internal compatibility
+details, not part of the user interaction.
 
 **Long GPTUI sessions.** For extended interactive work, the recommended model
 is `gpt-5.6-luna xhigh`; select it with GPTUI's `/model` command when it is
@@ -53,8 +80,13 @@ recommendation, not a credential or a change to the approval boundaries, and
 account quotas still apply.
 
 Unchanged: no credentials, login state, model weights or local session state
-are added to git; GROK TUI remains available; and network, production and
-other restricted actions stay behind the existing approval boundaries.
+are added to git; GROK TUI remains available. Network, credentials,
+production, one.com, deploy and writes are task-scoped effect classes when
+explicitly named in the approved task. The default publishing scope excludes
+GA4/GSC, payment/customer/order data, DNS, e-mail, other roles,
+plugin/theme updates and sudo unless separately named and approved. After
+`MANDATE_VALID`, the current internal hash-bound grant covers all explicitly
+named effects for that task.
 
 ## Patch notes · 2026-09-06 · GPTUI, media and workspace consolidation
 
@@ -85,8 +117,8 @@ memory bridge live in dedicated backend modules; no model weights or login
 state are added to git.
 
 Unchanged: GROK TUI remains available as the default motor, no GGUF in git,
-`GENERAL_ACTION_AUTHORITY` NONE, and network/production actions remain behind
-the existing approval boundaries.
+and ambient `GENERAL_ACTION_AUTHORITY` remains NONE. The active approved grant
+reports `TASK_SCOPED` with `ALL_TASK_SCOPED_EFFECTS`.
 
 ## Patch notes · 2026-09-05 · program-wide gold pointer
 
@@ -96,9 +128,20 @@ What landed on top of that (this is the full `d86aacd` → HEAD delta, not only 
 
 **Gold pointer is the whole desk.** `gg-desk` drives GG AI Desktop with a visible Breeze Light gold cursor, not a web-only gadget. MOVE / CLICK / HOVER / TYPE / KEY / SNAPSHOT / FIND. SNAPSHOT returns a label map of visible chrome (`WEB @763,863 [workspaceKindWEB]`). FIND walks QML `childItems` only — never `QObject.children()` into Chromium. Heavy surfaces (WebEngine, TUI cell grid, code editor) are skipped; workspace chrome is seeded from the workspace Loader so CODE / TERMINAL / WEB / SITE / the address field stay findable.
 
-**WEB tab is hands after eyes.** Click **WEB** with `gg-desk` first. `gg-web` does not switch tabs (`WEB_NOT_FOCUSED`). Then page DOM: snapshot, hover, click, type, scroll. `open URL` types the address bar and goes. New tabs: click `+` or middle-click a link. Password fields stay blocked. one.com / wp-admin stay red. No hidden HTTP.
+**WEB tab is hands after eyes.** An approved visible-WEB action automatically
+switches the workspace to WEB and waits for the pane; you do not need to
+manually focus the tab. Then page DOM: snapshot, hover, click, type, scroll.
+`open URL` types the address bar and goes. New tabs: click `+` or middle-click
+a link. The command/result bridge uses the per-user writable runtime
+directory, so a read-only model workspace cannot break the visible WEB
+transport. Secret values never enter chat or logs. one.com / wp-admin stay RED
+and require the active task-scoped authorization. No hidden HTTP.
 
 **Visible WEB drive.** MOVE / HOVER / SCROLL / WAIT / STAGE / FORWARD / TAB_*. Gold 24px cursor pack. After in-page scroll, `view.png` is grabbed after a paint so it matches the new viewport, not the old top. WebEngine loads only when the WEB tab is current.
+
+After visible login/2FA, `klar`, `fortsätt` or `prova igen` resumes the latest
+already approved chat task. Those short handoff words never approve a waiting
+task; a waiting task still accepts only `ja`/`nej`.
 
 **TUI prompt is the `>` box.** Overlay `grokTuiPrompt` sits on the input row, not the hint row. TYPE clicks the target then sends keys character-by-character so the GUI does not deadlock.
 
@@ -113,7 +156,9 @@ python3 projects/gg-ai-desktop/gg-web snapshot
 python3 projects/gg-ai-desktop/gg-web click "text=RINGAR"
 ```
 
-`stage` still loads a local rehearsal page (no network). Live `goldgoblins.se` OPEN is yellow and needs a named mandate.
+`stage` still loads a local rehearsal page. Live `goldgoblins.se` OPEN is RED
+and pauses for the active task-scoped approval in chat; the visible operator
+carries the internal authorization binding after approval.
 
 **Screenshot.** Same desk capture as the previous drop (`docs/gg-ai-desktop.png`). No new picture this round.
 
@@ -131,13 +176,18 @@ What landed on top of that (this is the full `269f430` → HEAD delta, not only 
 
 **TMOG list pages are real rows.** SYSTEM / USERS / CONNECTIONS / DISK / FREQ / STARTUP / APPS / SERVICES fill with dict rows, not bare strings. `TmogRow` for lists, `TmogRail` hanging legends, right-click copy, scroll inside the frame. IPv4/IPv6 decode, `core_count`, `gpu_busy`, RAPL energy. Disk fill bar and spring-damped net/disk sparks stay.
 
-**Mandate rail.** AUTHORITY stays NONE. TOOLS stay GREEN TYPED, WRITE stays YELLOW CURRENT. A new **MANDATE** row shows NONE, WAIT, or TASK_SCOPED after `/approve-mandate`. Yellow/red work needs an explicit human yes; it is never a standing red tool belt. Machine graph is 54 nodes / 165 edges (call-102–105).
+**Mandate rail.** The visible **AUTHORITY** lane is always `TASK_SCOPED` for
+the active chat/task. A separate **MANDATE** row shows `NONE`, `WAIT`, or the
+approved task state and then reports `ALL_TASK_SCOPED_EFFECTS`. Yellow/red
+work pauses in the same chat for a simple human `ja`/`nej`; the internal grant
+remains bound to that task. Once approved, the internal task token is attached
+automatically to the visible WEB, desktop and SFTP operator helpers.
 
-**Visible WEB operator.** Agent web actions (OPEN, SNAPSHOT, CLICK, TYPE, RELOAD, BACK) run in the workspace **WEB** tab, not a hidden browser. Password fields are blocked. You type one.com / wp-admin logins yourself in that pane.
+**Visible WEB operator.** Agent web actions (OPEN, SNAPSHOT, CLICK, TYPE, RELOAD, BACK) run in the workspace **WEB** tab, not a hidden browser. RED one.com / wp-admin actions carry the active task-scoped authorization; secret values never enter chat or logs.
 
 **Site import drop.** Drop a zip in the local `site-import/` folder; it unpacks into the local SITE copy and skips `wp-config.php`.
 
-**SFTP plan.** `sftp_operator` builds BatchMode get/put for `robots.txt` and `gg-site-completion.php` using `ssh-agent`. No password in config. Live PUT stays red until you unlock the agent.
+**SFTP plan.** `sftp_operator` builds BatchMode get/put for `robots.txt` and `gg-site-completion.php` using `ssh-agent`. No password in config. Live PUT is RED and requires the active task-scoped authorization.
 
 **MEDIA / UTILITIES chrome.** `MEDIA / UTILITIES` and `RADIO · NO RF` hang on the strip frame like the other GgFrames.
 

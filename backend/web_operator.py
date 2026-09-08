@@ -15,13 +15,34 @@ _PROJECT = Path(__file__).resolve().parents[1]
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
+from backend import task_scoped_action_grant
 from backend import web_surface
 
 
 SCHEMA_COMMAND = "gg.web-operator-command.v1"
 SCHEMA_RESULT = "gg.web-operator-result.v1"
 GENERAL_ACTION_AUTHORITY = "NONE"
-ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/web-operator")
+
+
+def _runtime_operator_root() -> Path:
+    """Return the shared writable IPC directory for the visible WEB pane.
+
+    The model runner can expose the project state as read-only while the
+    desktop host still needs to exchange command/result JSON with it.  Keep
+    this short-lived transport under the per-user runtime directory instead
+    of the persistent home/state tree.  No credentials are stored here.
+    """
+    raw = str(
+        os.environ.get("XDG_RUNTIME_DIR")
+        or ("/run/user/" + str(os.getuid()))
+    ).strip()
+    runtime = Path(raw)
+    if not runtime.is_absolute():
+        runtime = Path("/run/user/" + str(os.getuid()))
+    return runtime / "gg-ai-desktop" / "web-operator"
+
+
+ROOT = _runtime_operator_root()
 COMMAND_NAME = "command.json"
 ACTIVE_NAME = "command.active.json"
 RESULT_NAME = "result.json"
@@ -100,6 +121,40 @@ class WebOperatorError(ValueError):
     pass
 
 
+def _validate_task_scoped_authorization(
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        return task_scoped_action_grant.validate_authorization(value)
+    except task_scoped_action_grant.TaskScopedActionGrantError as exc:
+        raise WebOperatorError(
+            "TASK_SCOPED_AUTHORIZATION_INVALID:" + str(exc)
+        ) from exc
+
+
+def _authority_fields(command: dict[str, Any]) -> dict[str, Any]:
+    authorization = _validate_task_scoped_authorization(
+        command.get("task_scoped_authorization")
+    )
+    if authorization is None:
+        return {
+            "action_authority": "NONE",
+            "general_action_authority": GENERAL_ACTION_AUTHORITY,
+            "scope_authority": "NONE",
+            "task_scoped_authorization": None,
+        }
+    return {
+        "action_authority": authorization["action_authority"],
+        "general_action_authority": authorization[
+            "general_action_authority"
+        ],
+        "scope_authority": authorization["scope_authority"],
+        "task_scoped_authorization": authorization,
+    }
+
+
 def ensure_root() -> Path:
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     return ROOT
@@ -129,7 +184,10 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 
 def _host(url: str) -> str:
-    return str(urlparse(url).hostname or "").lower()
+    value = str(url or "").strip()
+    if value and "://" not in value and not value.startswith("about:"):
+        value = "https://" + value
+    return str(urlparse(value).hostname or "").lower()
 
 
 def _coord(value: Any, label: str) -> int:
@@ -219,6 +277,14 @@ def validate_command(value: Any) -> dict[str, Any]:
     risk = risk_class_for(action, url)
     if action == "TAB_NEW" and (url or selector.strip()):
         risk = "YELLOW"
+    authorization = _validate_task_scoped_authorization(
+        value.get("task_scoped_authorization")
+    )
+    authority = (
+        _authority_fields({"task_scoped_authorization": authorization})
+        if authorization is not None
+        else _authority_fields({})
+    )
     return {
         "schema": SCHEMA_COMMAND,
         "command_id": command_id,
@@ -231,7 +297,7 @@ def validate_command(value: Any) -> dict[str, Any]:
         "dx": coord_dx,
         "dy": coord_dy,
         "risk_class": risk,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        **authority,
         "visible_cursor": True,
     }
 
@@ -246,7 +312,15 @@ def make_command(
     y: int = 0,
     dx: int = 0,
     dy: int = 0,
+    task_scoped_authorization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if task_scoped_authorization is None:
+        task_scoped_authorization = (
+            task_scoped_action_grant.runtime_authorize_effect(
+                "web." + str(action or "").strip().lower(),
+                host=_host(url),
+            )
+        )
     return validate_command(
         {
             "schema": SCHEMA_COMMAND,
@@ -259,6 +333,7 @@ def make_command(
             "y": y,
             "dx": dx,
             "dy": dy,
+            "task_scoped_authorization": task_scoped_authorization,
         }
     )
 
@@ -277,6 +352,7 @@ def make_result(
     view = ROOT / VIEW_NAME
     if not image and view.is_file():
         image = str(view)
+    authority = _authority_fields(command)
     return {
         "schema": SCHEMA_RESULT,
         "command_id": command.get("command_id"),
@@ -289,7 +365,7 @@ def make_result(
         "text": text[:8000],
         "links": list(links or [])[:40],
         "image": image,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        **authority,
         "visible_web_tab": True,
         "visible_cursor": True,
     }
@@ -318,6 +394,22 @@ def take_command() -> dict[str, Any] | None:
             path.unlink()
         except OSError:
             pass
+        return None
+    if (
+        command.get("risk_class") == "RED"
+        and command.get("task_scoped_authorization") is None
+    ):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        write_result(
+            make_result(
+                command,
+                ok=False,
+                reason_code="TASK_SCOPED_AUTHORIZATION_REQUIRED",
+            )
+        )
         return None
     try:
         os.replace(path, active)

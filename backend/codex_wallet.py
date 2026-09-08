@@ -12,7 +12,14 @@ CODEX_SESSIONS = Path("/home/GG/.codex/sessions")
 CODEX_SESSION_STATE = Path(
     "/home/GG/.local/state/goldgoblins/gg-ai-desktop/codex-tui-session.json"
 )
+DESKTOP_CODEX_HOME = Path(
+    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/codex-gpt-tui"
+)
+DESKTOP_CODEX_SESSIONS = DESKTOP_CODEX_HOME / "sessions"
+DESKTOP_CODEX_SESSION_STATE = DESKTOP_CODEX_HOME / "active-session.json"
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+_SESSION_PATH_CACHE: dict[tuple[str, str], Path] = {}
+_SNAPSHOT_CACHE: dict[str, tuple[int, int, dict[str, Any]]] = {}
 
 
 def _fmt(value: int | None) -> str:
@@ -39,9 +46,9 @@ def _reset_label(value: Any) -> str:
         return "—"
 
 
-def _latest_session() -> Path | None:
+def _latest_session(sessions_root: Path = CODEX_SESSIONS) -> Path | None:
     try:
-        rows = list(CODEX_SESSIONS.rglob("*.jsonl"))
+        rows = list(sessions_root.rglob("*.jsonl"))
     except OSError:
         return None
     if not rows:
@@ -65,11 +72,41 @@ def session_id_from_file(path: Path) -> str:
     return sid if _SESSION_ID_RE.fullmatch(sid) else ""
 
 
-def discover_sessions(cwd: str = "/home/GG/GoldGoblins") -> list[str]:
+def session_path(
+    session_id: str,
+    sessions_root: Path = CODEX_SESSIONS,
+) -> Path | None:
+    sid = str(session_id or "").strip()
+    if _SESSION_ID_RE.fullmatch(sid) is None:
+        return None
+    cache_key = (str(sessions_root), sid)
+    cached = _SESSION_PATH_CACHE.get(cache_key)
+    if cached is not None:
+        try:
+            if cached.is_file():
+                return cached
+        except OSError:
+            pass
+        _SESSION_PATH_CACHE.pop(cache_key, None)
+    try:
+        paths = sessions_root.rglob("*.jsonl")
+        for path in paths:
+            if session_id_from_file(path) == sid:
+                _SESSION_PATH_CACHE[cache_key] = path
+                return path
+    except OSError:
+        return None
+    return None
+
+
+def discover_sessions(
+    cwd: str = "/home/GG/GoldGoblins",
+    sessions_root: Path = CODEX_SESSIONS,
+) -> list[str]:
     """Return real saved Codex sessions for this workspace, newest first."""
     rows: list[tuple[float, str]] = []
     try:
-        paths = CODEX_SESSIONS.rglob("*.jsonl")
+        paths = sessions_root.rglob("*.jsonl")
     except OSError:
         return []
     for path in paths:
@@ -107,8 +144,32 @@ def save_session_id(session_id: str, path: Path = CODEX_SESSION_STATE) -> str:
     return sid
 
 
-def snapshot(session: Path | None = None) -> dict[str, Any]:
-    path = session or _latest_session()
+def clear_session_id(path: Path = CODEX_SESSION_STATE) -> bool:
+    """Clear only the active-session pointer, preserving all session files."""
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def snapshot(
+    session: Path | None = None,
+    sessions_root: Path = CODEX_SESSIONS,
+) -> dict[str, Any]:
+    path = session or _latest_session(sessions_root)
+    stamp: tuple[int, int] | None = None
+    if path is not None:
+        try:
+            stat = path.stat()
+            stamp = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            path = None
+        if stamp is not None:
+            cached = _SNAPSHOT_CACHE.get(str(path))
+            if cached is not None and cached[:2] == stamp:
+                return dict(cached[2])
     latest_tokens: dict[str, Any] = {}
     latest_turn: dict[str, Any] = {}
     latest_limits: dict[str, Any] = {}
@@ -173,7 +234,7 @@ def snapshot(session: Path | None = None) -> dict[str, Any]:
     except (TypeError, ValueError):
         live_n = 0
     live_reset_at = primary.get("resets_at")
-    return {
+    result = {
         "session": str(path) if path else "",
         "context_label": _fmt(context_n) + "/" + _fmt(window_n) if context_n is not None and window_n is not None else "—",
         "session_total_label": _fmt(total_n),
@@ -188,3 +249,6 @@ def snapshot(session: Path | None = None) -> dict[str, Any]:
         "session_total": total_n,
         "turn_tokens": turn_n,
     }
+    if path is not None and stamp is not None:
+        _SNAPSHOT_CACHE[str(path)] = (stamp[0], stamp[1], result)
+    return result

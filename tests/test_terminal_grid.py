@@ -72,11 +72,38 @@ def main() -> int:
     if grid._map_key(copy_event) != "":
         raise AssertionError("Ctrl+C without selection lost terminal interrupt")
 
+    grid._vt.feed("old-session\n")
+    grid._view_offset = 4
+    grid._selection_anchor = (0, 0)
+    grid._selection_cursor = (3, 0)
+    grid._selection_moved = True
+    grid._snap = {"history": grid._vt.history, "buf": grid._vt.buf}
+    grid.reset_terminal()
+    if grid.vt().display().strip() or grid.vt().history:
+        raise AssertionError("terminal reset retained old session output")
+    if grid._view_offset != 0 or grid._snap is not None:
+        raise AssertionError("terminal reset retained viewport state")
+    if grid._selection_anchor is not None or grid._selection_cursor is not None:
+        raise AssertionError("terminal reset retained selection state")
+
+    user_input: list[str] = []
     replies: list[str] = []
-    grid.dataProduced.connect(replies.append)
+    grid.dataProduced.connect(user_input.append)
+    grid.terminalReplyProduced.connect(replies.append)
     grid.feed_text("\x1b[6n")
     if not any("R" in item for item in replies):
         raise AssertionError("grid did not emit cursor report")
+    if user_input:
+        raise AssertionError("terminal reply leaked into user input signal")
+    enter = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Return,
+        Qt.KeyboardModifier.NoModifier,
+        "\r",
+    )
+    grid.keyPressEvent(enter)
+    if user_input != ["\r"]:
+        raise AssertionError("Return did not stay on the user input signal")
     mapped = grid._map_key
 
     event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)

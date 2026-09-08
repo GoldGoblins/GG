@@ -138,10 +138,41 @@ class LiveMandateStoreTests(unittest.TestCase):
 
         grant = grant_mod.issue_from_approved_record(approved)
         self.assertEqual(grant["action_authority"], "TASK_SCOPED")
-        self.assertEqual(grant["general_action_authority"], "NONE")
+        self.assertEqual(grant["general_action_authority"], "TASK_SCOPED")
+        self.assertEqual(grant["scope_authority"], "ALL_TASK_SCOPED_EFFECTS")
         self.assertEqual(grant["grant_status"], "ACTIVE")
-        self.assertIn("one.com", grant["forbidden_scope"])
-        self.assertIn("credentials", grant["forbidden_scope"])
+        for effect in (
+            "network",
+            "production",
+            "one.com",
+            "credentials",
+            "deploy",
+            "write",
+            "sudo",
+        ):
+            self.assertNotIn(effect, grant["forbidden_scope"])
+            authorization = grant_mod.authorize_effect(
+                grant,
+                effect=effect,
+                current_target_object_id="ws.file.context-composer",
+                current_target_source_revision="a" * 64,
+            )
+            self.assertEqual(
+                authorization["action_authority"],
+                "TASK_SCOPED",
+            )
+            self.assertEqual(
+                authorization["general_action_authority"],
+                "TASK_SCOPED",
+            )
+            self.assertEqual(
+                authorization["scope_authority"],
+                "ALL_TASK_SCOPED_EFFECTS",
+            )
+            self.assertEqual(
+                grant_mod.validate_authorization(authorization),
+                authorization,
+            )
         bound = grant_mod.bind_current_target(
             grant,
             current_target_object_id="ws.file.context-composer",
@@ -281,49 +312,21 @@ class LiveMandateStoreTests(unittest.TestCase):
         self.assertEqual(mandate.LIVE_MANDATE_STORE, "NO")
         self.assertEqual(mandate.MANDATE_VALID_IS_ACTION_AUTHORITY, "NO")
 
-    def test_this_task_is_red_and_forbids_one_com(self) -> None:
+    def test_this_task_is_red_and_allows_task_scoped_effects(self) -> None:
         task = grant_mod.THIS_TASK
         self.assertEqual(task["risk_class"], "RED")
-        self.assertIn("one.com", task["forbidden_scope"])
-        self.assertIn("credentials", task["forbidden_scope"])
-        self.assertIn("GENERAL_ACTION_AUTHORITY other than NONE", task["forbidden_scope"])
+        self.assertNotIn("one.com", task["forbidden_scope"])
+        self.assertNotIn("credentials", task["forbidden_scope"])
+        self.assertIn("approval bypass", task["forbidden_scope"])
+        self.assertIn("GENERAL_ACTION_AUTHORITY other than TASK_SCOPED", task["forbidden_scope"])
 
-    def test_one_com_named_mandate_is_red_and_forbids_login(self) -> None:
+    def test_one_com_named_mandate_is_red_and_task_scoped(self) -> None:
         task = grant_mod.ONE_COM_MANDATE
         self.assertEqual(task["risk_class"], "RED")
-        self.assertIn("autonomous one.com login", task["forbidden_scope"])
-        self.assertIn("agent-held credentials", task["forbidden_scope"])
-        self.assertIn("GENERAL_ACTION_AUTHORITY other than NONE", task["forbidden_scope"])
-
-    def test_rail_waiting_and_scoped(self) -> None:
-        pending = _pending(capture=self.capture, scope=self.scope)
-        stored = store_mod.put_pending(self.store, pending)
-        waiting = store_mod.rail_snapshot(pending=pending)
-        self.assertEqual(waiting["action_authority"], "WAITING")
-        self.assertEqual(waiting["general_action_authority"], "NONE")
-        self.assertTrue(waiting["label"].startswith("WAIT "))
-        idle = store_mod.rail_snapshot()
-        self.assertEqual(idle["action_authority"], "NONE")
-        assertion = "e" * 64
-        approved = store_mod.approve(
-            self.store,
-            request_capture_sha256=self.capture,
-            approval_scope_revision=self.scope,
-            approver_id="human:owner",
-            mandate_assertion_sha256=assertion,
-            evaluation_receipt=_receipt(self.capture, self.scope, assertion),
-        )
-        grant = grant_mod.issue_from_approved_record(approved)
-        pending["status"] = "APPROVED_VALID"
-        pending["task_scoped_grant"] = grant
-        scoped = store_mod.rail_snapshot(pending=pending)
-        self.assertEqual(scoped["action_authority"], "TASK_SCOPED")
-        self.assertEqual(scoped["general_action_authority"], "NONE")
-        self.assertTrue(scoped["label"].startswith("SCOPED "))
-        from_store = store_mod.rail_snapshot(store=self.store)
-        self.assertEqual(from_store["action_authority"], "TASK_SCOPED")
-        self.assertEqual(stored["status"], "PENDING")
-
+        self.assertIn("one.com login and production read/write/deploy", task["scope"])
+        self.assertNotIn("autonomous one.com login", task["forbidden_scope"])
+        self.assertNotIn("agent-held credentials", task["forbidden_scope"])
+        self.assertIn("GENERAL_ACTION_AUTHORITY other than TASK_SCOPED", task["forbidden_scope"])
 
 if __name__ == "__main__":
     unittest.main()

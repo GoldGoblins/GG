@@ -37,8 +37,6 @@ from backend.mini_vt import (
     UNDERLINE,
     rgb_of,
 )
-
-
 _COLOR_CACHE: dict[tuple[int, int, int], QColor] = {}
 
 
@@ -98,6 +96,18 @@ class _VtHost(QObject):
             pulse.start()
 
     @Slot()
+    def reset(self) -> None:
+        """Clear the renderer before it is attached to another PTY."""
+        self._vt.reset()
+        self._vt.out.clear()
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._history_sent_version = -1
+        self._dirty = True
+        pulse = self._pulse
+        if pulse is not None and not pulse.isActive():
+            pulse.start()
+
+    @Slot()
     def _emit_snapshot(self) -> None:
         if not self._dirty:
             pulse = self._pulse
@@ -140,7 +150,11 @@ class _VtHost(QObject):
 
 
 class TerminalGrid(QQuickPaintedItem):
+    # User input and terminal-generated replies travel in opposite directions.
+    # Keeping them on separate signals prevents device/status replies (for
+    # example cursor reports) from being mistaken for typed text.
     dataProduced = Signal(str)
+    terminalReplyProduced = Signal(str)
     resized = Signal(int, int)
     # offset, maximum offset, visible page height.  The QML host uses this
     # for a real scrollbar instead of guessing from the painted surface.
@@ -148,6 +162,7 @@ class TerminalGrid(QQuickPaintedItem):
     ready = Signal()
     _bytesIn = Signal(object)
     _resizeTo = Signal(int, int)
+    _reset = Signal()
 
     def __init__(self, parent: QQuickItem | None = None) -> None:
         super().__init__(parent)
@@ -213,8 +228,9 @@ class TerminalGrid(QQuickPaintedItem):
         self._host.moveToThread(self._thread)
         self._bytesIn.connect(self._host.feed, Qt.ConnectionType.QueuedConnection)
         self._resizeTo.connect(self._host.resize, Qt.ConnectionType.QueuedConnection)
+        self._reset.connect(self._host.reset, Qt.ConnectionType.QueuedConnection)
         self._host.snapshotReady.connect(self._apply_snapshot)
-        self._host.repliesReady.connect(self.dataProduced.emit)
+        self._host.repliesReady.connect(self.terminalReplyProduced.emit)
         self._thread.started.connect(self._host.start)
         app = QGuiApplication.instance()
         if app is not None:
@@ -230,6 +246,25 @@ class TerminalGrid(QQuickPaintedItem):
 
     def vt(self) -> MiniVt:
         return self._vt
+
+    def reset_terminal(self) -> None:
+        """Drop all visible state before reusing this grid for a new PTY."""
+        self._vt.reset()
+        self._vt.out.clear()
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._snap = None
+        self._view_offset = 0
+        self._last_scroll_metrics = None
+        self._selection_anchor = None
+        self._selection_cursor = None
+        self._selecting = False
+        self._selection_moved = False
+        self._selection_passthrough_click = False
+        self._cursor_on = True
+        if self._thread is not None and self._thread.isRunning():
+            self._reset.emit()
+        self._emit_scroll_metrics()
+        self._touch()
 
     def _stop_worker(self) -> None:
         thread = self._thread
@@ -250,7 +285,9 @@ class TerminalGrid(QQuickPaintedItem):
         except (AttributeError, TypeError, RuntimeError):
             pass
         try:
-            self._host.repliesReady.disconnect(self.dataProduced.emit)
+            self._host.repliesReady.disconnect(
+                self.terminalReplyProduced.emit
+            )
         except (AttributeError, TypeError, RuntimeError):
             pass
         if thread.isRunning():
@@ -557,7 +594,7 @@ class TerminalGrid(QQuickPaintedItem):
             return
         blob = "".join(self._vt.out)
         self._vt.out.clear()
-        self.dataProduced.emit(blob)
+        self.terminalReplyProduced.emit(blob)
 
     def _refit(self) -> None:
         width = int(self.width())

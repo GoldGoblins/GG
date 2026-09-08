@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the desktop target is POSIX
+    fcntl = None
 
 from backend.grok_worker_contract import ENGINE_GROK_TUI, GROK_CWD
 
@@ -34,8 +42,7 @@ def _empty() -> dict[str, Any]:
     }
 
 
-def load_catalog(path: Path | None = None) -> dict[str, Any]:
-    target = path or CATALOG_PATH
+def _read_catalog(target: Path) -> dict[str, Any]:
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
@@ -49,8 +56,78 @@ def load_catalog(path: Path | None = None) -> dict[str, Any]:
     payload["memory"] = MEMORY
     payload["cwd"] = str(GROK_CWD)
     payload["sessions"] = [row for row in rows if isinstance(row, dict)]
+    return payload
+
+
+@contextmanager
+def _catalog_lock(target: Path):
+    """Serialize catalog read/modify/write operations across both motors."""
+    handle = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle = (target.with_name(target.name + ".lock")).open(
+            "a+", encoding="utf-8"
+        )
+    except OSError:
+        # Preserve the old best-effort behavior if the state directory is not
+        # writable. The caller's atomic write will still fail closed.
+        yield
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _write_catalog_unlocked(payload: dict[str, Any], target: Path) -> None:
+    """Atomically replace a catalog; caller owns the per-file lock."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix="." + target.name + ".",
+        dir=str(target.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def load_catalog(path: Path | None = None) -> dict[str, Any]:
+    target = path or CATALOG_PATH
+    payload = _read_catalog(target)
     if target == CATALOG_PATH and _ensure_project_sessions(payload):
-        save_catalog(payload, target)
+        # Re-read while holding the lock so a simultaneous GROK/GPT append is
+        # never overwritten by the project-session seed write.
+        with _catalog_lock(target):
+            payload = _read_catalog(target)
+            if _ensure_project_sessions(payload):
+                try:
+                    _write_catalog_unlocked(payload, target)
+                except OSError:
+                    pass
     return payload
 
 
@@ -92,31 +169,26 @@ def _ensure_project_sessions(catalog: dict[str, Any]) -> bool:
 def save_catalog(payload: dict[str, Any], path: Path | None = None) -> None:
     target = path or CATALOG_PATH
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(payload, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        with _catalog_lock(target):
+            _write_catalog_unlocked(payload, target)
     except OSError:
         return
 
 
-def remember_session(
+def _remember_in_catalog(
+    catalog: dict[str, Any],
     session_id: str,
-    engine: str = ENGINE_GROK_TUI,
-    path: Path | None = None,
-) -> dict[str, Any]:
+    engine: str,
+) -> bool:
     sid = str(session_id or "").strip()
-    motor = str(engine or ENGINE_GROK_TUI).strip() or ENGINE_GROK_TUI
-    catalog = load_catalog(path)
     if not sid:
-        return catalog
+        return False
     for row in catalog["sessions"]:
         if str(row.get("session_id") or "") == sid:
             if not row.get("engine"):
-                row["engine"] = motor
-            save_catalog(catalog, path)
-            return catalog
+                row["engine"] = engine
+                return True
+            return False
     next_n = 1
     for row in catalog["sessions"]:
         try:
@@ -129,10 +201,31 @@ def remember_session(
         {
             "n": next_n,
             "session_id": sid,
-            "engine": motor,
+            "engine": engine,
         }
     )
-    save_catalog(catalog, path)
+    return True
+
+
+def remember_session(
+    session_id: str,
+    engine: str = ENGINE_GROK_TUI,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    sid = str(session_id or "").strip()
+    motor = str(engine or ENGINE_GROK_TUI).strip() or ENGINE_GROK_TUI
+    target = path or CATALOG_PATH
+    with _catalog_lock(target):
+        catalog = _read_catalog(target)
+        changed = False
+        if target == CATALOG_PATH:
+            changed = _ensure_project_sessions(catalog)
+        changed = _remember_in_catalog(catalog, sid, motor) or changed
+        if changed:
+            try:
+                _write_catalog_unlocked(catalog, target)
+            except OSError:
+                pass
     return catalog
 
 
@@ -141,9 +234,50 @@ def sync_owned(
     engine: str = ENGINE_GROK_TUI,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    catalog = load_catalog(path)
-    for sid in session_ids:
-        catalog = remember_session(str(sid), engine=engine, path=path)
+    target = path or CATALOG_PATH
+    motor = str(engine or ENGINE_GROK_TUI).strip() or ENGINE_GROK_TUI
+    with _catalog_lock(target):
+        catalog = _read_catalog(target)
+        changed = False
+        if target == CATALOG_PATH:
+            changed = _ensure_project_sessions(catalog)
+        for sid in sorted({str(item) for item in session_ids}):
+            changed = _remember_in_catalog(catalog, sid, motor) or changed
+        if changed:
+            try:
+                _write_catalog_unlocked(catalog, target)
+            except OSError:
+                pass
+    return catalog
+
+
+def forget_session(
+    session_id: str,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Remove one catalog pointer without touching the real session file."""
+    sid = str(session_id or "").strip()
+    target = path or CATALOG_PATH
+    with _catalog_lock(target):
+        catalog = _read_catalog(target)
+        changed = False
+        if target == CATALOG_PATH:
+            changed = _ensure_project_sessions(catalog)
+        rows = catalog.get("sessions") or []
+        if sid:
+            kept = [
+                row
+                for row in rows
+                if str(row.get("session_id") or "").strip() != sid
+            ]
+            if len(kept) != len(rows):
+                catalog["sessions"] = kept
+                changed = True
+        if changed:
+            try:
+                _write_catalog_unlocked(catalog, target)
+            except OSError:
+                pass
     return catalog
 
 

@@ -12,6 +12,8 @@ from typing import Any
 SCHEMA = "gg.live-mandate-record.v1"
 GENERAL_ACTION_AUTHORITY = "NONE"
 ACTION_AUTHORITY = "NONE"
+TASK_SCOPED_GENERAL_ACTION_AUTHORITY = "TASK_SCOPED"
+TASK_SCOPED_SCOPE_AUTHORITY = "ALL_TASK_SCOPED_EFFECTS"
 
 STATES = (
     "PENDING",
@@ -21,14 +23,19 @@ STATES = (
     "REVOKED",
 )
 
+# These are control-plane invariants, not effect classes.  Every concrete
+# effect (including network, production, one.com, credentials, deploy and
+# sudo) can be named by the current mandate and carried by its single-use
+# TASK_SCOPED grant.  Only authority bypass, scope drift/reuse and unbounded
+# background execution stay impossible.
 HARD_FORBIDDEN = (
-    "network",
-    "production",
-    "one.com",
-    "credentials",
-    "sudo",
-    "rights expansion",
-    "automatic action authority",
+    "approval bypass",
+    "approval scope drift",
+    "target scope drift",
+    "cross-task grant reuse",
+    "grant replay",
+    "unbounded background autonomy",
+    "automatic authority expansion",
 )
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -467,110 +474,6 @@ def consume(
     next_record["seq"] = latest["seq"] + 1
     next_record["status"] = "CONSUMED"
     return store._append(_finalize(next_record))
-
-
-RAIL_SCHEMA = "gg.mandate-rail.v1"
-
-
-def _short_pending_id(pending_id: str) -> str:
-    if pending_id.startswith("mandate-") and len(pending_id) >= 16:
-        return "mandate-" + pending_id[8:16]
-    return pending_id[:16]
-
-
-def _idle_rail() -> dict[str, Any]:
-    return {
-        "schema": RAIL_SCHEMA,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
-        "action_authority": "NONE",
-        "mandate_status": "NONE",
-        "pending_id": "",
-        "risk_class": "",
-        "capability_human_id": "",
-        "label": "NONE",
-    }
-
-
-def rail_snapshot(
-    *,
-    store: MandateStore | None = None,
-    pending: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    record: dict[str, Any] | None = None
-    pending_id = ""
-    grant_status = ""
-    status = ""
-
-    if isinstance(pending, dict):
-        pending_id = str(pending.get("pending_id") or "")
-        status = str(pending.get("status") or "")
-        grant = pending.get("task_scoped_grant")
-        if isinstance(grant, dict):
-            grant_status = str(grant.get("grant_status") or "")
-        intent = pending.get("action_intent")
-        mandate_result = pending.get("mandate_result")
-        capability = ""
-        risk = ""
-        if isinstance(intent, dict):
-            capability = str(intent.get("capability_human_id") or "")
-            risk = str(intent.get("risk_floor") or "")
-        if not risk and isinstance(mandate_result, dict):
-            request = mandate_result.get("approval_request")
-            if isinstance(request, dict):
-                scope = request.get("approval_scope")
-                if isinstance(scope, dict):
-                    ready = scope.get("ready_core")
-                    if isinstance(ready, dict):
-                        risk = str(ready.get("risk_class") or "")
-        record = {
-            "status": status,
-            "pending_id": pending_id,
-            "capability_human_id": capability,
-            "risk_class": risk,
-            "grant_status": grant_status,
-        }
-    elif store is not None:
-        stored = store.active_record()
-        if stored is not None:
-            record = {
-                "status": stored["status"],
-                "pending_id": stored["pending_id"],
-                "capability_human_id": stored["capability_human_id"],
-                "risk_class": stored["risk_class"],
-                "grant_status": (
-                    "ACTIVE" if stored["status"] == "APPROVED" else ""
-                ),
-            }
-
-    if record is None:
-        return _idle_rail()
-
-    status = str(record.get("status") or "")
-    pending_id = str(record.get("pending_id") or "")
-    short = _short_pending_id(pending_id) if pending_id else ""
-    if status in {"", "WAITING_APPROVAL", "PENDING"}:
-        authority = "WAITING"
-        label = "WAIT " + short if short else "WAITING"
-        mandate_status = "WAITING_APPROVAL"
-    elif status == "APPROVED_VALID" or (
-        status == "APPROVED" and record.get("grant_status") == "ACTIVE"
-    ):
-        authority = "TASK_SCOPED"
-        label = "SCOPED " + short if short else "TASK_SCOPED"
-        mandate_status = "APPROVED_VALID"
-    else:
-        return _idle_rail()
-
-    return {
-        "schema": RAIL_SCHEMA,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
-        "action_authority": authority,
-        "mandate_status": mandate_status,
-        "pending_id": pending_id,
-        "risk_class": str(record.get("risk_class") or ""),
-        "capability_human_id": str(record.get("capability_human_id") or ""),
-        "label": label,
-    }
 
 
 def revoke(

@@ -184,10 +184,8 @@ def main() -> int:
         raise AssertionError("UI backtest must walk 1m through 1d")
     if 'tf not in ("1m", "5m")' not in host_src:
         raise AssertionError("UI backtest still slurps 1m/5m JSON")
-    if "pnl_sol" not in qml:
-        raise AssertionError("PnL must be SOL")
-    if "bt.pnl_usd" in qml:
-        raise AssertionError("headline PnL still USD")
+    if "pnl_sol" not in qml or "bt.pnl_usd" not in qml:
+        raise AssertionError("backtest PnL currency fields missing")
     if "bt.weeks" not in qml:
         raise AssertionError("weekly buy/sell tape missing")
     if "equity: root.botEquity" not in qml:

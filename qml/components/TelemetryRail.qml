@@ -4,16 +4,11 @@ import QtQuick.Controls
 Item {
     id: root
 
-    property string actionAuthority: "NONE"
-    property string mandateLabel: "NONE"
-    property string networkAuthority: "NONE"
     property string modelState: "READY"
     property string engineTarget: "GROK_TUI"
     property string grokWalletJson: "{}"
     property string gptWalletJson: "{}"
     property string bridgeState: "CONNECTED"
-    property string toolAuthority: "GREEN TYPED"
-    property string writeAuthority: "YELLOW CURRENT"
     property bool compactMode: true
     property var snippetModel: null
     property string activeSnippet: ""
@@ -28,17 +23,13 @@ Item {
         + "Inference stays local with network disabled."
 
     readonly property string bridgeDetails:
-        "Composer routes normal text to the local model.\n"
-        + "Explicit /read /search /git /test /run use fixed GREEN Safe Tools.\n"
-        + "/patch-current proposes exact @current changes; "
-        + "/approve-write applies only the bound candidate.\n"
-        + "/help lists Control Plane commands; /stop or the Stop button "
-        + "controls active work.\n"
-        + "/bootstrap creates a verified main.py candidate; "
-        + "/approve-task requires task, candidate SHA and base HEAD.\n"
-        + "Current-QML writes remain proposal-bound, QML-gated and reversible.\n"
-        + "There is no network, orchestrator or terminal authority; "
-        + "shell and arbitrary exec remain NONE."
+        "Skriv vad du vill göra i chatten.\n"
+        + "Om uppgiften behöver ett godkännande frågar chatten en gång: "
+        + "svara ja för att fortsätta eller nej för att avbryta.\n"
+        + "Inga hashvärden, tokens eller specialkommandon behövs.\n"
+        + "Login och 2FA görs synligt av dig när en tjänst frågar efter det.\n"
+        + "Lösenord stannar utanför chat, loggar och filer. Backup, verifiering "
+        + "och rollback hanteras inom den aktuella uppgiften."
 
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
@@ -114,84 +105,6 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         spacing: 10
-
-        GgFrame {
-            width: parent.width
-            leftLegend: "AUTHORITY"
-            rightLegend: root.actionAuthority
-            backgroundColor: "#161616"
-            borderColor: root.frameBorder
-            radius: root.frameRadius
-            compact: true
-
-            Column {
-                width: parent.width
-                spacing: 3
-
-                Repeater {
-                    model: [
-                        {
-                            "k": "THINKING",
-                            "v": "ON",
-                            "c": "#8db89a"
-                        },
-                        {
-                            "k": "TOOLS",
-                            "v": root.toolAuthority,
-                            "c": "#8db89a"
-                        },
-                        {
-                            "k": "WRITE",
-                            "v": root.writeAuthority,
-                            "c": "#c8a97e"
-                        },
-                        {
-                            "k": "MANDATE",
-                            "v": root.mandateLabel,
-                            "c": (
-                                String(root.actionAuthority) === "TASK_SCOPED"
-                                ? "#c8a97e"
-                                : (
-                                    String(root.actionAuthority) === "WAITING"
-                                    ? "#c8a97e"
-                                    : "#a8b0b8"
-                                )
-                            )
-                        },
-                        {
-                            "k": "NETWORK",
-                            "v": root.networkAuthority,
-                            "c": String(root.networkAuthority) === "CONNECTED"
-                                ? "#8db89a"
-                                : "#a8b0b8"
-                        }
-                    ]
-
-                    delegate: Row {
-                        required property var modelData
-                        width: parent.width
-                        spacing: 8
-
-                        Text {
-                            width: 72
-                            text: modelData.k
-                            color: "#c8cdd4"
-                            font.family: "monospace"
-                            font.pixelSize: 12
-                        }
-
-                        Text {
-                            width: Math.max(40, parent.width - 80)
-                            text: modelData.v
-                            color: modelData.c
-                            font.family: "monospace"
-                            font.pixelSize: 12
-                            wrapMode: Text.WordWrap
-                        }
-                    }
-                }
-            }
-        }
 
         GgFrame {
             width: parent.width
@@ -340,7 +253,7 @@ Item {
 
             Text {
                 width: parent.width
-                text: "CHAT → MODEL\nSAFE TOOLS · BOUND\nWRITE · APPROVAL"
+                text: "CHAT → MODEL\nCONNECTED\nLOGIN / 2FA VIA WEB"
                 color: "#c8cdd4"
                 wrapMode: Text.WordWrap
                 font.family: "monospace"

@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from backend import task_scoped_action_grant
+
 
 SCHEMA_COMMAND = "gg.desktop-operator-command.v1"
 SCHEMA_RESULT = "gg.desktop-operator-result.v1"
@@ -45,6 +47,40 @@ BUTTONS = frozenset({"left", "middle", "right"})
 
 class DesktopOperatorError(ValueError):
     pass
+
+
+def _validate_task_scoped_authorization(
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        return task_scoped_action_grant.validate_authorization(value)
+    except task_scoped_action_grant.TaskScopedActionGrantError as exc:
+        raise DesktopOperatorError(
+            "TASK_SCOPED_AUTHORIZATION_INVALID:" + str(exc)
+        ) from exc
+
+
+def _authority_fields(command: dict[str, Any]) -> dict[str, Any]:
+    authorization = _validate_task_scoped_authorization(
+        command.get("task_scoped_authorization")
+    )
+    if authorization is None:
+        return {
+            "action_authority": "NONE",
+            "general_action_authority": GENERAL_ACTION_AUTHORITY,
+            "scope_authority": "NONE",
+            "task_scoped_authorization": None,
+        }
+    return {
+        "action_authority": authorization["action_authority"],
+        "general_action_authority": authorization[
+            "general_action_authority"
+        ],
+        "scope_authority": authorization["scope_authority"],
+        "task_scoped_authorization": authorization,
+    }
 
 
 def ensure_root() -> Path:
@@ -125,6 +161,14 @@ def validate_command(value: Any) -> dict[str, Any]:
         raise DesktopOperatorError("KEY_INVALID")
     if action == "FIND" and not name and not text:
         raise DesktopOperatorError("FIND_REQUIRED")
+    authorization = _validate_task_scoped_authorization(
+        value.get("task_scoped_authorization")
+    )
+    authority = (
+        _authority_fields({"task_scoped_authorization": authorization})
+        if authorization is not None
+        else _authority_fields({})
+    )
     return {
         "schema": SCHEMA_COMMAND,
         "command_id": command_id,
@@ -135,7 +179,7 @@ def validate_command(value: Any) -> dict[str, Any]:
         "y": coord_y,
         "button": button,
         "risk_class": risk_class_for(action),
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        **authority,
         "visible_cursor": True,
         "visual": visual,
     }
@@ -150,7 +194,14 @@ def make_command(
     y: int = 0,
     button: str = "left",
     visual: bool = False,
+    task_scoped_authorization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if task_scoped_authorization is None:
+        task_scoped_authorization = (
+            task_scoped_action_grant.runtime_authorize_effect(
+                "desktop." + str(action or "").strip().lower()
+            )
+        )
     return validate_command(
         {
             "schema": SCHEMA_COMMAND,
@@ -162,6 +213,7 @@ def make_command(
             "y": y,
             "button": button,
             "visual": visual,
+            "task_scoped_authorization": task_scoped_authorization,
         }
     )
 
@@ -182,6 +234,7 @@ def make_result(
     view = ROOT / VIEW_NAME
     if not image and view.is_file():
         image = str(view)
+    authority = _authority_fields(command)
     return {
         "schema": SCHEMA_RESULT,
         "command_id": command.get("command_id"),
@@ -195,7 +248,7 @@ def make_result(
         "y": int(y),
         "names": list(names or [])[:80],
         "image": image,
-        "general_action_authority": GENERAL_ACTION_AUTHORITY,
+        **authority,
         "visible_cursor": True,
         "observation_seq": max(0, int(observation_seq)),
         "stable_frames": max(0, int(stable_frames)),

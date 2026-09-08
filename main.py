@@ -44,10 +44,22 @@ from backend.live_aid.bridge import LiveAidService
 from backend.live_aid import qml_preflight_runner
 from backend.live_aid import repair_model_runner
 from backend.live_aid import post_draft_qml_process_runner
-from backend.chat_context_compiler import compile_chat_prompt
+from backend.chat_context_compiler import (
+    PRIMARY_PROMPT_MAX_CHARS,
+    compile_chat_prompt,
+)
 from backend.natural_safe_tool import parse_natural_safe_tool_command
 from backend.resident_chat_qt import ResidentChatTransport
-from backend.grok_worker_contract import ENGINE_GROK_TUI, ENGINE_GROK_WORKER, GROK_WORKSPACE_ALLOWLIST as WORKSPACE_CONTEXTS, GrokWorkerContractError, normalize_engine_target, resolve_workspace_surface
+from backend.grok_worker_contract import (
+    ENGINE_GPT_TUI,
+    ENGINE_GROK_TUI,
+    ENGINE_GROK_WORKER,
+    ENGINE_LOCAL_QWEN,
+    GROK_WORKSPACE_ALLOWLIST as WORKSPACE_CONTEXTS,
+    GrokWorkerContractError,
+    normalize_engine_target,
+    resolve_workspace_surface,
+)
 
 PROJECT = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT.parents[1]
@@ -72,6 +84,24 @@ PREFLIGHT_RUNNER_PATH = PROJECT / "backend" / "live_aid" / "qml_preflight_runner
 REPAIR_MODEL_RUNNER_PATH = PROJECT / "backend" / "live_aid" / "repair_model_runner.py"
 
 WORKSPACE_CONTEXT_MAX_BYTES = 16384
+GPT_TUI_PROMPT_MAX_CHARS = 16384
+LOCAL_OMNI_CONTEXT_MAX_CHARS = 2200
+
+
+def prompt_for_resident_engine(
+    user_text: str,
+    effective_prompt: str,
+    engine_target: str,
+) -> str:
+    """Choose the prompt representation that is safe for the target UI."""
+    if engine_target == ENGINE_GPT_TUI:
+        # GPTUI has its shared profile layer in Codex developer instructions;
+        # sending the compiled Workbench prompt here would render all of it
+        # as an ordinary, visible user message.
+        return user_text
+    return effective_prompt
+
+
 def resolve_workspace_context(workspace_object_id: str) -> dict[str, object]:
     # Selected Workspace object has no real local context source.
     try:
@@ -79,17 +109,52 @@ def resolve_workspace_context(workspace_object_id: str) -> dict[str, object]:
     except GrokWorkerContractError as exc:
         raise RuntimeError(str(exc)) from exc
 
+
 def build_effective_prompt(
     text: str,
     context_reference: str,
     workspace_object_id: str,
+    *,
+    engine_target: str = ENGINE_LOCAL_QWEN,
 ) -> tuple[str, dict[str, object]]:
     if context_reference != "@current":
         raise RuntimeError(
             "Real Workspace context currently requires @current."
         )
     context = resolve_workspace_context(workspace_object_id)
-    return compile_chat_prompt(text, context_reference, context), context
+    try:
+        from backend.omni_gpt_profiles import build_context as build_omni_context
+
+        full_context = engine_target == ENGINE_GPT_TUI
+        omni_context = build_omni_context(
+            text,
+            max_chars=(14_000 if full_context else LOCAL_OMNI_CONTEXT_MAX_CHARS),
+            include_registry=full_context,
+        )
+    except Exception:
+        # The profile package is guidance, not a reason to take ordinary chat
+        # offline. AGENTS.md and the executable contracts remain in force.
+        omni_context = (
+            "[GG OMNIGPT PROFILE LAYER]\n"
+            "Profile source unavailable; follow AGENTS.md and Idékompassen.\n"
+            "[/GG OMNIGPT PROFILE LAYER]"
+        )
+    prompt_limit = (
+        GPT_TUI_PROMPT_MAX_CHARS
+        if engine_target == ENGINE_GPT_TUI
+        else PRIMARY_PROMPT_MAX_CHARS
+    )
+    return (
+        compile_chat_prompt(
+            text,
+            context_reference,
+            context,
+            omni_context=omni_context,
+            max_chars=prompt_limit,
+        ),
+        context,
+    )
+
 
 def current_clean_head() -> str:
     env = {
@@ -5641,6 +5706,242 @@ def parse_mandate_command(text: str) -> dict[str, object] | None:
 
     return parsed
 
+
+def parse_chat_approval(text: str) -> str | None:
+    """Parse a bare chat approval/rejection for one pending mandate."""
+    value = " ".join(str(text or "").strip().casefold().split())
+    if value in {"ja", "yes", "godkänn", "godkann", "approve", "ok"}:
+        return "APPROVE"
+    if value in {"nej", "no", "avvisa", "reject"}:
+        return "REJECT"
+    return None
+
+
+_CHAT_RESUME_PHRASES = frozenset(
+    {
+        "prova igen",
+        "försök igen",
+        "forsok igen",
+        "kör igen",
+        "kor igen",
+        "fortsätt",
+        "fortsatt",
+        "fortsätt nu",
+        "fortsatt nu",
+        "klar",
+        "klart",
+        "jag är klar",
+        "jag ar klar",
+        "inloggad",
+        "login klar",
+        "inloggningen klar",
+        "2fa klar",
+        "2fa klart",
+        "retry",
+        "try again",
+        "continue",
+    }
+)
+
+
+def parse_chat_resume_request(text: str) -> str | None:
+    """Recognize a short human handoff/resume message.
+
+    These words never create authority on their own.  They only resume the
+    latest already approved chat task, or remind the user that an approval is
+    still waiting.  This keeps phrases such as ``klar`` useful after visible
+    login/2FA without turning an ambiguous sentence into a new task scope.
+    """
+    value = " ".join(str(text or "").strip().casefold().split())
+    value = value.rstrip(".! ")
+    return value if value in _CHAT_RESUME_PHRASES else None
+
+
+_CHAT_ACTION_WORDS = (
+    "publicera",
+    "publicering",
+    "deploy",
+    "driftsätt",
+    "driftsatta",
+    "ändra",
+    "ändras",
+    "uppdatera",
+    "uppdatering",
+    "skriv",
+    "skriva",
+    "lägg till",
+    "ta bort",
+    "radera",
+    "skapa",
+    "kör",
+    "genomför",
+    "återställ",
+    "återställa",
+    "backup",
+    "säkerhetskopiera",
+    "verify",
+    "verifiera",
+    "login",
+    "logga in",
+    "gör",
+    "do ",
+    "change ",
+    "update ",
+    "publish ",
+    "deploy ",
+    "run ",
+    "restore ",
+)
+
+_CHAT_TARGET_WORDS = (
+    "webb",
+    "webbändring",
+    "webbplats",
+    "sajt",
+    "site",
+    "wordpress",
+    "wp-admin",
+    "wp admin",
+    "one.com",
+    "goldgoblins",
+    "produktion",
+    "produktions",
+    "live",
+    "server",
+    "sftp",
+    "ssh",
+    "nätverk",
+    "network",
+    "domän",
+    "dns",
+    "e-post",
+    "email",
+    "kunddata",
+    "orderdata",
+    "lösenord",
+    "password",
+    "credential",
+    "behörighet",
+    "mandat",
+    "scope",
+    "fil",
+    "kod",
+    "app",
+    "desktop",
+    "qml",
+    "main.py",
+)
+
+_CHAT_EXTERNAL_TARGET_WORDS = (
+    "webb",
+    "webbändring",
+    "webbplats",
+    "sajt",
+    "site",
+    "wordpress",
+    "wp-admin",
+    "wp admin",
+    "one.com",
+    "goldgoblins.se",
+    "produktion",
+    "produktions",
+    "live",
+    "server",
+    "sftp",
+    "ssh",
+    "nätverk",
+    "network",
+    "dns",
+    "e-post",
+    "email",
+    "kunddata",
+    "orderdata",
+)
+
+
+def parse_chat_action_request(text: str) -> dict[str, object] | None:
+    """Recognize a concrete action request written in ordinary chat.
+
+    This is deliberately a narrow ingress detector, not an authority grant.
+    It creates a task-bound approval request for high-impact natural language
+    so the user can approve it with ``ja`` or reject it with ``nej``.  A vague
+    conversation such as "gör si" is left as ordinary chat until a target or
+    effect is named.
+    """
+    normalized = " ".join(str(text or "").strip().casefold().split())
+    if not normalized or len(normalized) > 4096:
+        return None
+    if normalized.endswith("?") or normalized.startswith(
+        ("hur ", "vad ", "vilka ", "varför ", "how ", "what ", "why ")
+    ):
+        return None
+    if not any(word in normalized for word in _CHAT_ACTION_WORDS):
+        return None
+    if not any(word in normalized for word in _CHAT_TARGET_WORDS):
+        return None
+
+    external = any(
+        word in normalized for word in _CHAT_EXTERNAL_TARGET_WORDS
+    )
+    allowed_hosts = [
+        host
+        for host in ("goldgoblins.se", "one.com")
+        if host in normalized
+    ]
+    return {
+        "risk_class": "RED" if external else "YELLOW",
+        "capability_human_id": (
+            "chat.task-scoped.external"
+            if external
+            else "chat.task-scoped.local"
+        ),
+        "effect_class": "TASK_SCOPED_EFFECTS",
+        "persistent_write": (
+            "TASK_SCOPED_AFTER_CHAT_APPROVAL"
+            if external
+            else "TASK_SCOPED_LOCAL_WRITE"
+        ),
+        "network": (
+            "TASK_SCOPED_AFTER_CHAT_APPROVAL"
+            if external
+            else "NONE"
+        ),
+        "sudo": (
+            "TASK_SCOPED_AFTER_CHAT_APPROVAL"
+            if external
+            else "NO"
+        ),
+        "external": external,
+        "allowed_hosts": allowed_hosts,
+        "summary": normalized[:512],
+    }
+
+
+def _chat_mandate_sha(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _chat_identity_workspace_context(workspace_object_id: str) -> dict[str, object]:
+    object_id = str(workspace_object_id or "").strip()
+    if not object_id:
+        raise RuntimeError("CHAT_MANDATE_WORKSPACE_ID_EMPTY")
+    return {
+        "object_id": object_id,
+        "source_path": "",
+        "provenance": "REAL_UI_STATE",
+        "sha256": hashlib.sha256(
+            ("identity:" + object_id).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 class ChatBridge(QObject):
     def __init__(self, root: QObject, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -5703,7 +6004,6 @@ class ChatBridge(QObject):
                 mandate_root
             )
             self._live_mandate_store.initialize()
-            self._publish_mandate_rail()
             self._recover_selfdev_records(runtime)
             self._block_unrecoverable_autonomy_records()
         except Exception as exc:
@@ -5715,6 +6015,154 @@ class ChatBridge(QObject):
             root,
             self._set_bridge_activity,
         )
+        surface_host = getattr(self._resident_chat, "_surface_host", None)
+        set_tui_handler = getattr(
+            surface_host,
+            "set_tui_chat_line_handler",
+            None,
+        )
+        if callable(set_tui_handler):
+            set_tui_handler(self._handle_tui_chat_line)
+
+    def _native_tui_engine_active(self) -> bool:
+        try:
+            engine_target = normalize_engine_target(
+                self._root.property("engineTarget")
+            )
+        except GrokWorkerContractError:
+            return False
+        return engine_target in {ENGINE_GPT_TUI, ENGINE_GROK_TUI}
+
+    def _tui_chat_context(self) -> tuple[str, str]:
+        workspace = self._root.findChild(QObject, "workspaceSurface")
+        context_reference = "@current"
+        workspace_object_id = ""
+        if workspace is not None:
+            try:
+                context_reference = str(
+                    workspace.property("currentContextReference") or ""
+                ).strip()
+                workspace_object_id = str(
+                    workspace.property("currentObjectId") or ""
+                ).strip()
+            except (RuntimeError, TypeError):
+                context_reference = "@current"
+                workspace_object_id = ""
+
+        # WorkspaceSurface selects the scratch object on startup.  Keep the
+        # native TUI ingress usable during the short QML initialization gap
+        # as well, without inventing a broad or unbound workspace target.
+        if not workspace_object_id:
+            workspace_object_id = "ws.file.scratch.1"
+        if context_reference not in {"@current", "@workspace"}:
+            context_reference = "@current"
+        if context_reference == "@workspace":
+            context_reference = "@current"
+        return context_reference, workspace_object_id
+
+    def _show_tui_notice(self, terminal_id: str, text: str) -> None:
+        transport = getattr(self, "_resident_chat", None)
+        surface_host = getattr(transport, "_surface_host", None)
+        show = getattr(surface_host, "showChatTerminalNotice", None)
+        if not callable(show):
+            return
+        try:
+            show(str(terminal_id or ""), str(text or ""))
+        except (AttributeError, RuntimeError, TypeError):
+            return
+
+    def _tui_approval_notice(self, action: str) -> str:
+        waiting = [
+            pending
+            for pending in self._pending_mandates.values()
+            if pending.get("status") == "WAITING_APPROVAL"
+        ]
+        if not waiting:
+            return "GG: Det finns ingen väntande godkännandeuppgift."
+        if len(waiting) != 1:
+            return "GG: Flera godkännandeuppgifter väntar; svaret pausades."
+        if action == "APPROVE":
+            return "GG: Ja mottaget. Godkännandet behandlas för uppgiften."
+        return "GG: Nej mottaget. Uppgiften avvisas."
+
+    def _handle_tui_chat_line(self, terminal_id: str, text: str) -> bool:
+        """Route GPTUI conversation and GPT/Grok task lines into chat.
+
+        GPTUI's ordinary submitted lines go through the same Workbench
+        ingress as the composer. Its shared OmniGPT/Idékompass layer is
+        injected into Codex's hidden developer instructions at session start.
+        Concrete task requests and the user's ja/nej gate are handled for
+        both TUIs; slash commands remain native.
+        """
+        terminal_key = str(terminal_id or "").strip()
+        if terminal_key not in {
+            "ws.tui.gpt",
+            "ws.tui.grok",
+        }:
+            return False
+        value = str(text or "").strip()
+        if not value:
+            return False
+
+        chat_approval = parse_chat_approval(value)
+        resume_request = parse_chat_resume_request(value)
+        action_request = parse_chat_action_request(value)
+        waiting_approval = any(
+            pending.get("status") == "WAITING_APPROVAL"
+            for pending in self._pending_mandates.values()
+        )
+        # A bare "ja"/"nej" is special only when this Workbench actually
+        # owns a waiting approval. Otherwise it is ordinary conversation in
+        # the native TUI and must be left for the model; consuming it here
+        # made a normal answer visibly disappear.
+        if chat_approval is not None and not waiting_approval:
+            return False
+        if chat_approval is None and resume_request is not None:
+            if self._latest_chat_native_pending(
+                {"WAITING_APPROVAL", "APPROVED_VALID", "EXECUTION_RUNNING"}
+            ) is None:
+                return False
+        elif (
+            chat_approval is None
+            and action_request is None
+        ):
+            # Ordinary GPTUI conversation must remain native. Codex owns its
+            # own line editor and Enter key; intercepting every submitted line
+            # makes the visible TUI look like it opened a second input and
+            # can discard text already typed on the first one.
+            return False
+
+        context_reference, workspace_object_id = self._tui_chat_context()
+
+        notice = ""
+        if chat_approval is not None:
+            notice = self._tui_approval_notice(chat_approval)
+        elif action_request is not None:
+            notice = (
+                "GG: Uppgiften är mottagen. Jag visar godkännandet här när "
+                "det är klart."
+            )
+
+        # The host clears the native line first. Deferring submit by one
+        # event-loop turn means the approved prompt is then written after
+        # that clear, never before it.
+        def dispatch_line() -> None:
+            try:
+                self.submit(
+                    value,
+                    context_reference,
+                    workspace_object_id,
+                )
+            finally:
+                if notice:
+                    self._show_tui_notice(terminal_key, notice)
+
+        QTimer.singleShot(0, dispatch_line)
+        return True
+
+    def _shutdown_resident_idle_for_task(self) -> None:
+        if not self._native_tui_engine_active():
+            self._resident_chat.shutdown_idle()
 
     def machine_graph_sha256(self) -> str:
         return self._machine_graph.graph_sha256()
@@ -5876,25 +6324,6 @@ class ChatBridge(QObject):
             except Exception:
                 continue
 
-    def _publish_mandate_rail(
-        self,
-        pending: dict[str, object] | None = None,
-    ) -> None:
-        payload = live_mandate_store.rail_snapshot(
-            store=getattr(self, "_live_mandate_store", None),
-            pending=pending if isinstance(pending, dict) else None,
-        )
-        root = getattr(self, "_root", None)
-        setter = getattr(root, "setMandateRail", None) if root is not None else None
-        if callable(setter):
-            setter(
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
-
     def _set_bridge_activity(self, busy: bool, task_id: str = "") -> None:
         setter = getattr(self._root, "setBridgeActivity", None)
         if callable(setter):
@@ -5941,6 +6370,10 @@ class ChatBridge(QObject):
     ) -> tuple[str, dict[str, object]]:
         from backend import context_resolver
 
+        engine_target = normalize_engine_target(
+            self._root.property("engineTarget")
+        )
+
         if not self._context_snapshot_json:
             if context_reference != "@current":
                 raise RuntimeError(
@@ -5952,6 +6385,7 @@ class ChatBridge(QObject):
                 value,
                 context_reference,
                 workspace_object_id,
+                engine_target=engine_target,
             )
 
         if not self._machine_graph_edge_enabled(
@@ -5978,6 +6412,7 @@ class ChatBridge(QObject):
             value,
             "@current",
             primary_object_id,
+            engine_target=engine_target,
         )
 
         object_ids = plan["objectIds"]
@@ -6172,6 +6607,320 @@ class ChatBridge(QObject):
             target_source_revision=str(workspace_context["sha256"]),
         )
 
+    def _build_chat_native_mandate(
+        self,
+        *,
+        user_text: str,
+        chat_scope: dict[str, object],
+        workspace_context: dict[str, object],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Build the internal, hash-bound record behind plain chat approval.
+
+        The user-facing ingress is natural language.  The hashes below stay
+        internal and bind the approval to this exact instruction, workspace
+        target and source revision; they are never required from the user.
+        """
+        object_id = str(
+            workspace_context.get("object_id") or ""
+        ).strip()
+        source_revision = str(
+            workspace_context.get("sha256") or ""
+        ).strip()
+        source_path = str(
+            workspace_context.get("source_path") or "(identity-only)"
+        ).strip()
+        if not object_id or len(source_revision) != 64:
+            raise RuntimeError("CHAT_MANDATE_WORKSPACE_BINDING_INVALID")
+        if any(char not in "0123456789abcdef" for char in source_revision):
+            raise RuntimeError("CHAT_MANDATE_SOURCE_REVISION_INVALID")
+
+        normalized = " ".join(str(user_text).split())[:4096]
+        if not normalized:
+            raise RuntimeError("CHAT_MANDATE_USER_TEXT_EMPTY")
+
+        task_id = "chat-" + _chat_mandate_sha(
+            {
+                "text": normalized,
+                "object_id": object_id,
+                "source_revision": source_revision,
+            }
+        )[:32]
+        origin_id = "workbench-" + _chat_mandate_sha(object_id)[:32]
+        risk_class = str(chat_scope.get("risk_class") or "RED")
+        capability_id = str(
+            chat_scope.get("capability_human_id")
+            or "chat.task-scoped.external"
+        )
+        effect_class = str(
+            chat_scope.get("effect_class") or "TASK_SCOPED_EFFECTS"
+        )
+        external = bool(chat_scope.get("external"))
+
+        action_material = {
+            "task_id": task_id,
+            "origin_id": origin_id,
+            "capability_human_id": capability_id,
+            "target_object_id": object_id,
+            "target_source_revision": source_revision,
+            "effect_class": effect_class,
+            "risk_floor": risk_class,
+            "user_text": normalized,
+        }
+        action_binding = _chat_mandate_sha(action_material)
+        state_revision = _chat_mandate_sha(
+            {
+                "task_id": task_id,
+                "object_id": object_id,
+                "source_revision": source_revision,
+                "state": "READY_FOR_CHAT_APPROVAL",
+            }
+        )
+        action_trace = _chat_mandate_sha(
+            {
+                "action": "chat-task-scoped-command",
+                "action_binding": action_binding,
+            }
+        )
+        selected_action = _chat_mandate_sha(
+            {
+                "task_id": task_id,
+                "action_binding": action_binding,
+            }
+        )
+
+        forbidden_scope = [
+            "all data outside the explicitly named Gold Goblins web changes",
+            "GA4/GSC",
+            "payment data",
+            "customer/order data",
+            "DNS",
+            "e-mail",
+            "other user roles",
+            "plugin/theme updates",
+            "passwords or secrets in chat, logs or files",
+            "approval bypass",
+            "approval scope drift",
+            "target scope drift",
+            "cross-task grant reuse",
+            "grant replay",
+            "unbounded background autonomy",
+            "automatic authority expansion",
+            "sudo unless separately named and approved",
+        ]
+        scope = [
+            "the exact user instruction written in this chat",
+            "the bound workspace target: " + object_id,
+            "the bound source revision: " + source_revision,
+            "the explicitly named Gold Goblins changes only",
+            "backup before a persistent change",
+            "live verification after a change",
+            "rollback or restoration when verification fails",
+            "TASK_SCOPED authority only after chat approval",
+        ]
+        if external:
+            scope.extend(
+                [
+                    "visible user-authenticated WordPress path",
+                    "goldgoblins.se and one.com only when named by this task",
+                    "network/production/deploy/write only as named by this task",
+                    "credentials entered by the user in the visible auth flow",
+                    "user-controlled login and 2FA",
+                ]
+            )
+
+        ready_core = {
+            "owner": "GG",
+            "goal": normalized,
+            "expected_value": (
+                "Carry out only the explicitly named chat instruction with "
+                "task-scoped authority, verification and rollback."
+            ),
+            "scope": scope,
+            "forbidden_scope": forbidden_scope,
+            "risk_class": risk_class,
+            "stop_conditions": [
+                "workspace or source revision drift",
+                "scope or target drift",
+                "backup unavailable before a persistent change",
+                "live verification or rollback unavailable",
+                "visible user authentication or 2FA is required",
+                "a password or secret is requested in chat, logs or files",
+                "an effect is outside the exact user instruction",
+            ],
+            "expected_artifacts": [
+                "task-bound approval record",
+                "backup before persistent change",
+                "live verification result",
+                "rollback result when needed",
+            ],
+            "acceptance_criteria": [
+                "the original chat instruction is preserved",
+                "no action starts before ja/yes",
+                "ja/yes activates TASK_SCOPED authority for this task only",
+                "all explicitly named effects remain target-bound",
+                "ordinary chat cannot expand the approved scope",
+            ],
+        }
+        approval_scope = {
+            "ready_core": copy.deepcopy(ready_core),
+            "selected_action_node_id": selected_action,
+            "action_trace_sha256": action_trace,
+            "state_base_revision": state_revision,
+        }
+        scope_revision = _chat_mandate_sha(
+            {
+                "task_id": task_id,
+                "origin_id": origin_id,
+                "approval_scope": approval_scope,
+            }
+        )
+        source_binding = {
+            "task_envelope_sha256": _chat_mandate_sha(
+                {"task_id": task_id, "text": normalized}
+            ),
+            "goal_chain_sha256": _chat_mandate_sha(
+                {"goal": normalized, "object_id": object_id}
+            ),
+            "action_trace_sha256": action_trace,
+            "hypothesis_state_sha256": _chat_mandate_sha(
+                {"decision": "CHAT_TASK_SCOPED_APPROVAL"}
+            ),
+            "state_base_capture_sha256": _chat_mandate_sha(
+                {"state_base_revision": state_revision}
+            ),
+            "revalidation_result_sha256": _chat_mandate_sha(
+                {"result": "REVALIDATED", "source_revision": source_revision}
+            ),
+        }
+        request: dict[str, object] = {
+            "schema": "gg.mandate-approval-request.v1",
+            "task_id": task_id,
+            "origin_id": origin_id,
+            "approval_scope": approval_scope,
+            "source_binding": source_binding,
+            "mandate_requirement": "EXPLICIT_REQUIRED",
+            "approval_scope_revision": scope_revision,
+        }
+        request["request_capture_sha256"] = _chat_mandate_sha(request)
+        request_capture = str(request["request_capture_sha256"])
+
+        source_envelope = {
+            "schema": "gg.chat-native-source.v1",
+            "task_id": task_id,
+            "origin_id": origin_id,
+            "original_expression": normalized,
+            "ready_core": copy.deepcopy(ready_core),
+            "workspace_object_id": object_id,
+            "source_path": source_path,
+            "source_revision": source_revision,
+        }
+        evaluation_context = {
+            "source_envelope": source_envelope,
+            "goal_chain": {
+                "schema": "gg.chat-native-goal-chain.v1",
+                "task_id": task_id,
+                "goal": normalized,
+                "why": "The user named this task directly in chat.",
+            },
+            "hypothesis_state": {
+                "schema": "gg.chat-native-hypothesis.v1",
+                "decision": "CHAT_TASK_SCOPED_APPROVAL",
+                "source_revision": source_revision,
+            },
+            "state_base": {
+                "schema": "gg.chat-native-state-base.v1",
+                "task_id": task_id,
+                "origin_id": origin_id,
+                "state_base_revision": state_revision,
+                "source_revision": source_revision,
+            },
+            "ledger_records": [],
+            "memory_records": [],
+        }
+        action_intent: dict[str, object] = {
+            "schema": "gg.chat-native-action-intent.v1",
+            "task_id": task_id,
+            "origin_id": origin_id,
+            "state_base_revision": state_revision,
+            "goal_chain_sha256": source_binding["goal_chain_sha256"],
+            "capability_action_node_id": selected_action,
+            "action_trace_sha256": action_trace,
+            "capability_human_id": capability_id,
+            "target_object_id": object_id,
+            "target_source_revision": source_revision,
+            "effect_class": effect_class,
+            "risk_floor": risk_class,
+            "persistent_write": str(
+                chat_scope.get("persistent_write") or "TASK_SCOPED_LOCAL_WRITE"
+            ),
+            "model_inference": False,
+            "network": str(chat_scope.get("network") or "NONE"),
+            "sudo": str(chat_scope.get("sudo") or "NO"),
+            "capability_execution_profile_requirement": (
+                "TASK_SCOPED_CHAT_APPROVAL"
+            ),
+            "action_authority": "NONE",
+            "proposal_binding_sha256": action_binding,
+            "binding_sha256": action_binding,
+            "approval_summary": str(
+                chat_scope.get("summary") or normalized[:512]
+            ),
+        }
+        mandate_result: dict[str, object] = {
+            "schema": "gg.chat-native-mandate-result.v1",
+            "status": "VALIDATED",
+            "reason_code": "CHAT_TASK_SCOPED_APPROVAL_REQUEST",
+            "task_id": task_id,
+            "handoff_id": "chat-handoff-" + action_binding[:24],
+            "assigned_participant": (
+                "GG-Webmaster" if external else "GG-AI-installator"
+            ),
+            "creator_actor": "human:chat",
+            "request_capture_sha256": request_capture,
+            "mandate_requirement": "EXPLICIT_REQUIRED",
+            "canonical_request_mutated": False,
+            "mandate_assertion_created": False,
+            "mandate_evaluated": False,
+            "capability_execution": False,
+            "participant_execution": False,
+            "action_authority": "NONE",
+            "source_binding": source_binding,
+            "approval_request": request,
+            "evaluation_context": evaluation_context,
+        }
+        return mandate_result, action_intent
+
+    def _capture_chat_native_mandate(
+        self,
+        *,
+        user_text: str,
+        chat_scope: dict[str, object],
+        workspace_context: dict[str, object],
+        context_reference: str,
+        workspace_object_id: str,
+    ) -> str:
+        mandate_result, action_intent = self._build_chat_native_mandate(
+            user_text=user_text,
+            chat_scope=chat_scope,
+            workspace_context=workspace_context,
+        )
+        pending_id = self._capture_pending_mandate(
+            mandate_result=mandate_result,
+            action_intent=action_intent,
+            user_text=user_text,
+            route_decision=None,
+            context_reference=context_reference,
+            workspace_object_id=workspace_object_id,
+            approval_summary=str(
+                chat_scope.get("summary") or user_text[:512]
+            ),
+        )
+        pending = self._pending_mandates[pending_id]
+        pending["approval_mode"] = "CHAT_NATIVE_TASK_SCOPED"
+        pending["chat_scope"] = copy.deepcopy(chat_scope)
+        pending["operator_ready"] = False
+        return pending_id
+
     def _capture_pending_mandate(
         self,
         *,
@@ -6181,6 +6930,7 @@ class ChatBridge(QObject):
         route_decision: object | None,
         context_reference: str,
         workspace_object_id: str,
+        approval_summary: str | None = None,
     ) -> str:
         if mandate_result.get("status") != "VALIDATED":
             raise RuntimeError("PENDING_MANDATE_SOURCE_NOT_VALIDATED")
@@ -6243,9 +6993,19 @@ class ChatBridge(QObject):
             "action_intent": copy.deepcopy(action_intent),
             "mandate_result": copy.deepcopy(mandate_result),
             "evaluation_context": copy.deepcopy(evaluation_context),
+            "approval_summary": (
+                str(approval_summary).strip()[:512]
+                if approval_summary
+                else str(
+                    action_intent.get("capability_human_id")
+                    or "the named chat action"
+                )
+            ),
             "approval_receipt": None,
             "approver_id": None,
             "mandate_assertion_sha256": None,
+            "task_scoped_authorization": None,
+            "task_scoped_runtime_scope_path": None,
             "execution_eligibility": None,
             "execution_state": "UNUSED",
             "execution_receipt": None,
@@ -6266,9 +7026,6 @@ class ChatBridge(QObject):
                     self._live_mandate_store,
                     pending,
                 )
-            publisher = getattr(self, "_publish_mandate_rail", None)
-            if callable(publisher):
-                publisher(pending)
         except Exception:
             self._pending_mandates.pop(
                 pending_id,
@@ -6276,51 +7033,243 @@ class ChatBridge(QObject):
             )
             raise
 
-        approve_command = (
-            "/approve-mandate "
-            + pending_id
-            + " "
-            + str(scope_revision)
-            + " <approver_id>"
-        )
-        reject_command = (
-            "/reject-mandate " + pending_id + " " + str(scope_revision)
-        )
-
         self._append(
             "GG MANDATE",
             "APPROVAL_REQUIRED",
             (
-                "Explicit mänskligt mandat krävs innan denna capability får gå vidare.\n"
-                "WHY: "
-                + (pending["route_why"] or user_text)
-                + "\nCAPABILITY: "
-                + str(action_intent["capability_human_id"])
+                "Godkännande krävs innan den här åtgärden kan fortsätta.\n"
+                "ÅTGÄRD: "
+                + str(pending["approval_summary"])
                 + "\nRISK: "
                 + str(action_intent["risk_floor"])
-                + "\nTARGET: "
-                + str(action_intent["target_object_id"])
-                + "\nTARGET_SHA256: "
-                + str(action_intent["target_source_revision"])
-                + "\nEFFECT: "
-                + str(action_intent["effect_class"])
-                + "\nSTATE_BASE_REVISION: "
-                + str(action_intent["state_base_revision"])
-                + "\nREQUEST_CAPTURE_SHA256: "
-                + str(request_capture)
-                + "\nAPPROVAL_SCOPE_REVISION: "
-                + str(scope_revision)
-                + "\n\nGodkänn med explicit mänsklig approver-id:\n"
-                + approve_command
-                + "\n\nAvvisa med:\n"
-                + reject_command
-                + "\n\nIngen K7-L/capability execution sker i D66B."
+                + "\n\nSvara bara `ja` för att godkänna eller `nej` för att avvisa.\n"
+                + "Jag kopplar svaret automatiskt till just den här uppgiften."
             ),
             context_reference + " · " + workspace_object_id,
             "WAITING_FOR_USER",
             32,
         )
         return pending_id
+
+    def _approve_chat_native_mandate(
+        self,
+        *,
+        pending_id: str,
+        pending: dict[str, object],
+        approver_id: str,
+        request: dict[str, object],
+        action_intent: dict[str, object],
+        current_manifest_sha256: str,
+        context_reference: str,
+        workspace_object_id: str,
+        persist_action_approval: object,
+    ) -> None:
+        """Turn a plain-chat ``ja`` into the task-scoped grant.
+
+        This path intentionally stages the approved task for the existing
+        visible operators.  It does not pretend that a browser login, 2FA,
+        backup or live verification happened merely because the user said
+        ``ja``.
+        """
+        store = getattr(self, "_live_mandate_store", None)
+        if store is None:
+            raise RuntimeError("LIVE_MANDATE_STORE_UNAVAILABLE")
+
+        request_capture = str(pending.get("request_capture_sha256") or "")
+        scope_revision = str(
+            pending.get("approval_scope_revision") or ""
+        )
+        task_id = str(request.get("task_id") or "")
+        assertion_material = {
+            "schema": "gg.chat-native-mandate-assertion.v1",
+            "decision": "APPROVE",
+            "approver_id": approver_id,
+            "task_id": task_id,
+            "request_capture_sha256": request_capture,
+            "approval_scope_revision": scope_revision,
+        }
+        assertion_sha = _chat_mandate_sha(assertion_material)
+        receipt = {
+            "schema": "gg.mandate-evaluation-result.v1",
+            "request_capture_sha256": request_capture,
+            "approval_scope_revision": scope_revision,
+            "current_approval_scope_revision": scope_revision,
+            "mandate_assertion_sha256": assertion_sha,
+            "result": "MANDATE_VALID",
+            "reason_code": "APPROVAL_SCOPE_MATCH",
+        }
+        approved_record = live_mandate_store.approve(
+            store,
+            request_capture_sha256=request_capture,
+            approval_scope_revision=scope_revision,
+            approver_id=approver_id,
+            mandate_assertion_sha256=assertion_sha,
+            evaluation_receipt=copy.deepcopy(receipt),
+        )
+        grant = task_scoped_action_grant.issue_from_approved_record(
+            approved_record
+        )
+        authorization = task_scoped_action_grant.authorize_effect(
+            grant,
+            effect=str(
+                action_intent.get("effect_class")
+                or "TASK_SCOPED_EFFECTS"
+            ),
+            current_target_object_id=str(
+                action_intent["target_object_id"]
+            ),
+            current_target_source_revision=str(
+                action_intent["target_source_revision"]
+            ),
+        )
+
+        pending["status"] = "APPROVED_VALID"
+        pending["approver_id"] = approver_id
+        pending["approval_receipt"] = copy.deepcopy(receipt)
+        pending["mandate_assertion_sha256"] = assertion_sha
+        pending["task_scoped_grant"] = grant
+        pending["task_scoped_authorization"] = authorization
+        chat_scope = pending.get("chat_scope")
+        allowed_hosts = (
+            chat_scope.get("allowed_hosts", [])
+            if isinstance(chat_scope, dict)
+            else []
+        )
+        runtime_scope_path = task_scoped_action_grant.publish_runtime_scope(
+            grant,
+            store_root=Path(store.root),
+            allowed_hosts=allowed_hosts,
+        )
+        pending["task_scoped_runtime_scope_path"] = str(runtime_scope_path)
+        pending["execution_eligibility"] = {
+            "schema": "gg.chat-native-execution-eligibility.v1",
+            "result": "TASK_SCOPED_READY",
+            "action_authority": "TASK_SCOPED",
+            "general_action_authority": "TASK_SCOPED",
+            "scope_authority": "ALL_TASK_SCOPED_EFFECTS",
+            "capability_execution": False,
+            "participant_execution": False,
+            "network": action_intent.get("network", "NONE"),
+            "sudo": action_intent.get("sudo", "NO"),
+            "manifest_sha256": current_manifest_sha256,
+        }
+        # The continuity ledger uses UNUSED until the approved task is
+        # actually dispatched.  Operator readiness is tracked separately so
+        # the approval record remains valid before the motor accepts it.
+        pending["execution_state"] = "UNUSED"
+        pending["operator_ready"] = True
+
+        if callable(persist_action_approval):
+            persist_action_approval()
+
+        self._append(
+            "GG MANDATE",
+            "VALID",
+            (
+                "Chatmandatet är godkänt och aktivt för den här uppgiften.\n"
+                "MANDATE: APPROVED_VALID\n"
+                "ACTION_AUTHORITY: TASK_SCOPED\n"
+                "GENERAL_ACTION_AUTHORITY: TASK_SCOPED\n"
+                "SCOPE_AUTHORITY: ALL_TASK_SCOPED_EFFECTS\n"
+                "Den ursprungliga chat-instruktionen är nu bunden till detta "
+                "mål och kan fortsätta via synlig användarautentiserad väg. "
+                "Login, 2FA, backup, verifiering och rollback görs bara när "
+                "den aktuella vägen faktiskt är redo; lösenord skrivs aldrig "
+                "i chatten, loggar eller filer."
+            ),
+            context_reference + " · " + workspace_object_id,
+            "PASS",
+            30,
+        )
+        self._dispatch_approved_chat_task(
+            pending=pending,
+            context_reference=context_reference,
+            workspace_object_id=workspace_object_id,
+        )
+
+    def _dispatch_approved_chat_task(
+        self,
+        *,
+        pending: dict[str, object],
+        context_reference: str,
+        workspace_object_id: str,
+    ) -> None:
+        """Continue the approved instruction through the selected chat motor."""
+        transport = getattr(self, "_resident_chat", None)
+        submit = getattr(transport, "submit", None)
+        if not callable(submit):
+            return
+
+        user_text = str(pending.get("user_text") or "").strip()
+        if not user_text:
+            raise RuntimeError("CHAT_NATIVE_USER_TEXT_LOST")
+        engine_target = normalize_engine_target(
+            self._root.property("engineTarget")
+        )
+        if engine_target == ENGINE_GPT_TUI:
+            # GPTUI has a hidden developer-instruction layer configured when
+            # its Codex session starts. Keep this PTY user turn human-sized;
+            # the full Workbench context must never be echoed into the TUI.
+            prompt = (
+                "GG Workbench: användaren har redan godkänt den här exakta "
+                "uppgiften.\n"
+                + user_text
+            )
+        else:
+            prompt = (
+                "[GG TASK APPROVAL ACTIVE]\n"
+                "The human approved this exact task in the same chat with ja. "
+                "Carry out only the explicitly named effects for this task. "
+                "Use visible user-authenticated paths. The user performs login "
+                "and 2FA when needed. Never put passwords or secrets in chat, "
+                "logs or files. Keep backup, live verification and rollback with "
+                "this task. Do not ask the user for hashes, tokens, mandate "
+                "commands or authority fields; the chat ja/nej answer is the "
+                "only approval interaction. Do not expose internal binding data "
+                "in the user-facing reply.\n\n"
+                "[USER TASK]\n"
+                + user_text
+                + "\n[/USER TASK]"
+            )
+        if engine_target == ENGINE_LOCAL_QWEN:
+            prompt, _ = self._resolved_chat_context(
+                prompt,
+                context_reference,
+                workspace_object_id,
+            )
+        request = contract.validate_request(
+            {
+                "schema": contract.REQUEST_SCHEMA,
+                "request_id": "chat-task-" + uuid.uuid4().hex,
+                "mode": "CHAT",
+                "prompt": prompt,
+            }
+        )
+        accepted = submit(
+            request,
+            context_reference,
+            workspace_object_id,
+            _chat_identity_workspace_context(workspace_object_id),
+        )
+        if accepted is False:
+            raise RuntimeError("CHAT_NATIVE_TASK_DISPATCH_REJECTED")
+        pending["execution_state"] = "DISPATCHED"
+        pending["operator_ready"] = True
+        action_task_continuity.record_action_dispatch(
+            self._task_ledger,
+            pending,
+        )
+        self._append(
+            "GG MANDATE",
+            "DISPATCHED",
+            (
+                "Den godkända chat-instruktionen är skickad till den aktiva "
+                "motorn. Jag fortsätter bara inom den uttryckliga uppgiften."
+            ),
+            context_reference + " · " + workspace_object_id,
+            "RUNNING",
+            30,
+        )
 
     def _submit_mandate(
         self,
@@ -6405,12 +7354,24 @@ class ChatBridge(QObject):
                 pending["status"] = "BLOCKED_STALE"
                 raise RuntimeError("MANIFEST_CHANGED_AFTER_MANDATE_REQUEST")
 
-            workspace = resolve_workspace_context(workspace_object_id)
+            if pending.get("approval_mode") == "CHAT_NATIVE_TASK_SCOPED":
+                workspace = _chat_identity_workspace_context(
+                    workspace_object_id
+                )
+            else:
+                workspace = resolve_workspace_context(workspace_object_id)
             action_intent = pending.get("action_intent")
             if not isinstance(action_intent, dict):
                 pending["status"] = "BLOCKED_STALE"
                 raise RuntimeError("PENDING_ACTION_INTENT_LOST")
-            if workspace.get("sha256") != action_intent.get(
+            current_target_revision = str(workspace.get("sha256") or "")
+            if not current_target_revision and not str(
+                workspace.get("source_path") or ""
+            ):
+                current_target_revision = hashlib.sha256(
+                    ("identity:" + workspace_object_id).encode("utf-8")
+                ).hexdigest()
+            if current_target_revision != action_intent.get(
                 "target_source_revision"
             ):
                 pending["status"] = "BLOCKED_STALE"
@@ -6450,9 +7411,6 @@ class ChatBridge(QObject):
                             pending["approval_scope_revision"]
                         ),
                     )
-                publisher = getattr(self, "_publish_mandate_rail", None)
-                if callable(publisher):
-                    publisher(pending)
                 persist_action_approval()
                 self._append(
                     "GG MANDATE",
@@ -6473,6 +7431,20 @@ class ChatBridge(QObject):
             approver_id = parsed.get("approver_id")
             if not isinstance(approver_id, str):
                 raise RuntimeError("EXPLICIT_HUMAN_APPROVER_ID_MISSING")
+
+            if pending.get("approval_mode") == "CHAT_NATIVE_TASK_SCOPED":
+                self._approve_chat_native_mandate(
+                    pending_id=pending_id,
+                    pending=pending,
+                    approver_id=approver_id,
+                    request=request,
+                    action_intent=action_intent,
+                    current_manifest_sha256=current_manifest_sha256,
+                    context_reference=context_reference,
+                    workspace_object_id=workspace_object_id,
+                    persist_action_approval=persist_action_approval,
+                )
+                return
 
             evaluation = (
                 orchestrator_mandate_evaluation_adapter.evaluate_explicit_approval(
@@ -6595,15 +7567,25 @@ class ChatBridge(QObject):
                         approved_record
                     )
                 )
-            publisher = getattr(self, "_publish_mandate_rail", None)
-            if callable(publisher):
-                publisher(pending)
+                pending["task_scoped_authorization"] = (
+                    task_scoped_action_grant.authorize_effect(
+                        pending["task_scoped_grant"],
+                        effect=str(action_intent["effect_class"]),
+                        current_target_object_id=str(
+                            action_intent["target_object_id"]
+                        ),
+                        current_target_source_revision=str(
+                            action_intent["target_source_revision"]
+                        ),
+                    )
+                )
             persist_action_approval()
 
             grant = pending.get("task_scoped_grant")
             grant_line = (
                 "ACTION_AUTHORITY: TASK_SCOPED\n"
-                "GENERAL_ACTION_AUTHORITY: NONE\n"
+                "GENERAL_ACTION_AUTHORITY: TASK_SCOPED\n"
+                "SCOPE_AUTHORITY: ALL_TASK_SCOPED_EFFECTS\n"
                 "GRANT_SHA256: "
                 + str(grant.get("grant_sha256"))
                 + "\n"
@@ -6648,6 +7630,178 @@ class ChatBridge(QObject):
                 24,
             )
             return
+
+    def _submit_bare_chat_approval(
+        self,
+        action: str,
+        context_reference: str,
+        workspace_object_id: str,
+    ) -> bool:
+        waiting = [
+            pending
+            for pending in self._pending_mandates.values()
+            if pending.get("status") == "WAITING_APPROVAL"
+        ]
+        if not waiting:
+            return False
+        if len(waiting) != 1:
+            self._append(
+                "GG SYSTEM",
+                "MANDATE",
+                "Flera väntande åtgärder finns. Jag pausar tills en enda "
+                "åtgärd återstår; därefter räcker ja eller nej i chatten.",
+                context_reference + " · " + workspace_object_id,
+                "BLOCKED",
+                24,
+            )
+            return True
+
+        pending = waiting[0]
+        pending_id = str(pending.get("pending_id") or "")
+        scope_revision = str(pending.get("approval_scope_revision") or "")
+        parsed: dict[str, object] = {
+            "action": action,
+            "pending_id": pending_id,
+            "approval_scope_revision": scope_revision,
+        }
+        if action == "APPROVE":
+            parsed["approver_id"] = "GG_CHAT"
+        self._shutdown_resident_idle_for_task()
+        self._submit_mandate(parsed, context_reference, workspace_object_id)
+        return True
+
+    def _latest_chat_native_pending(
+        self,
+        statuses: set[str],
+    ) -> dict[str, object] | None:
+        for pending in reversed(list(self._pending_mandates.values())):
+            if pending.get("approval_mode") != "CHAT_NATIVE_TASK_SCOPED":
+                continue
+            if str(pending.get("status") or "") in statuses:
+                return pending
+        return None
+
+    def _resume_chat_native_task(
+        self,
+        resume_text: str,
+        context_reference: str,
+        workspace_object_id: str,
+    ) -> bool:
+        """Resume the latest task after a visible user handoff.
+
+        ``prova igen``/``klar`` is intentionally narrower than approval: it
+        can only continue an existing task that was already approved in this
+        Workbench session.  A waiting task is never approved implicitly.
+        """
+        resume = parse_chat_resume_request(resume_text)
+        if resume is None:
+            return False
+
+        waiting = self._latest_chat_native_pending({"WAITING_APPROVAL"})
+        if waiting is not None:
+            self._append(
+                "GG MANDATE",
+                "APPROVAL_REQUIRED",
+                (
+                    "Den senaste uppgiften väntar fortfarande på ditt "
+                    "godkännande. Svara bara `ja` eller `nej`; `"
+                    + resume
+                    + "` godkänner inte automatiskt."
+                ),
+                context_reference + " · " + workspace_object_id,
+                "WAITING_FOR_USER",
+                32,
+            )
+            return True
+
+        pending = self._latest_chat_native_pending(
+            {"APPROVED_VALID", "EXECUTION_RUNNING"}
+        )
+        if pending is None:
+            self._append(
+                "GG SYSTEM",
+                "CHAT",
+                (
+                    "Jag har ingen redan godkänd chat-uppgift att återuppta. "
+                    "Skriv bara vad som ska göras i chatten, så skapar jag "
+                    "en vanlig ja/nej-begäran automatiskt."
+                ),
+                context_reference + " · " + workspace_object_id,
+                "WAITING",
+                28,
+            )
+            return True
+
+        if (
+            context_reference != pending.get("context_reference")
+            or workspace_object_id != pending.get("workspace_object_id")
+        ):
+            self._append(
+                "GG SYSTEM",
+                "MANDATE",
+                "Den senaste uppgiften hör till en annan aktiv arbetsyta.",
+                context_reference + " · " + workspace_object_id,
+                "BLOCKED",
+                24,
+            )
+            return True
+
+        try:
+            current_manifest_sha256 = hashlib.sha256(
+                (PROJECT / "SOURCE-MANIFEST.json").read_bytes()
+            ).hexdigest()
+            if current_manifest_sha256 != pending.get("manifest_sha256"):
+                pending["status"] = "BLOCKED_STALE"
+                raise RuntimeError("MANIFEST_CHANGED_AFTER_MANDATE_REQUEST")
+
+            if self._active():
+                accepted = self._resident_chat.accept_followup(
+                    (
+                        "The user says the visible login/2FA handoff is "
+                        "complete ("
+                        + resume
+                        + "). Resume the already approved task now. Keep "
+                        "the same task scope, use the visible WEB path, "
+                        "and never request or record a password or secret."
+                    ),
+                    context_reference,
+                    workspace_object_id,
+                )
+                if not accepted:
+                    raise RuntimeError("CHAT_RESUME_FOLLOWUP_REJECTED")
+                self._append(
+                    "GG MANDATE",
+                    "RESUME",
+                    (
+                        "Jag fortsätter den redan godkända uppgiften efter "
+                        "den synliga login/2FA-handofferingen."
+                    ),
+                    context_reference + " · " + workspace_object_id,
+                    "RUNNING",
+                    30,
+                )
+                return True
+
+            self._shutdown_resident_idle_for_task()
+            self._dispatch_approved_chat_task(
+                pending=pending,
+                context_reference=context_reference,
+                workspace_object_id=workspace_object_id,
+            )
+            return True
+        except Exception as exc:
+            self._append(
+                "GG SYSTEM",
+                "MANDATE",
+                "Återupptagning blockerad: "
+                + type(exc).__name__
+                + ":"
+                + str(exc),
+                context_reference + " · " + workspace_object_id,
+                "BLOCKED",
+                24,
+            )
+            return True
 
     def _natural_intent_route(
         self,
@@ -7084,7 +8238,21 @@ class ChatBridge(QObject):
         if not callable(append):
             raise RuntimeError("QML appendRealNode is unavailable.")
 
-        append(author, kind, text, context, state, offset, "")
+        # The approval protocol is deliberately an implementation detail.
+        # Keep its integrity checks and task binding in the runtime, but never
+        # make the operator copy internal names, hashes or tokens from chat.
+        visible_author = "GG TASK" if author == "GG MANDATE" else author
+        visible_kind = "TASK" if kind == "MANDATE" else kind
+        visible_text = self._operator_visible_text(text)
+        append(
+            visible_author,
+            visible_kind,
+            visible_text,
+            context,
+            state,
+            offset,
+            "",
+        )
 
         if self._state is not None:
             task_id = self._state.get("task_id", "")
@@ -7093,6 +8261,48 @@ class ChatBridge(QObject):
                     task_id,
                     kind + "|" + state + "|" + text,
                 )
+
+    @staticmethod
+    def _operator_visible_text(text: str) -> str:
+        """Remove protocol plumbing from the operator-facing chat stream."""
+        hidden_prefixes = (
+            "action_authority:",
+            "general_action_authority:",
+            "scope_authority:",
+            "mandate:",
+            "mandate_assertion_sha256:",
+            "grant_sha256:",
+            "request_capture_sha256:",
+            "approval_scope_revision:",
+            "task_scoped_authorization:",
+        )
+        visible_lines: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            folded = line.casefold()
+            if any(folded.startswith(prefix) for prefix in hidden_prefixes):
+                continue
+            if "hash-bound" in folded or "hashbund" in folded:
+                line = line.replace("hash-bound", "intern uppgiftsbundet")
+                line = line.replace("hashbundna", "interna uppgiftsbundna")
+                line = line.replace("hashbundet", "internt uppgiftsbundet")
+                line = line.replace("hashbund", "internt uppgiftsbundet")
+            line = line.replace("Chatmandatet", "Chat-uppgiften")
+            line = line.replace("chatmandatet", "chat-uppgiften")
+            line = line.replace("Chatmandat", "Chat-uppgift")
+            line = line.replace("chatmandat", "chat-uppgift")
+            line = line.replace("Mandatet", "Uppgiften")
+            line = line.replace("mandatet", "uppgiften")
+            line = line.replace("Mandate", "Task approval")
+            line = line.replace("mandate", "task approval")
+            line = line.replace("MANDATE", "TASK APPROVAL")
+            line = line.replace("action authority NONE", "")
+            line = line.replace("action authority TASK_SCOPED", "")
+            line = line.replace("ACTION AUTHORITY NONE", "")
+            line = line.replace("ACTION AUTHORITY TASK_SCOPED", "")
+            if line.strip():
+                visible_lines.append(line)
+        return "\n".join(visible_lines) or "Uppgiften fortsätter enligt chatten."
 
     def _task_runtime_root(self, task_id: str, kind: str) -> Path:
         if control_contract.TASK_ID_RE.fullmatch(task_id) is None:
@@ -7855,6 +9065,26 @@ class ChatBridge(QObject):
             )
             return
 
+        chat_approval = parse_chat_approval(value)
+        if chat_approval is not None:
+            if self._submit_bare_chat_approval(
+                chat_approval,
+                context_reference,
+                workspace_object_id,
+            ):
+                return
+            # Without a matching local approval, this is ordinary
+            # conversation. The native TUI normally bypasses this method,
+            # but the composer uses it directly and must not silently drop a
+            # perfectly valid answer such as "ja".
+
+        if self._resume_chat_native_task(
+            value,
+            context_reference,
+            workspace_object_id,
+        ):
+            return
+
         if self._active():
             if self._resident_chat.accept_followup(value, context_reference, workspace_object_id):
                 return
@@ -7866,6 +9096,37 @@ class ChatBridge(QObject):
                 "WAITING",
                 28,
             )
+            return
+
+        # Every concrete action written in ordinary chat is a chat-native
+        # task. Capture it before engine dispatch or local source routing so
+        # the same ja/nej flow covers local writes as well as production,
+        # one.com, network and other external effects.
+        early_chat_scope = parse_chat_action_request(value)
+        if early_chat_scope is not None:
+            self._shutdown_resident_idle_for_task()
+            try:
+                self._capture_chat_native_mandate(
+                    user_text=value,
+                    chat_scope=early_chat_scope,
+                    workspace_context=_chat_identity_workspace_context(
+                        workspace_object_id
+                    ),
+                    context_reference=context_reference,
+                    workspace_object_id=workspace_object_id,
+                )
+            except Exception as exc:
+                self._append(
+                    "GG SYSTEM",
+                    "MANDATE",
+                    "Chatmandat kunde inte skapas: "
+                    + type(exc).__name__
+                    + ":"
+                    + str(exc),
+                    context_reference + " · " + workspace_object_id,
+                    "BLOCKED",
+                    26,
+                )
             return
 
         try:
@@ -8000,6 +9261,7 @@ class ChatBridge(QObject):
                 route_decision,
                 workspace_context,
             )
+            chat_scope = parse_chat_action_request(value)
 
         except Exception as exc:
             self._append(
@@ -8012,6 +9274,33 @@ class ChatBridge(QObject):
                 20,
             )
             return
+
+        if chat_scope is not None and (
+            bool(chat_scope.get("external")) or action_proposal is None
+        ):
+            try:
+                self._shutdown_resident_idle_for_task()
+                self._capture_chat_native_mandate(
+                    user_text=value,
+                    chat_scope=chat_scope,
+                    workspace_context=workspace_context,
+                    context_reference=context_reference,
+                    workspace_object_id=workspace_object_id,
+                )
+            except Exception as exc:
+                self._append(
+                    "GG SYSTEM",
+                    "MANDATE",
+                    "Chatmandat kunde inte skapas: "
+                    + type(exc).__name__
+                    + ":"
+                    + str(exc),
+                    context_reference + " · " + workspace_object_id,
+                    "BLOCKED",
+                    26,
+                )
+            return
+
         try:
             if not self._machine_graph_edge_enabled(
                 "call-12"
@@ -8189,8 +9478,24 @@ class ChatBridge(QObject):
                 return
 
         if participant_prepared is None:
-            self._submit_resident_prompt(effective_prompt, context_reference, workspace_object_id, workspace_context)
+            self._submit_resident_prompt(
+                prompt_for_resident_engine(
+                    value,
+                    effective_prompt,
+                    engine_target,
+                ),
+                context_reference,
+                workspace_object_id,
+                workspace_context,
+            )
             return
+
+        if engine_target == ENGINE_GPT_TUI:
+            # Participant handoff prompts are compiled for the host-side
+            # worker path. GPTUI must still receive only a normal-sized user
+            # turn because its shared profile is already hidden at session
+            # startup.
+            effective_prompt = value
 
         request_id = "chat-" + uuid.uuid4().hex
         request = contract.validate_request({"schema": contract.REQUEST_SCHEMA, "request_id": request_id, "mode": "CHAT", "prompt": effective_prompt})
@@ -10486,8 +11791,12 @@ def main() -> int:
 
     if integrations["model"] != "ENABLED_LOCAL_CHAT":
         raise RuntimeError("Local model integration is not enabled.")
-    if integrations["network"] != "DISABLED":
-        raise RuntimeError("Network integration must remain disabled.")
+    if integrations.get("task_scoped_effects") != (
+        "ENABLED_EXPLICIT_HASH_BOUND_MANDATE"
+    ):
+        raise RuntimeError("Task-scoped effect integration mismatch.")
+    if integrations["network"] != "TASK_SCOPED_AFTER_MANDATE":
+        raise RuntimeError("Network integration must remain task-scoped.")
     if integrations["orchestrator"] != "DISABLED":
         raise RuntimeError("Orchestrator must remain disabled.")
     if (
@@ -10651,6 +11960,16 @@ def main() -> int:
         raise RuntimeError("General action authority must remain NONE.")
     if safety["network_authority"] != "NONE":
         raise RuntimeError("Network authority must remain NONE.")
+    if safety.get("task_scoped_general_action_authority") != "TASK_SCOPED":
+        raise RuntimeError("Task-scoped general action authority mismatch.")
+    if safety.get("task_scoped_network_authority") != "TASK_SCOPED":
+        raise RuntimeError("Task-scoped network authority mismatch.")
+    if safety.get("task_scoped_scope_authority") != "ALL_TASK_SCOPED_EFFECTS":
+        raise RuntimeError("Task-scoped scope authority mismatch.")
+    if safety.get("task_scoped_requires") != (
+        "MANDATE_VALID_HASH_BOUND_SINGLE_USE"
+    ):
+        raise RuntimeError("Task-scoped mandate requirement mismatch.")
 
     app = QApplication(sys.argv)
     engine = QQmlApplicationEngine()

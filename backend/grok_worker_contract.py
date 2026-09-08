@@ -12,8 +12,15 @@ from urllib.parse import quote
 ENGINE_LOCAL_QWEN = "LOCAL_QWEN"
 ENGINE_GROK_WORKER = "GROK_WORKER"
 ENGINE_GROK_TUI = "GROK_TUI"
-ENGINE_TARGETS = (ENGINE_LOCAL_QWEN, ENGINE_GROK_WORKER, ENGINE_GROK_TUI, "GPT_TUI")
+ENGINE_GPT_TUI = "GPT_TUI"
+ENGINE_TARGETS = (
+    ENGINE_LOCAL_QWEN,
+    ENGINE_GROK_WORKER,
+    ENGINE_GROK_TUI,
+    ENGINE_GPT_TUI,
+)
 GROK_TUI_TERMINAL_ID = "ws.tui.grok"
+GPT_TUI_TERMINAL_ID = "ws.tui.gpt"
 
 SESSION_SCHEMA = "gg.workbench.grok-worker-session.v1"
 SESSION_STATE_PATH = Path(
@@ -466,6 +473,7 @@ def compose_worker_prompt(
     reference = str(context_reference or "").strip() or "@current"
     user = text if text.endswith("\n") else text + "\n"
     from backend.chat_context_compiler import work_intent
+    from backend.omni_gpt_profiles import build_context as build_omni_context
 
     duty = WORKER_DUTY if work_intent(text) else WORKER_DUTY_TALK
     object_id = str(ident.get("object_id", ""))
@@ -481,6 +489,16 @@ def compose_worker_prompt(
             "copies that into the untitled buffer. The user saves as a "
             "filename they choose. Do not grep, glob, "
             "or read GoldGoblins QML/Python. Do not search SCRATCH_ROOT.\n"
+        )
+    try:
+        omni_context = build_omni_context(text)
+    except Exception:
+        # A missing or malformed optional profile package must not take the
+        # resident chat offline. AGENTS.md still supplies the shared rules.
+        omni_context = (
+            "[GG OMNIGPT PROFILE LAYER]\n"
+            "Profile source unavailable; follow AGENTS.md and Idékompassen.\n"
+            "[/GG OMNIGPT PROFILE LAYER]"
         )
     return (
         "GG_WORKSPACE schema="
@@ -505,6 +523,8 @@ def compose_worker_prompt(
         + duty
         + "\npolicy="
         + WORKER_POLICY
+        + "\n"
+        + omni_context
         + "\nchat=UNIVERSAL. If the user greets, greet back. "
         "Bound current is background until they ask to code or change it.\n"
         + buffer_rule

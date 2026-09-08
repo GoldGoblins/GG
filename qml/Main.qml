@@ -22,13 +22,6 @@ ApplicationWindow {
     property bool followChatTail: true
     property string activeTaskId: ""
     property string engineTarget: "GROK_TUI"
-    readonly property string networkAuthority: (
-        root.engineTarget === "GROK_TUI"
-        || root.engineTarget === "GPT_TUI"
-        || root.engineTarget === "GROK_WORKER"
-    )
-        ? "CONNECTED"
-        : "NONE"
     property string lastSelectedObjectId: ""
     property real alphaChatWidthRatio: 0.31
     property int alphaTelemetryWidth: 168
@@ -40,9 +33,6 @@ ApplicationWindow {
     readonly property var workspace: workspaceLoader.item
     property string grokWalletJson: "{}"
     property string gptWalletJson: "{}"
-    property string mandateRailJson: "{}"
-    property string actionAuthority: "NONE"
-    property string mandateLabel: "NONE"
     property string cryptoStatusJson: "{}"
 
     onSurfaceHostChanged: {
@@ -486,9 +476,6 @@ ApplicationWindow {
             if (!root.shellLoading)
                 root.beginShellLoad("RELOAD")
             Qt.callLater(root.loadNextShellFile)
-        }
-        function onMandateRailChanged(payload) {
-            root.setMandateRail(payload)
         }
         function onWebOperatorCommand(payload) {
             if (root.workspace && root.workspace.applyWebOperator)
@@ -1196,22 +1183,6 @@ ApplicationWindow {
         })
     }
 
-    function setMandateRail(payload) {
-        root.mandateRailJson = String(payload || "{}")
-        try {
-            var parsed = JSON.parse(root.mandateRailJson)
-            if (!parsed || typeof parsed !== "object")
-                parsed = {}
-            root.actionAuthority = String(
-                parsed.action_authority || "NONE"
-            )
-            root.mandateLabel = String(parsed.label || "NONE")
-        } catch (err) {
-            root.actionAuthority = "NONE"
-            root.mandateLabel = "NONE"
-        }
-    }
-
     function setBridgeActivity(busy, taskId) {
         root.bridgeBusy = busy
         root.activeTaskId = busy ? taskId : ""
@@ -1231,13 +1202,11 @@ ApplicationWindow {
         anchors.topMargin: 12
         height: 54
         leftLegend: "GG AI DESKTOP"
-        rightLegend: "AUTHORITY · " + root.actionAuthority
         backgroundColor: root.surface
         borderColor: root.frameBorder
         radius: root.frameRadius
         padding: 12
         leftLegendColor: "#e6edf3"
-        rightLegendColor: root.amber
 
         Item {
             width: parent.width
@@ -2115,9 +2084,6 @@ ApplicationWindow {
                 width: root.alphaTelemetryWidth
                 height: body.height
                 compactMode: true
-                actionAuthority: root.actionAuthority
-                mandateLabel: root.mandateLabel
-                networkAuthority: root.networkAuthority
                 modelState: root.bridgeBusy ? "BUSY" : "READY"
                 engineTarget: root.engineTarget
                 grokWalletJson: root.grokWalletJson
@@ -2138,8 +2104,14 @@ ApplicationWindow {
                     root.activeChatSession = sessionId
                     if (engine === "GPT_TUI" || engine === "GROK_TUI" || engine === "GROK_WORKER" || engine === "LOCAL_QWEN")
                         root.engineTarget = engine
-                    if (engine === "GPT_TUI" && root.surfaceHost)
-                        root.surfaceHost.activateGptTui(sessionId)
+                    if (engine === "GPT_TUI" && root.surfaceHost) {
+                        // Let the visibility binding commit before the host
+                        // validates/resumes the selected PTY.
+                        Qt.callLater(function() {
+                            if (root.surfaceHost)
+                                root.surfaceHost.activateGptTui(sessionId)
+                        })
+                    }
                     if (engine === "GROK_TUI" && root.surfaceHost)
                         root.surfaceHost.resumeGrokTui(sessionId)
                 }

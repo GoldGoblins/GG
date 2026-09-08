@@ -20,8 +20,10 @@ from backend.controlled_information_tools import (
 )
 from backend.resident_chat_runner import classify_runtime_failure
 from backend.grok_worker_contract import (
+    ENGINE_GPT_TUI,
     ENGINE_GROK_TUI,
     ENGINE_GROK_WORKER,
+    GPT_TUI_TERMINAL_ID,
     GROK_TUI_TERMINAL_ID,
     GrokWorkerContractError,
     normalize_engine_target,
@@ -177,6 +179,19 @@ class ResidentChatTransport(QObject):
                 GROK_TUI_TERMINAL_ID, prompt + "\n"
             ):
                 raise ResidentChatQtError("GROK_TUI_STDIN_FAILED")
+            return True
+        if target == ENGINE_GPT_TUI:
+            prompt = str(request.get("prompt") or "")
+            host = self._surface_host
+            if host is None:
+                raise ResidentChatQtError("GPT_TUI_HOST_MISSING")
+            start = getattr(host, "startGptTui", None)
+            if not callable(start) or not start():
+                raise ResidentChatQtError("GPT_TUI_START_FAILED")
+            if prompt and not host.writeChatTerminal(
+                GPT_TUI_TERMINAL_ID, prompt + "\n"
+            ):
+                raise ResidentChatQtError("GPT_TUI_STDIN_FAILED")
             return True
         if target == ENGINE_GROK_WORKER:
             if self._busy:

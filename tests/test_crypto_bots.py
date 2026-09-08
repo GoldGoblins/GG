@@ -17,7 +17,7 @@ def main() -> int:
     crypto_contract.STATE_DIR = tmp
     crypto_trader.reset_book()
     ids = [row["id"] for row in crypto_bots.catalog()]
-    if ids != ["gg", "stoch_rsi", "dca", "dca_swing"]:
+    if ids != ["gg", "stoch_rsi", "dca", "dca_swing", "hybrid"]:
         raise AssertionError("books " + str(ids))
     if crypto_bots.selected() != "gg":
         raise AssertionError("default book")

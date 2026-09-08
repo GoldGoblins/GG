@@ -3,6 +3,7 @@
 GG = house swing. STOCH+RSI = werkkrew StochRSITEMA on our tape.
 DCA = hold SOL, harvest 80% of cycle profit at highs, buy it back at lows.
 DCA+SWING = DCA bag rules with a many-oscillator swing vote for timing.
+HYBRID = GG MTF vote + TimesFM forecast gate + Hummingbot-style paper barriers.
 Not a Freqtrade process. MAINNET not used.
 """
 from __future__ import annotations
@@ -31,6 +32,11 @@ BOOKS = (
         "id": "dca_swing",
         "name": "DCA+SWING",
         "source": "DCA harvest + swing K/D/TEMA/MACD + 20 osc vote",
+    },
+    {
+        "id": "hybrid",
+        "name": "HYBRID",
+        "source": "GG MTF + TimesFM + Hummingbot-style triple barrier (paper)",
     },
 )
 
@@ -70,6 +76,10 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         from backend import crypto_bot_dca_swing
 
         report = crypto_bot_dca_swing.run_backtest(frames)
+    elif bid == "hybrid":
+        from backend import crypto_hybrid
+
+        report = crypto_hybrid.run_backtest(frames)
     else:
         report = crypto_trader.run_flow_backtest(frames)
     report["book"] = bid

@@ -12,6 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.codex_wallet import (
+    CODEX_SESSIONS,
+    CODEX_SESSION_STATE,
+    DESKTOP_CODEX_SESSION_STATE,
+    DESKTOP_CODEX_SESSIONS,
+    load_session_id,
+    session_path,
+)
+
 # Keep the shared notes in the workspace so both TUI motors can read them and
 # the desktop remains usable under the managed filesystem policy.
 ROOT = Path("/home/GG/GoldGoblins/.grok/shared-memory")
@@ -19,11 +28,30 @@ GROK_WORKSPACE_MEMORY = Path("/home/GG/.grok/memory/gg-6b4ad9a5")
 
 
 def _session_path() -> Path | None:
-    try:
-        rows = list(Path("/home/GG/.codex/sessions").rglob("*.jsonl"))
-    except OSError:
-        return None
-    return max(rows, key=lambda p: p.stat().st_mtime) if rows else None
+    # GPTUI owns the desktop pointer, but Codex 0.153.x may still place the
+    # corresponding rollout JSONL in the canonical ~/.codex/sessions root.
+    # Search both roots for the explicit pointer before considering any
+    # legacy/global pointer; otherwise /flush can write the parent session.
+    for state in (DESKTOP_CODEX_SESSION_STATE, CODEX_SESSION_STATE):
+        active = load_session_id(state)
+        if not active:
+            continue
+        for sessions_root in (DESKTOP_CODEX_SESSIONS, CODEX_SESSIONS):
+            selected = session_path(active, sessions_root=sessions_root)
+            if selected is not None:
+                return selected
+        # An explicit GPTUI pointer that has not materialized yet is safer
+        # than silently flushing a different conversation.
+        if state == DESKTOP_CODEX_SESSION_STATE:
+            return None
+    for sessions_root in (DESKTOP_CODEX_SESSIONS, CODEX_SESSIONS):
+        try:
+            rows = list(sessions_root.rglob("*.jsonl"))
+        except OSError:
+            continue
+        if rows:
+            return max(rows, key=lambda path: path.stat().st_mtime)
+    return None
 
 
 def _text(value: Any) -> str:
@@ -177,5 +205,5 @@ def run(command: str) -> str:
                 pass
         return "[GPT hooks] " + (", ".join(hooks) or "none")
     if name in {"/hooks-trust", "/hooks-add"}:
-        return f"[GPT hooks] {name} requires an explicit workspace mandate"
+        return f"[GPT hooks] {name} requires a direct ja in chat for this task"
     return ""

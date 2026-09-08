@@ -72,13 +72,16 @@ def main() -> int:
     )
     for key in (
         "orchestrator",
-        "network",
         "operator_terminal_process",
     ):
         require(
             cfg["integrations"][key] == "DISABLED",
             "Authority expansion: " + key,
         )
+    require(
+        cfg["integrations"]["network"] == "TASK_SCOPED_AFTER_MANDATE",
+        "Network integration is not task-scoped.",
+    )
     require(
         cfg["integrations"]["real_command_execution"]
         == "ENABLED_FIXED_GREEN_SAFE_TOOLS",
@@ -309,6 +312,16 @@ def main() -> int:
     require(
         cfg["safety"]["network_authority"] == "NONE",
         "Network authority changed.",
+    )
+    require(
+        cfg["safety"]["task_scoped_network_authority"] == "TASK_SCOPED"
+        and cfg["safety"]["task_scoped_general_action_authority"]
+        == "TASK_SCOPED"
+        and cfg["safety"]["task_scoped_scope_authority"]
+        == "ALL_TASK_SCOPED_EFFECTS"
+        and cfg["safety"]["task_scoped_requires"]
+        == "MANDATE_VALID_HASH_BOUND_SINGLE_USE",
+        "Task-scoped effect authority contract missing.",
     )
     workspace = cfg["workspace"]
     require(

@@ -10,7 +10,7 @@ from typing import Any
 SCHEMA_ID = "gg.orchestrator-policy-adapter.v1"
 ACTION_AUTHORITY = "NONE"
 ORCHESTRATOR_RELATIVE_PATH = "orchestrator/gg_orchestrator.py"
-ORCHESTRATOR_SHA256 = "2a5c6c744c7a6c34dd9cf583868250851ac2c564e339da2407fe0e41ee6964b3"
+ORCHESTRATOR_SHA256 = "f6fbddd9cdaf31984ae9c6c99bab66aa3622fc098c4946081460ed6a51b97123"
 FIRST_GATE = "idekompassen-2.0"
 
 IDEKOMPASS_REQUIRED = (
@@ -26,15 +26,17 @@ IDEKOMPASS_REQUIRED = (
     "acceptance_criteria",
 )
 
-BLOCKED_EFFECTS = (
+TASK_SCOPED_EFFECTS = (
     "network",
+    "credentials",
     "production",
     "one_com",
     "merge",
     "deploy",
+    "write",
     "sudo",
-    "background_autonomy",
 )
+BLOCKED_EFFECTS = ("unbounded_background_autonomy",)
 
 
 class OrchestratorPolicyAdapterError(RuntimeError):
@@ -220,10 +222,17 @@ def _map_task(prepared: dict[str, Any]) -> dict[str, Any]:
     task["verified_context"] = copy.deepcopy(verified_context)
     task["historical_context"] = {}
     task["rights_expansion"] = False
+    requested_effects = ready_core.get("requested_effects", {})
+    if not isinstance(requested_effects, dict):
+        raise OrchestratorPolicyAdapterError(
+            "REQUESTED_EFFECTS_NOT_OBJECT"
+        )
+    task["task_scoped_scope_authority"] = "ALL_TASK_SCOPED_EFFECTS"
     task["requested_effects"] = {
-        effect: False
-        for effect in BLOCKED_EFFECTS
+        effect: bool(requested_effects.get(effect, False))
+        for effect in TASK_SCOPED_EFFECTS
     }
+    task["requested_effects"]["unbounded_background_autonomy"] = False
     return task
 
 

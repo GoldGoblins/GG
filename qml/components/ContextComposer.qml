@@ -38,6 +38,9 @@ Item {
     property bool chatLampOn: false
     property bool gpuLampPresent: false
     property int diskLampTick: 0
+    readonly property bool nativeTuiTarget:
+        root.engineTarget === "GROK_TUI"
+        || root.engineTarget === "GPT_TUI"
 
     function lampBlink(active, phase) {
         return active && ((root.diskLampTick + phase) % 6) < 3
@@ -79,7 +82,7 @@ Item {
 
     GgFrame {
         id: inputFrame
-        visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+        visible: !root.nativeTuiTarget
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
@@ -298,8 +301,11 @@ Item {
                     id: input
                     width: parent.width - 18
                     height: 22
-                    enabled: true
-                    focus: true
+                    // The native TUI owns the keyboard while GPT/Grok TUI is
+                    // selected.  Leaving this hidden editor focusable lets
+                    // it reclaim focus after the first PTY response.
+                    enabled: !root.nativeTuiTarget
+                    focus: !root.nativeTuiTarget
                     placeholderText: ""
                     color: "#e6edf3"
                     wrapMode: TextEdit.NoWrap
@@ -539,6 +545,7 @@ Item {
     }
 
     Row {
+        id: chatLampRail
         objectName: "chatLampRail"
         anchors.right: parent.right
         anchors.rightMargin: 14

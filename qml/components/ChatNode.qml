@@ -269,7 +269,7 @@ Item {
         Text {
             visible: root.syntheticFixture
             width: parent.width
-            text: "SYNTHETIC FIXTURE · NO EXECUTION · NO AUTHORITY CLAIM"
+            text: "SYNTHETIC FIXTURE · NO EXECUTION"
             color: "#c8a97e"
             font.family: "monospace"
             font.pixelSize: 12

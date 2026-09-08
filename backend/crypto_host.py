@@ -1535,11 +1535,17 @@ def backtest_trader(tfs: tuple[str, ...] | None = None) -> dict[str, Any]:
         ValueError,
         urllib.error.URLError,
         json.JSONDecodeError,
-    ):
+    ) as exc:
+        if crypto_bots.selected() == "hybrid":
+            raise RuntimeError("HYBRID_BACKTEST:" + (str(exc)[:180] or "FAILED")) from exc
         h5, l5, c5, v5 = _ohlcv_for_eval()
         report = crypto_trader.run_backtest(h5, l5, c5, v5)
         report["range"] = "cache-5m"
     payload = status_payload()
     payload["backtest"] = report
-    payload["trader"] = crypto_trader.snapshot()
+    trader = dict(payload.get("trader") or {})
+    trader["backtest"] = report
+    trader["books"] = crypto_bots.catalog()
+    trader["book"] = crypto_bots.selected()
+    payload["trader"] = trader
     return payload

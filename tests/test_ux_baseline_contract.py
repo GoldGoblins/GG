@@ -275,7 +275,6 @@ def main() -> int:
         "body.width * root.alphaChatWidthRatio",
         "width: root.alphaTelemetryWidth",
         'property string engineTarget: "GROK_TUI"',
-        '? "CONNECTED"',
         "parseSurfaceIntent(text)",
         "function beginGrokWorkerStream(",
         'objectName: "grokTuiHost"',
@@ -503,9 +502,19 @@ def main() -> int:
         "function importSiteSqlFromDialog(",
         "IMPORT SQL",
         "function toggleSitePreview()",
+        "function toggleSitePreviewFullscreen()",
         "function ensureSitePreview()",
         "STOP PREVIEW",
         "EDIT IN CODE",
+        'objectName: "workspaceSiteFullscreenButton"',
+        'property bool sitePreviewFullscreen: false',
+        'objectName: "sitePreviewFullscreenWindow"',
+        'objectName: "sitePreviewFullscreenLoader"',
+        'objectName: "sitePreviewFullscreenHoverZone"',
+        "acceptedButtons: Qt.NoButton",
+        "Shortcut {",
+        "showFullScreen()",
+        "Key_Escape",
         "function saveSiteBuffer()",
         'objectName: "workspaceSiteImportStatus"',
         "onSiteImportProgress(",
@@ -561,8 +570,8 @@ def main() -> int:
         "ensureWebEngine" in workspace_surface
         and 'source: active ? "WebPane.qml" : ""' in workspace_surface
         and "function applyWebOperator(" in workspace_surface
-        and "WEB_NOT_FOCUSED" in workspace_surface
-        and 'root.setHostKind("WEB")' not in workspace_surface[workspace_surface.index("function applyWebOperator(") : workspace_surface.index("function flushPendingWebOp(")]
+        and 'root.setHostKind("WEB")' in workspace_surface[workspace_surface.index("function applyWebOperator(") : workspace_surface.index("function flushPendingWebOp(")]
+        and "WEB_NOT_FOCUSED" not in workspace_surface
         and "function playOperator(" in web_pane
         and 'objectName: "webAgentCursor"' in web_pane
         and 'objectName: "deskAgentCursor"' in main_qml
@@ -727,7 +736,7 @@ def main() -> int:
 
     for marker in (
         "Future themes and visual modules can integrate here. ",
-        "A1.2 grants no arbitrary QML, Python, shell, network or ",
+        "Give instructions directly in the chat. If an operation ",
     ):
         require(
             marker in settings_extensions,
@@ -1016,7 +1025,7 @@ def main() -> int:
         "function loadCurrentAuthoringBuffer()",
         "function requestLiveAidAnalysis()",
         "LiveAidObject {",
-        '" · WRITE AUTHORITY NONE"',
+        '"DISK SHA · " + payload.source_sha256',
     ):
         require(
             marker in workspace,
@@ -1127,25 +1136,48 @@ def main() -> int:
     )
 
     for marker in (
-        'property string actionAuthority: "NONE"',
-        'property string mandateLabel: "NONE"',
-        'property string networkAuthority: "NONE"',
         'property string modelState: "READY"',
         'property string bridgeState: "CONNECTED"',
-        'property string toolAuthority: "GREEN TYPED"',
-        'property string writeAuthority: "YELLOW CURRENT"',
         "Local model runner is connected.",
-        "/read /search /git /test /run",
-        "/patch-current",
-        "/approve-write",
-        "/help",
-        "/stop",
-        "/bootstrap",
-        "/approve-task",
-        "proposal-bound, QML-gated and reversible",
-        "no network, orchestrator or terminal authority",
+        "Skriv vad du vill göra i chatten.",
+        "svara ja för att fortsätta eller nej för att avbryta.",
+        "Inga hashvärden, tokens eller specialkommandon behövs.",
+        "Login och 2FA görs synligt av dig",
     ):
         require(marker in telemetry, "Telemetry marker missing: " + marker)
+
+    for forbidden in (
+        'leftLegend: "AUTHORITY"',
+        'rightLegend: root.actionAuthority',
+        "SAFE TOOLS · BOUND",
+        "WRITE · APPROVAL",
+        "mandateRailJson",
+        "setMandateRail",
+        "actionAuthority",
+        "scopeAuthority",
+        "mandateLabel",
+        "networkAuthority",
+    ):
+        require(
+            forbidden not in telemetry,
+            "Telemetry still exposes a legacy authority marker: " + forbidden,
+        )
+    for forbidden in (
+        "mandateRailJson",
+        "setMandateRail",
+        "actionAuthority",
+        "scopeAuthority",
+        "mandateLabel",
+        "networkAuthority",
+    ):
+        require(
+            forbidden not in main_qml,
+            "Main still carries the removed authority rail state: " + forbidden,
+        )
+    require(
+        'rightLegend: "AUTHORITY · " + root.actionAuthority' not in main_qml,
+        "Main header still exposes the legacy authority marker.",
+    )
 
     all_qml = "\n".join(
         p.read_text(encoding="utf-8")

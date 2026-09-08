@@ -49,6 +49,23 @@ def main() -> int:
     assert len(small_prompt) <= PRIMARY_PROMPT_MAX_CHARS
     assert estimate_prompt_tokens(SYSTEM_PROMPT + small_prompt) < 1800
 
+    omni_prompt = compile_chat_prompt(
+        "Jag har en lös idé och vill förstå den innan vi bygger.",
+        "@current",
+        _context(small),
+        omni_context=(
+            "[GG OMNIGPT PROFILE LAYER]\n"
+            "default_lens=GG Idékompassen (always active)\n"
+            "[PROFILE idekompassen]\n"
+            "Bevara ursprungsavsikten och skilj gemensamma upptäckter från beslut.\n"
+            "[/GG OMNIGPT PROFILE LAYER]"
+        ),
+        max_chars=4096,
+    )
+    assert "default_lens=GG Idékompassen (always active)" in omni_prompt
+    assert "[PROFILE idekompassen]" in omni_prompt
+    assert len(omni_prompt) <= 4096
+
     lines = [f"line {index}: ordinary value" for index in range(800)]
     lines[417] = "line 417: workspacePreflightButton triggers real preflight"
     large = "\n".join(lines)

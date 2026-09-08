@@ -183,7 +183,6 @@ Item {
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary =
             "DISK SHA · " + payload.source_sha256
-            + " · WRITE AUTHORITY NONE"
         root.preflightState = "NOT RUN"
         root.preflightSourceText = ""
         root.preflightReportSha256 = ""
@@ -366,6 +365,7 @@ Item {
     property string siteImportStatus: "SITE · waiting for import"
     property bool sitePreviewRunning: false
     property string sitePreviewOrigin: ""
+    property bool sitePreviewFullscreen: false
     property alias snippetModel: siteFileModel
     ListModel { id: siteFileModel }
 
@@ -1157,6 +1157,11 @@ Item {
         var host = root.scratchHost()
         if (!host || !host.webOperatorReport)
             return
+        var authorization = (cmd && cmd.task_scoped_authorization)
+                ? cmd.task_scoped_authorization : null
+        var scoped = authorization
+                && String(authorization.action_authority || "") === "TASK_SCOPED"
+                && String(authorization.general_action_authority || "") === "TASK_SCOPED"
         host.webOperatorReport(JSON.stringify({
             "schema": "gg.web-operator-result.v1",
             "command_id": cmd.command_id,
@@ -1169,7 +1174,11 @@ Item {
             "text": text || "",
             "links": links || [],
             "image": image || "",
-            "general_action_authority": "NONE",
+            "action_authority": scoped ? "TASK_SCOPED" : "NONE",
+            "general_action_authority": scoped ? "TASK_SCOPED" : "NONE",
+            "scope_authority": scoped
+                    ? String(authorization.scope_authority || "NONE") : "NONE",
+            "task_scoped_authorization": authorization,
             "visible_web_tab": true,
             "visible_cursor": true
         }))
@@ -1177,21 +1186,14 @@ Item {
 
     function applyWebOperator(payload) {
         if (root.hostKind !== "WEB") {
-            var blocked = {}
-            try {
-                blocked = JSON.parse(String(payload || "{}"))
-            } catch (err) {
-                blocked = {}
-            }
-            root.reportWebOperator(
-                blocked,
-                false,
-                "WEB_NOT_FOCUSED",
-                "",
-                "",
-                "",
-                []
-            )
+            // An approved visible-WEB action may arrive while the user is
+            // looking at CODE, SITE or another workspace surface.  Switch
+            // the visible host and keep the command queued until its pane is
+            // ready; the user should not have to manually focus the tab.
+            root.pendingWebOpPayload = String(payload || "")
+            root.pendingWebOpTries = 0
+            root.setHostKind("WEB")
+            webOpRetry.restart()
             return
         }
         var pane = root.liveWebPane
@@ -1262,7 +1264,8 @@ Item {
                     "url": "",
                     "selector": sel,
                     "text": "aux",
-                    "risk_class": cmd.risk_class
+                    "risk_class": cmd.risk_class,
+                    "task_scoped_authorization": cmd.task_scoped_authorization || null
                 }, function(result) {
                     var value = result || {}
                     var href = String(value.url || "")
@@ -1305,7 +1308,10 @@ Item {
                     "selector": "",
                     "text": "",
                     "risk_class": cmd.risk_class,
-                    "general_action_authority": "NONE"
+                    "general_action_authority": cmd.general_action_authority || "NONE",
+                    "action_authority": cmd.action_authority || "NONE",
+                    "scope_authority": cmd.scope_authority || "NONE",
+                    "task_scoped_authorization": cmd.task_scoped_authorization || null
                 })
                 root.pendingWebOpTries = 0
                 webOpRetry.restart()
@@ -1425,6 +1431,7 @@ Item {
         if (host === null)
             return
         if (root.sitePreviewRunning) {
+            root.sitePreviewFullscreen = false
             host.stopSitePreview()
             root.sitePreviewRunning = false
             root.sitePreviewOrigin = ""
@@ -1433,6 +1440,20 @@ Item {
             return
         }
         root.ensureSitePreview()
+    }
+
+    function toggleSitePreviewFullscreen() {
+        if (root.sitePreviewFullscreen) {
+            root.exitSitePreviewFullscreen()
+            return
+        }
+        if (!root.sitePreviewRunning && !root.ensureSitePreview())
+            return
+        root.sitePreviewFullscreen = true
+    }
+
+    function exitSitePreviewFullscreen() {
+        root.sitePreviewFullscreen = false
     }
 
     function importSiteSqlFromDialog(urlString) {
@@ -1665,6 +1686,8 @@ Item {
         var host = root.scratchHost()
         if (host !== null && host.watchDesktopWorkspace)
             host.watchDesktopWorkspace()
+        if (Window.window)
+            sitePreviewFullscreenWindow.transientParent = Window.window
     }
 
     onLiveAidStateChanged: root.syncObjectActivities()
@@ -1675,6 +1698,26 @@ Item {
     onCurrentObjectIdChanged: root.syncObjectActivities()
     onChatBusyChanged: root.syncObjectActivities()
     onEngineTargetChanged: root.syncObjectActivities()
+    onHostKindChanged: {
+        if (root.hostKind !== "SITE")
+            root.sitePreviewFullscreen = false
+    }
+    onSettingsOpenChanged: {
+        if (root.settingsOpen)
+            root.sitePreviewFullscreen = false
+    }
+    onSitePreviewRunningChanged: {
+        if (!root.sitePreviewRunning)
+            root.sitePreviewFullscreen = false
+    }
+    onSitePreviewFullscreenChanged: {
+        if (root.sitePreviewFullscreen && root.sitePreviewRunning) {
+            sitePreviewFullscreenWindow.showFullScreen()
+            sitePreviewFullscreenWindow.requestActivate()
+        } else {
+            sitePreviewFullscreenWindow.hide()
+        }
+    }
 
     Timer {
         id: analysisTimer
@@ -1825,7 +1868,6 @@ Item {
             root.liveAidEvidenceSummary =
                 "EXECUTION READY · "
                 + String(result.execution_ready).toUpperCase()
-                + " · ACTION " + (result.action_authority || "NONE")
                 + " · NETWORK " + (result.network_authority || "NONE")
         }
 
@@ -2839,6 +2881,25 @@ Item {
                     }
 
                     Text {
+                        objectName: "workspaceSiteFullscreenButton"
+                        text: root.sitePreviewFullscreen
+                            ? "EXIT FULLSCREEN"
+                            : "FULLSCREEN"
+                        color: root.sitePreviewFullscreen
+                            ? "#d8dee9"
+                            : "#c8a97e"
+                        opacity: root.sitePreviewRunning ? 1.0 : 0.55
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: root.sitePreviewFullscreen
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.toggleSitePreviewFullscreen()
+                        }
+                    }
+
+                    Text {
                         text: "IMPORT SQL"
                         color: "#c8a97e"
                         font.family: "monospace"
@@ -2878,7 +2939,7 @@ Item {
                 Loader {
                     anchors.fill: parent
                     anchors.topMargin: 22
-                    active: siteHost.visible
+                    active: siteHost.visible && !root.sitePreviewFullscreen
                     source: active ? "WebPane.qml" : ""
                     onLoaded: {
                         item.siteOnly = true
@@ -2891,6 +2952,101 @@ Item {
                         item.wantEngine = siteHost.visible
                         if (root.sitePreviewRunning)
                             root.applySitePreviewUrl()
+                    }
+                }
+
+                Window {
+                    id: sitePreviewFullscreenWindow
+                    objectName: "sitePreviewFullscreenWindow"
+                    color: "#161616"
+                    flags: Qt.FramelessWindowHint
+                    visible: false
+                    title: "SITE PREVIEW"
+                    onClosing: root.exitSitePreviewFullscreen()
+
+                    Loader {
+                        id: sitePreviewFullscreenLoader
+                        objectName: "sitePreviewFullscreenLoader"
+                        anchors.fill: parent
+                        active: root.sitePreviewFullscreen
+                        source: active ? "WebPane.qml" : ""
+                        onLoaded: {
+                            item.siteOnly = true
+                            item.pageUrl = Qt.binding(function() {
+                                return root.webPageUrl
+                            })
+                            item.reloadNonce = Qt.binding(function() {
+                                return root.sitePreviewNonce
+                            })
+                            item.wantEngine = sitePreviewFullscreenWindow.visible
+                        }
+                    }
+
+                    MouseArea {
+                        id: sitePreviewFullscreenHoverZone
+                        objectName: "sitePreviewFullscreenHoverZone"
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        width: Math.min(parent.width, 280)
+                        height: 78
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                        z: 10
+                    }
+
+                    Rectangle {
+                        id: sitePreviewFullscreenExitButton
+                        objectName: "sitePreviewFullscreenExitButton"
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 18
+                        width: sitePreviewFullscreenExitLabel.implicitWidth + 18
+                        height: 24
+                        radius: 2
+                        color: sitePreviewFullscreenExitMouse.containsMouse
+                            ? "#303030"
+                            : "#181818"
+                        opacity: sitePreviewFullscreenHoverZone.containsMouse
+                            || sitePreviewFullscreenExitMouse.containsMouse
+                            ? 1.0
+                            : 0.0
+                        border.color: "#6a6a6a"
+                        border.width: 1
+                        z: 11
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 140 }
+                        }
+
+                        Text {
+                            id: sitePreviewFullscreenExitLabel
+                            anchors.centerIn: parent
+                            text: "EXIT FULLSCREEN"
+                            color: "#e6edf3"
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+
+                        MouseArea {
+                            id: sitePreviewFullscreenExitMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.exitSitePreviewFullscreen()
+                        }
+                    }
+
+                    Shortcut {
+                        sequence: "Escape"
+                        onActivated: root.exitSitePreviewFullscreen()
+                    }
+
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape) {
+                            root.exitSitePreviewFullscreen()
+                            event.accepted = true
+                        }
                     }
                 }
             }

@@ -80,6 +80,15 @@ def _bounded(text: str, limit: int) -> str:
     return text[: limit - 24] + "\n… [context clipped]"
 
 
+def _bounded_omni_context(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 48:
+        return text[:limit]
+    suffix = "\n[… GG OmniGPT context clipped …]"
+    return text[: limit - len(suffix)].rstrip() + suffix
+
+
 def resolve_named_source(name: str) -> str | None:
     rel = name.strip().lstrip("./")
     if not rel:
@@ -242,7 +251,16 @@ def compile_chat_prompt(
     text: str,
     context_reference: str,
     context: Mapping[str, object],
+    *,
+    omni_context: str = "",
+    max_chars: int = PRIMARY_PROMPT_MAX_CHARS,
 ) -> str:
+    try:
+        prompt_limit = int(max_chars)
+    except (TypeError, ValueError) as exc:
+        raise ChatContextCompileError("Prompt character bound is invalid.") from exc
+    if prompt_limit < 512:
+        raise ChatContextCompileError("Prompt character bound is too small.")
     if context_reference != "@current":
         raise ChatContextCompileError(
             "Real Workspace context currently requires @current."
@@ -278,7 +296,8 @@ def compile_chat_prompt(
     if site_file and wants_work:
         laser_body = _bounded(body, 1200)
         laser_block = (
-            "LASER_SITE_FILE · local SITE root · not production one.com\n"
+            "LASER_SITE_FILE · local SITE root · production/one.com requires "
+            "the user's in-chat approval\n"
             f"bound_path={bound_path}\n"
             + laser_body
             + ("\n" if not laser_body.endswith("\n") else "")
@@ -300,8 +319,13 @@ def compile_chat_prompt(
         if not wants_work
         else "CHAT=UNIVERSAL. Användaren vill arbeta. @current är uppdraget.\n"
     )
-    header = (
+    header_prefix = (
         stance
+        + "Task mode: TASK_SCOPED throughout this chat/task. "
+        + "If an operation needs approval, ask the user in this same chat "
+        + "and accept only a simple ja/yes or nej/no; never ask the user "
+        + "to copy hashes or slash approval commands. Internal bindings, "
+        + "source hashes and approval records must never be shown to the user.\n"
         + "Citera inte olästa filer ur minnet.\n"
         + obligation
         + "Context selection: DEMAND_DRIVEN_PRIMARY_CURRENT\n"
@@ -316,12 +340,28 @@ def compile_chat_prompt(
         f"Workspace content bytes: {context['bytes']}\n"
         "----- BEGIN SELECTED WORKSPACE CONTEXT -----\n"
         + laser_block
-        + "----- END SELECTED WORKSPACE CONTEXT -----\n\n"
-        + USER_TURN_MARKER
-        + "\n"
+        + "----- END SELECTED WORKSPACE CONTEXT -----\n"
     )
     user = text if text.endswith("\n") else text + "\n"
-    available = PRIMARY_PROMPT_MAX_CHARS - len(header)
+    profile_text = str(omni_context or "").strip()
+    if profile_text:
+        marker_length = len(USER_TURN_MARKER) + 4
+        profile_budget = max(
+            0,
+            prompt_limit
+            - len(header_prefix)
+            - marker_length
+            - min(len(user), 600),
+        )
+        if profile_budget:
+            header_prefix += (
+                "\n"
+                + _bounded_omni_context(profile_text, profile_budget)
+                + "\n"
+            )
+
+    header = header_prefix + "\n" + USER_TURN_MARKER + "\n"
+    available = prompt_limit - len(header)
     if available < 64:
         raise ChatContextCompileError(
             "User message leaves no bounded room for laser Workspace identity."
@@ -331,6 +371,6 @@ def compile_chat_prompt(
         if not user.endswith("\n"):
             user += "\n"
     prompt = header + user
-    if len(prompt) > PRIMARY_PROMPT_MAX_CHARS:
+    if len(prompt) > prompt_limit:
         raise ChatContextCompileError("Compiled primary context exceeded its bound.")
     return prompt
