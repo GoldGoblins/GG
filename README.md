@@ -4,20 +4,49 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
-This directory **is** the program. GROK TUI and GPTUI are two motors in the
-same workspace. They use the same files, shared session catalog and laser-
-Merkle knowledge tree; switching the motor does not switch the workspace.
-Local Qwen GGUF files are not in git and are not required for GROK TUI.
+## Patch notes · 2026-09-09 · same-task desk, paper trading desk, WEB hang guard
 
-```text
-git clone https://github.com/GoldGoblins/GG.git
-cd GG
-chmod +x run-gg-ai-desktop.sh
-./run-gg-ai-desktop.sh
-```
+What GitHub had until this push: the OSINT globe, GAME ENGINE playground, QIP
+lab, FACTORY/POLY crypto research, OmniGPT profiles and the current desktop
+screenshot. This patch does not replace that screenshot.
 
-Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
-Update: `git pull`. Push new features from this tree after they land here.
+**Same-task thought desk.** The existing OmniGPT / Idékompassen prompt layer
+now compiles a `SAME_TASK_DESK` board every turn: INTENT, RISK, EVIDENCE,
+CRITIC, BUILDER and a Front Man. Seats look at the *same* task at the same
+time instead of walking A then B. Extra loops spend more compute on those
+seats when they disagree. This is not a second agent brain —
+`PARALLEL_AGENT_BRAIN` stays forbidden, model-agent spawning stays off, and
+the veto lives in code. Linear “do this, then that” plans are flagged and
+rewritten toward parallel same-task work. Compact resident prompts reserve
+space so the board is not clipped.
+
+**CRYPTO paper DESK.** A new `DESK` page sits after FACTORY. Numbered
+specialist seats (volume-leads-price, crowd-spike, vol-aware size,
+invalidation, reporter) vote independently; a Front Man kill switch in code
+can go RED. Volatility uses GARCH(1,1) plus a two-state HMM so size follows
+the vol regime instead of treating direction as the edge. FACTORY keeps a
+graveyard of REJECT/WATCH results and a KEEP/REVERT autoresearch pass on
+momentum buffer. POLY adds a read-only `SCAN` query that ranks archive
+markets by spread. Nothing here places orders or arms mainnet.
+
+**SFTP allowlist and IPv4.** PUT/GET still require a task-scoped grant and
+ssh-agent. The allowlist now includes BlankSlate `header.php` and
+`page.php` beside `robots.txt` and `gg-site-completion.php`. The client
+forces `IdentitiesOnly` and IPv4 (`AddressFamily=inet`); a `run()` helper
+executes the planned batch and never prompts for a password.
+
+**WEB hang and login cookies.** A stuck page is aborted after 60 seconds
+with a visible overlay; background WEB tabs drop their Chromium engine
+instead of keeping several renderers alive. Chromium is started with
+`--renderer-process-limit=4`. WEB uses a persistent on-disk profile so
+login cookies survive. A site `window.open` / wp-admin popup is adopted as
+a real WEB tab. The gold pointer no longer swallows mouse events before
+the page. QML reload of WEB panes is keyed by `shellNonce`.
+
+**Chat ja/nej.** If several native-chat approvals are waiting, `ja`/`nej`
+applies to the latest one and older waiting tasks are superseded. A live
+or local work line is no longer deleted from the TUI as if it were an
+approval. GROK TUI only captures keys when that hole actually has focus.
 
 ## Patch notes · 2026-09-09 · OSINT globe, shared chrome fonts, one live map
 
@@ -91,6 +120,21 @@ bounded memory/table/module sizes, explicit UTF-8 input, deterministic output
 checking and no network or host I/O. The first slice supports a narrow
 `render` ABI through the installed Node runtime; the QIP instruction-stepper
 is deliberately left as a later, separately bounded slice.
+
+This directory **is** the program. GROK TUI and GPTUI are two motors in the
+same workspace. They use the same files, shared session catalog and laser-
+Merkle knowledge tree; switching the motor does not switch the workspace.
+Local Qwen GGUF files are not in git and are not required for GROK TUI.
+
+```text
+git clone https://github.com/GoldGoblins/GG.git
+cd GG
+chmod +x run-gg-ai-desktop.sh
+./run-gg-ai-desktop.sh
+```
+
+Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
+Update: `git pull`. Push new features from this tree after they land here.
 
 ## Patch notes · 2026-09-08 · read-only Polymarket research
 

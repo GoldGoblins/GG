@@ -57,6 +57,14 @@ CANDIDATE_CATALOG: tuple[dict[str, Any], ...] = (
         "warmup": 32,
         "parameters": {"lookback": 32, "trigger_sigma": 1.2},
     },
+    {
+        "id": "VOL_REGIME_SIZE",
+        "label": "VOL REGIME SIZE",
+        "hypothesis": "Direction is noisy; only trade the existing momentum idea when the HMM vol state is LOW.",
+        "family": "VOL_REGIME",
+        "warmup": 60,
+        "parameters": {"fast": 20, "slow": 60, "buffer_bps": 10},
+    },
 )
 
 
@@ -151,6 +159,19 @@ def _signal(candidate: dict[str, Any], prices: list[float], index: int) -> int:
             return 1
         if sigma > 1e-12 and current < mean:
             return 0
+        return 0
+
+    if family == "VOL_REGIME":
+        from backend import crypto_vol
+
+        snap = crypto_vol.snapshot(history)
+        if str((snap.get("hmm") or {}).get("last_state") or "") != "LOW":
+            return 0
+        fast = _sma(history, int(params.get("fast") or 20))
+        slow = _sma(history, int(params.get("slow") or 60))
+        buffer_bps = float(params.get("buffer_bps") or 0.0) / 10_000.0
+        if fast > slow * (1.0 + buffer_bps):
+            return 1
         return 0
 
     return 0
@@ -350,6 +371,8 @@ def empty_snapshot() -> dict[str, Any]:
         "scope": "BOUNDED_LOCAL_RESEARCH",
         "note": "No strategy factory run yet.",
         "candidates": [],
+        "graveyard": [],
+        "autoresearch": [],
         "orchestration": orchestration_snapshot("IDLE"),
     }
 
@@ -375,6 +398,8 @@ def orchestration_snapshot(state: str) -> dict[str, Any]:
             "WALK_FORWARD_SPLITS",
             "PAPER_ONLY",
             "HUMAN_REVIEW_BEFORE_ACTION",
+            "NEGATIVE_RESULTS_KEPT",
+            "KEEP_OR_REVERT",
         ],
     }
 
@@ -403,6 +428,52 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
         ]
         candidates = [future.result() for future in futures]
 
+    graveyard = [
+        {
+            "id": row["id"],
+            "verdict": row["verdict"],
+            "gate_reason": row["gate_reason"],
+            "test_return_pct": (row.get("test") or {}).get("return_pct"),
+        }
+        for row in candidates
+        if row.get("verdict") in {"REJECT", "WATCH", "INSUFFICIENT_DATA"}
+    ]
+
+    base = dict(CANDIDATE_CATALOG[0])
+    base_report = _candidate_report(base, prices, split)
+    best_sharpe = float((base_report.get("test") or {}).get("sharpe_proxy") or 0.0)
+    best_buffer = int((base.get("parameters") or {}).get("buffer_bps") or 10)
+    autoresearch: list[dict[str, Any]] = [
+        {
+            "step": 0,
+            "mutation": "BASE",
+            "buffer_bps": best_buffer,
+            "test_sharpe": round(best_sharpe, 4),
+            "decision": "KEEP",
+        }
+    ]
+    for step, buffer in enumerate((5, 15, 25), start=1):
+        mutated = {
+            **base,
+            "id": f"MOMENTUM_20_60_B{buffer}",
+            "parameters": {**(base.get("parameters") or {}), "buffer_bps": buffer},
+        }
+        report = _candidate_report(mutated, prices, split)
+        sharpe = float((report.get("test") or {}).get("sharpe_proxy") or 0.0)
+        keep = sharpe > best_sharpe
+        if keep:
+            best_sharpe = sharpe
+            best_buffer = buffer
+        autoresearch.append(
+            {
+                "step": step,
+                "mutation": f"buffer_bps={buffer}",
+                "buffer_bps": buffer,
+                "test_sharpe": round(sharpe, 4),
+                "decision": "KEEP" if keep else "REVERT",
+            }
+        )
+
     return {
         "schema": SCHEMA,
         "state": "DONE",
@@ -427,6 +498,13 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
             "validation_end": split["validation_end"],
         },
         "candidates": candidates,
+        "graveyard": graveyard,
+        "autoresearch": {
+            "pattern": "KEEP_OR_REVERT",
+            "best_buffer_bps": best_buffer,
+            "best_test_sharpe": round(best_sharpe, 4),
+            "steps": autoresearch,
+        },
         "orchestration": orchestration_snapshot("DONE"),
     }
 

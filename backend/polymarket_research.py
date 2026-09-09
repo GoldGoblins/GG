@@ -27,7 +27,7 @@ ARCHIVE_BASE = "https://archive.pendulumflow.com/v3"
 ARCHIVE_HOST = "archive.pendulumflow.com"
 REPO_URL = "https://github.com/warproxxx/poly_data"
 SOURCE_LABEL = "PENDULUMFLOW V3 · REMOTE PARQUET · READ ONLY"
-PRESETS = ("SUMMARY", "TRADES", "TOUCH")
+PRESETS = ("SUMMARY", "TRADES", "TOUCH", "SCAN")
 MAX_ROWS = 240
 MAX_SLUG_LENGTH = 160
 
@@ -145,6 +145,20 @@ WHERE event_type = 'last_trade_price'
 ORDER BY size DESC
 LIMIT 20
 """.strip()
+    elif mode == "SCAN":
+        sql = f"""
+SELECT '0x' || lower(hex(market)) AS market,
+       round(avg(best_ask - best_bid), 4) AS spread,
+       round(avg(best_bid), 4) AS bid,
+       round(avg(best_ask), 4) AS ask,
+       count(*) AS quotes
+FROM read_parquet({source})
+WHERE event_type = 'best_bid_ask'
+GROUP BY 1
+HAVING spread IS NOT NULL
+ORDER BY spread DESC
+LIMIT 20
+""".strip()
     else:
         market_slug = _sql_literal(query["slug"])
         sql = f"""
@@ -258,6 +272,17 @@ def _format_lines(preset: str, rows: Sequence[dict[str, Any]]) -> list[str]:
                 f"{str(row.get('size') or '')[:10]:>10}  "
                 f"{str(row.get('side') or '')[:4]:<4}  "
                 f"{_display_market(row.get('market'))}"
+            )
+        return lines
+    if preset == "SCAN":
+        lines = ["MARKET              SPREAD      BID        ASK   QUOTES"]
+        for row in rows:
+            lines.append(
+                f"{_display_market(row.get('market')):<18}  "
+                f"{str(row.get('spread') or '')[:8]:>8}  "
+                f"{str(row.get('bid') or '')[:8]:>8}  "
+                f"{str(row.get('ask') or '')[:8]:>8}  "
+                f"{str(row.get('quotes') or 0):>6}"
             )
         return lines
     lines = ["MINUTE    BID        ASK"]

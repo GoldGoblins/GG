@@ -21,6 +21,7 @@ Item {
         "ARB",
         "ACTIVITY",
         "FACTORY",
+        "DESK",
         "POLY"
     ]
     readonly property bool backtestRunning: String((root.status.backtest_job || {}).state || "") === "running"
@@ -63,6 +64,9 @@ Item {
     readonly property var strategyFactoryResult: root.strategyFactory
     readonly property bool strategyFactoryRunning:
         String(root.strategyFactoryJob.state || "") === "running"
+    readonly property var desk: root.status.desk || {}
+    readonly property var deskJob: root.status.desk_job || {}
+    readonly property bool deskRunning: String(root.deskJob.state || "") === "running"
     property string polyPreset: "SUMMARY"
     property string polyDate: root.utcDate()
     property string polyHour: root.utcHour()
@@ -208,6 +212,28 @@ Item {
         for (var i = 0; i < roles.length; i++) {
             var role = roles[i] || {}
             out.push(String(role.id || "ROLE") + "=" + String(role.state || "—"))
+        }
+        return out.join("  ·  ")
+    }
+
+    function factoryGraveyardText() {
+        var rows = root.strategyFactoryResult.graveyard || []
+        var out = []
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i] || {}
+            out.push(String(row.id || "ID") + "=" + String(row.verdict || "—"))
+        }
+        return out.join("  ·  ")
+    }
+
+    function factoryAutoresearchText() {
+        var steps = ((root.strategyFactoryResult.autoresearch || {}).steps) || []
+        var out = []
+        for (var i = 0; i < steps.length; i++) {
+            var step = steps[i] || {}
+            out.push(String(step.mutation || "STEP")
+                     + " " + String(step.decision || "—")
+                     + " sharpe " + String(step.test_sharpe || "—"))
         }
         return out.join("  ·  ")
     }
@@ -383,6 +409,13 @@ Item {
         interval: 1000
         running: root.visible && root.page === "FACTORY"
             && root.strategyFactoryRunning
+        repeat: true
+        onTriggered: root.refresh()
+    }
+
+    Timer {
+        interval: 1000
+        running: root.visible && root.page === "DESK" && root.deskRunning
         repeat: true
         onTriggered: root.refresh()
     }
@@ -1509,6 +1542,190 @@ Item {
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
                     }
+                    Text {
+                        width: factoryCol.width
+                        visible: ((root.strategyFactoryResult.graveyard || []).length > 0)
+                        text: "GRAVEYARD · negative results kept · "
+                            + String((root.strategyFactoryResult.graveyard || []).length)
+                            + "  ·  " + root.factoryGraveyardText()
+                        color: "#c98989"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: factoryCol.width
+                        visible: (root.strategyFactoryResult.autoresearch || {}).steps !== undefined
+                        text: "AUTORESEARCH · KEEP/REVERT  best buffer "
+                            + String((root.strategyFactoryResult.autoresearch || {}).best_buffer_bps || "—")
+                            + "  sharpe "
+                            + String((root.strategyFactoryResult.autoresearch || {}).best_test_sharpe || "—")
+                            + "\n" + root.factoryAutoresearchText()
+                        color: "#8fa8a0"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+
+            Flickable {
+                id: deskScroll
+                anchors.fill: parent
+                visible: root.page === "DESK"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: deskCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: deskCol
+                    width: deskScroll.width
+                    height: childrenRect.height
+                    spacing: 8
+
+                    Text {
+                        text: "PAPER DESK"
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 16
+                    }
+                    Text {
+                        text: "SIX SEATS  ·  FRONT MAN IN CODE  ·  MAINNET NOT ARMED"
+                        color: "#b6a6c8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        width: deskCol.width
+                        text: "456 volume-leads-price. 067 crowd spike. 218 vol size. "
+                            + "240 invalidation. 001 reports only. Front Man is a hard veto, not a prompt."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Row {
+                        spacing: 14
+                        Text {
+                            text: root.deskRunning ? "RUNNING…" : "SIT THE DESK"
+                            color: root.deskRunning ? "#c8a97e" : "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.deskRunning
+                                            || !root.surfaceHost
+                                            || !root.surfaceHost.cryptoDesk)
+                                        return
+                                    root.statusJson = root.surfaceHost.cryptoDesk()
+                                }
+                            }
+                        }
+                        Text {
+                            text: "RESET"
+                            color: "#c8a97e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (!root.surfaceHost || !root.surfaceHost.cryptoDeskReset)
+                                        return
+                                    root.statusJson = root.surfaceHost.cryptoDeskReset()
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        width: deskCol.width
+                        text: "STATE · " + String(root.deskJob.state || "idle").toUpperCase()
+                            + "  ·  LIGHT "
+                            + String((root.desk.front_man || {}).light || "RED")
+                            + "  ·  trades " + String(root.desk.trades || 0)
+                            + "  ·  equity " + String(root.desk.equity_pct || 0) + "%"
+                            + "  ·  red lights " + String(root.desk.red_lights || 0)
+                        color: String((root.desk.front_man || {}).light || "") === "GREEN"
+                            ? "#8db89a" : "#c98989"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: deskCol.width
+                        text: "VOL · HMM "
+                            + String(((root.desk.vol || {}).hmm || {}).last_state || "UNKNOWN")
+                            + "  GARCH σ "
+                            + String(((root.desk.vol || {}).garch || {}).last_sigma || "—")
+                            + "  size " + String((root.desk.vol || {}).size_scale || "—")
+                        color: "#8fa8a0"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Repeater {
+                        model: (root.desk.seats || []).length
+                        delegate: Rectangle {
+                            required property int index
+                            width: deskCol.width
+                            height: seatBody.implicitHeight + 14
+                            color: "#121212"
+                            border.width: 1
+                            border.color: "#4c4c4c"
+                            radius: 2
+                            Column {
+                                id: seatBody
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 2
+                                readonly property var row:
+                                    (root.desk.seats || [])[index] || {}
+                                Text {
+                                    width: seatBody.width
+                                    text: String(seatBody.row.id || "SEAT")
+                                        + "  " + String(seatBody.row.job || "")
+                                        + "  [" + String(seatBody.row.vote || "—") + "]"
+                                    color: "#c8cdd4"
+                                    font.family: "monospace"
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                }
+                                Text {
+                                    width: seatBody.width
+                                    text: JSON.stringify(seatBody.row)
+                                    color: "#7f8994"
+                                    font.family: "monospace"
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 2
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        width: deskCol.width
+                        visible: ((root.desk.front_man || {}).reasons || []).length > 0
+                        text: "FRONT MAN · "
+                            + ((root.desk.front_man || {}).reasons || []).join("  ·  ")
+                        color: "#c98989"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: deskCol.width
+                        visible: (root.desk.seats || []).length === 0
+                        text: "No sitting yet. Paper only. Kill switch is in code."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
                 }
             }
 
@@ -1611,6 +1828,18 @@ Item {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.polyPreset = "TOUCH"
+                            }
+                        }
+                        Text {
+                            text: "SCAN"
+                            color: root.polyPreset === "SCAN" ? "#d8dee9" : "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: root.polyPreset === "SCAN"
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.polyPreset = "SCAN"
                             }
                         }
                     }

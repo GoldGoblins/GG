@@ -18,6 +18,7 @@ Item {
 
     width: 24
     height: 24
+    enabled: false
 
     Image {
         anchors.fill: parent

@@ -13,6 +13,9 @@ from urllib.parse import unquote, urlparse
 
 SITE_ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site")
 IMPORT_DROP = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site-import")
+PROFILE_ROOT = Path(
+    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/web-profile"
+)
 SKIP_IMPORT_NAMES = {
     "wp-config.php",
     "wp-config-sample.php",
@@ -51,9 +54,17 @@ def ensure_webengine() -> bool:
         from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
         QtWebEngineQuick.initialize()
+        ensure_web_profile_root()
         return True
     except Exception:
         return False
+
+
+def ensure_web_profile_root() -> Path:
+    PROFILE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache = PROFILE_ROOT / "cache"
+    cache.mkdir(mode=0o700, exist_ok=True)
+    return PROFILE_ROOT
 
 
 def _is_seed_index(path: Path) -> bool:

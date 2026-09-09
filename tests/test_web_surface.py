@@ -23,6 +23,11 @@ def main() -> int:
 
 
 def _run(web_surface) -> int:
+    if web_surface.PROFILE_ROOT.name != "web-profile":
+        raise AssertionError("WEB cookie profile root missing")
+    profile = web_surface.ensure_web_profile_root()
+    if not profile.is_dir():
+        raise AssertionError("WEB cookie profile directory missing")
     web_surface.ensure_site_root()
     files = web_surface.list_site_files()
     if "index.html" not in files:

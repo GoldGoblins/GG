@@ -189,6 +189,8 @@ def main() -> int:
         raise AssertionError("GROK TUI grid still boots before the TUI hole is shown")
     if "def ensureWebEngine" not in src:
         raise AssertionError("Chromium still boots with the desktop process")
+    if "def webProfilePath" not in src:
+        raise AssertionError("WEB cookie profile path slot missing")
     desk_find = src[
         src.index("def _desk_list_names") : src.index("def _desk_find_label")
     ]

@@ -334,7 +334,28 @@ def build_context(
             record.spec.slug for record in selected
         )
     )
-    remaining = max(1000, int(max_chars)) - sum(len(chunk) + 1 for chunk in chunks)
+    apply_line = (
+        "Apply the selected profiles together in this turn. State facts, findings, "
+        "decisions, assumptions, and unresolved questions separately. Preserve the "
+        "user's original intent before proposing implementation."
+    )
+    closer = "[/GG OMNIGPT PROFILE LAYER]"
+    try:
+        from backend.thought_desk import sit as sit_thought_desk
+
+        board = sit_thought_desk(user_text, compact=not include_registry)
+        desk_text = str(board.get("text") or "")
+    except Exception:
+        desk_text = (
+            "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
+            "Apply every live seat to this same task now.\n[/SAME_TASK_DESK]"
+        )
+    desk_cap = 720 if not include_registry else 1400
+    if len(desk_text) > desk_cap:
+        desk_text = desk_text[: desk_cap - 18].rstrip() + "\n[/SAME_TASK_DESK]"
+    tail = apply_line + "\n" + desk_text + "\n" + closer
+    remaining = int(max_chars) - sum(len(chunk) + 1 for chunk in chunks) - len(tail) - 1
+    remaining = max(0, remaining)
     for record in selected:
         if remaining <= 500:
             break
@@ -367,12 +388,21 @@ def build_context(
         )
         chunks.append(block)
         remaining -= len(block) + 1
-    chunks.append(
-        "Apply the selected profiles together. State facts, findings, decisions, "
-        "assumptions, and unresolved questions separately. Preserve the user's original "
-        "intent before proposing implementation.\n[/GG OMNIGPT PROFILE LAYER]"
-    )
-    return "\n".join(chunks)[:max_chars]
+    chunks.extend([apply_line, desk_text, closer])
+    joined = "\n".join(chunks)
+    if len(joined) > int(max_chars):
+        overflow = len(joined) - int(max_chars)
+        keep = max(0, len(desk_text) - overflow)
+        if keep < 80:
+            desk_text = (
+                "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
+                "[/SAME_TASK_DESK]"
+            )
+        else:
+            desk_text = desk_text[: keep - 18].rstrip() + "\n[/SAME_TASK_DESK]"
+        chunks[-2] = desk_text
+        joined = "\n".join(chunks)[: int(max_chars)]
+    return joined
 
 
 def render_index(root: Path | str | None = None) -> str:

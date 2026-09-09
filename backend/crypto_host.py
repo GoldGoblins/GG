@@ -17,6 +17,7 @@ from backend.crypto_keys import (
 from backend import crypto_strategy004
 from backend import crypto_bots, crypto_flash_arb, crypto_trader
 from backend import crypto_strategy_factory
+from backend import crypto_desk
 from backend import polymarket_research
 from backend.crypto_lab import (
     current_slot,
@@ -572,6 +573,77 @@ def reset_strategy_factory() -> dict[str, Any]:
     return status_payload()
 
 
+_desk_lock = threading.Lock()
+_desk_job: dict[str, Any] = {
+    "state": "idle",
+    "note": "",
+    "started": 0.0,
+    "result": crypto_desk.empty_snapshot(),
+}
+
+
+def desk_status() -> dict[str, Any]:
+    with _desk_lock:
+        job = dict(_desk_job)
+        result = job.get("result")
+        if isinstance(result, dict):
+            job["result"] = result
+        return job
+
+
+def _run_desk_job() -> None:
+    try:
+        report = crypto_desk.run_desk(_factory_frames())
+        with _desk_lock:
+            _desk_job["state"] = "done"
+            _desk_job["note"] = str(report.get("note") or "")
+            _desk_job["result"] = report
+    except Exception as exc:
+        with _desk_lock:
+            _desk_job["state"] = "error"
+            _desk_job["note"] = "DESK_ERROR: " + str(exc)[:160]
+            _desk_job["result"] = {
+                **crypto_desk.empty_snapshot(),
+                "state": "ERROR",
+                "note": "Desk could not finish safely.",
+            }
+
+
+def start_desk() -> dict[str, Any]:
+    launch = False
+    with _desk_lock:
+        if str(_desk_job.get("state") or "") != "running":
+            _desk_job["state"] = "running"
+            _desk_job["note"] = "PAPER DESK · FRONT MAN IN CODE"
+            _desk_job["started"] = time.time()
+            _desk_job["result"] = {
+                **crypto_desk.empty_snapshot(),
+                "state": "RUNNING",
+                "note": _desk_job["note"],
+            }
+            launch = True
+    if launch:
+        threading.Thread(
+            target=_run_desk_job,
+            name="gg-crypto-desk",
+            daemon=True,
+        ).start()
+    payload = status_payload()
+    payload["desk_job"] = desk_status()
+    return payload
+
+
+def reset_desk() -> dict[str, Any]:
+    with _desk_lock:
+        if str(_desk_job.get("state") or "") == "running":
+            return status_payload()
+        _desk_job["state"] = "idle"
+        _desk_job["note"] = ""
+        _desk_job["started"] = 0.0
+        _desk_job["result"] = crypto_desk.empty_snapshot()
+    return status_payload()
+
+
 def status_payload(rail: bool = False) -> dict[str, Any]:
     wallet = load_wallet()
     pubkey = str(wallet.get("pubkey") or "")
@@ -689,6 +761,8 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
             crypto_strategy_factory.empty_snapshot(),
         ),
         "strategy_factory_job": strategy_factory_status(),
+        "desk": desk_status().get("result", crypto_desk.empty_snapshot()),
+        "desk_job": desk_status(),
         "proven": load_proven(),
         "bots": [
             {

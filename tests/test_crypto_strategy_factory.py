@@ -28,7 +28,12 @@ def main() -> int:
     assert report["mode"] == "PAPER_ONLY"
     assert report["source"]["interval"] == "1h"
     assert report["source"]["bars"] == len(prices)
-    assert len(report["candidates"]) == 4
+    assert len(report["candidates"]) == 5
+    assert report["autoresearch"]["pattern"] == "KEEP_OR_REVERT"
+    assert len(report["autoresearch"]["steps"]) == 4
+    assert isinstance(report["graveyard"], list)
+    ids = {row["id"] for row in report["candidates"]}
+    assert "VOL_REGIME_SIZE" in ids
     assert report["orchestration"]["max_parallel"] == 2
     assert report["orchestration"]["model_agents"] is False
     for candidate in report["candidates"]:

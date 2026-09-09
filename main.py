@@ -11,7 +11,7 @@ os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--disable-extensions --disable-background-networking --disable-sync "
     "--ignore-gpu-blocklist --enable-webgl --enable-webgl2 "
-    "--enable-unsafe-swiftshader",
+    "--enable-unsafe-swiftshader --renderer-process-limit=4",
 )
 import stat
 import subprocess
@@ -6082,12 +6082,30 @@ class ChatBridge(QObject):
             and pending.get("approval_mode") == "CHAT_NATIVE_TASK_SCOPED"
         ]
 
+    def _latest_waiting_chat_native_mandate(self) -> dict[str, object] | None:
+        waiting = self._waiting_chat_native_mandates()
+        return waiting[-1] if waiting else None
+
+    def _supersede_older_chat_native_mandates(
+        self,
+        keep: dict[str, object] | None = None,
+    ) -> None:
+        keep_id = str((keep or {}).get("pending_id") or "")
+        for pending in self._pending_mandates.values():
+            if pending is keep:
+                continue
+            if keep_id and str(pending.get("pending_id") or "") == keep_id:
+                continue
+            if pending.get("status") != "WAITING_APPROVAL":
+                continue
+            if pending.get("approval_mode") != "CHAT_NATIVE_TASK_SCOPED":
+                continue
+            pending["status"] = "SUPERSEDED"
+
     def _tui_approval_notice(self, action: str) -> str:
         waiting = self._waiting_chat_native_mandates()
         if not waiting:
             return "GG: Det finns ingen väntande godkännandeuppgift."
-        if len(waiting) != 1:
-            return "GG: Flera godkännandeuppgifter väntar; svaret pausades."
         if action == "APPROVE":
             return "GG: Ja mottaget. Godkännandet behandlas för uppgiften."
         return "GG: Nej mottaget. Uppgiften avvisas."
@@ -6115,20 +6133,43 @@ class ChatBridge(QObject):
         resume_request = parse_chat_resume_request(value)
         action_request = parse_chat_action_request(value)
         waiting_approval = self._waiting_chat_native_mandates()
-        # A bare "ja"/"nej" is special only for one unambiguous native-chat
-        # task.  If none exists, or more than one exists, leave the line in
-        # Codex's editor so the user's input is never silently erased and an
-        # unrelated surface can never receive the approval accidentally.
+        # A bare "ja"/"nej" is special when a native-chat task is waiting.
+        # Several stacked requests keep the latest one; older waiting
+        # tasks are superseded so the visible answer still works.
         if chat_approval is not None:
             if not waiting_approval:
                 return False
-            if len(waiting_approval) != 1:
-                self._show_tui_notice(
-                    terminal_key,
-                    "GG: Flera godkännandeuppgifter väntar; ja/nej "
-                    "skickades inte vidare som godkännande.",
+            if len(waiting_approval) > 1:
+                self._supersede_older_chat_native_mandates(
+                    keep=waiting_approval[-1]
                 )
-                return False
+        elif action_request is not None:
+            # Never eat the native line for a new task.  The TUI keeps the
+            # text the user typed.  Only live/external requests also create
+            # a ja/nej gate in the background.
+            if action_request.get("external") and action_request.get("risk_class") == "RED":
+                context_reference, workspace_object_id = self._tui_chat_context()
+
+                def capture_live() -> None:
+                    try:
+                        self._capture_chat_native_mandate(
+                            user_text=value,
+                            chat_scope=action_request,
+                            workspace_context=_chat_identity_workspace_context(
+                                workspace_object_id
+                            ),
+                            context_reference=context_reference,
+                            workspace_object_id=workspace_object_id,
+                        )
+                        self._show_tui_notice(
+                            terminal_key,
+                            "GG: Live-uppgift väntar på ja eller nej.",
+                        )
+                    except Exception:
+                        return
+
+                QTimer.singleShot(0, capture_live)
+            return False
         if chat_approval is None and resume_request is not None:
             if self._latest_chat_native_pending(
                 {"WAITING_APPROVAL", "APPROVED_VALID", "EXECUTION_RUNNING"}
@@ -6931,6 +6972,7 @@ class ChatBridge(QObject):
         pending["approval_mode"] = "CHAT_NATIVE_TASK_SCOPED"
         pending["chat_scope"] = copy.deepcopy(chat_scope)
         pending["operator_ready"] = False
+        self._supersede_older_chat_native_mandates(keep=pending)
         return pending_id
 
     def _capture_pending_mandate(
@@ -7652,22 +7694,9 @@ class ChatBridge(QObject):
         waiting = self._waiting_chat_native_mandates()
         if not waiting:
             return False
-        if len(waiting) != 1:
-            self._append(
-                "GG SYSTEM",
-                "MANDATE",
-                "Flera väntande åtgärder finns. Jag pausar tills en enda "
-                "åtgärd återstår; därefter räcker ja eller nej i chatten.",
-                context_reference + " · " + workspace_object_id,
-                "BLOCKED",
-                24,
-            )
-            # The line must remain ordinary chat input when the approval is
-            # ambiguous.  Returning True would make the terminal send Ctrl-U
-            # and the visible "ja"/"nej" would disappear on Enter.
-            return False
-
-        pending = waiting[0]
+        pending = waiting[-1]
+        if len(waiting) > 1:
+            self._supersede_older_chat_native_mandates(keep=pending)
         pending_id = str(pending.get("pending_id") or "")
         scope_revision = str(pending.get("approval_scope_revision") or "")
         parsed: dict[str, object] = {

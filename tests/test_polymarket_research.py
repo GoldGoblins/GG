@@ -44,6 +44,11 @@ def main() -> int:
                 ["at", "price", "size", "side", "market"],
                 [("17:02:03", 0.42, 125.5, "BUY", b"\x01\x02")],
             )
+        if "avg(best_ask - best_bid)" in sql:
+            return (
+                ["market", "spread", "bid", "ask", "quotes"],
+                [("0x0102", 0.08, 0.41, 0.49, 12)],
+            )
         if "best_bid_ask" in sql:
             return (["minute", "bid", "ask"], [("17:02", 0.41, 0.44)])
         return (
@@ -74,7 +79,12 @@ def main() -> int:
     )
     if not touch.get("ok") or "MINUTE" not in "\n".join(touch.get("lines") or []):
         raise AssertionError("touch query fixture failed")
-    if len(seen_sql) != 3 or any(valid_url not in sql for sql in seen_sql):
+    scan = research.run_query(
+        "SCAN", "2026-09-08", "17", executor=fake_executor
+    )
+    if not scan.get("ok") or "SPREAD" not in "\n".join(scan.get("lines") or []):
+        raise AssertionError("scan query fixture failed")
+    if len(seen_sql) != 4 or any(valid_url not in sql for sql in seen_sql):
         raise AssertionError("query did not stay on the selected archive file")
     if any("DROP" in sql.upper() for sql in seen_sql):
         raise AssertionError("arbitrary SQL entered the fixed query path")
@@ -112,6 +122,7 @@ def main() -> int:
         "cryptoPolymarketReset",
         'text: "SQL PREVIEW\\n"',
         "poly_data",
+        'text: "SCAN"',
     ):
         if marker not in qml:
             raise AssertionError("Crypto QML marker missing: " + marker)

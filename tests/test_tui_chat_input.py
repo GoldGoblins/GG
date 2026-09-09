@@ -223,26 +223,35 @@ def main() -> int:
         )
     bridge._pending_mandates = {
         "pending-a": {
+            "pending_id": "pending-a",
             "status": "WAITING_APPROVAL",
             "approval_mode": "CHAT_NATIVE_TASK_SCOPED",
         },
         "pending-b": {
+            "pending_id": "pending-b",
             "status": "WAITING_APPROVAL",
             "approval_mode": "CHAT_NATIVE_TASK_SCOPED",
         },
     }
-    previous_submissions = list(bridge.submissions)
-    if bridge._handle_tui_chat_line("ws.tui.gpt", "ja"):
-        raise AssertionError(
-            "ambiguous native approval was consumed and line-killed"
-        )
-    if bridge.submissions != previous_submissions:
-        raise AssertionError("ambiguous approval was dispatched")
+    if not bridge._handle_tui_chat_line("ws.tui.gpt", "ja"):
+        raise AssertionError("latest waiting approval was not intercepted")
+    app.processEvents()
+    if bridge.submissions[-1] != ("ja", "@current", "ws.file.scratch.1"):
+        raise AssertionError("latest waiting approval was not scheduled")
+    if bridge._pending_mandates["pending-a"]["status"] != "SUPERSEDED":
+        raise AssertionError("older waiting approval was not superseded")
     if not any(
-        "skickades inte vidare" in text
+        "Ja mottaget" in text
         for _terminal_id, text in bridge._resident_chat._surface_host.notices
     ):
-        raise AssertionError("ambiguous approval warning was not visible")
+        raise AssertionError("latest approval feedback was not visible")
+    bridge._pending_mandates.clear()
+    if bridge._handle_tui_chat_line("ws.tui.gpt", "ändra koden i desktop"):
+        raise AssertionError("local chat was swallowed as an approval")
+    if bridge._handle_tui_chat_line(
+        "ws.tui.gpt", "uppdatera det som är live på one.com"
+    ):
+        raise AssertionError("live chat line was deleted from the TUI")
     print("TUI_CHAT_INPUT_TEST=PASS")
     return 0
 

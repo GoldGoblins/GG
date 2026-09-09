@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ FORBIDDEN_CONFIG_KEYS = {"password", "passphrase", "secret", "token"}
 PUT_ALLOWLIST = (
     "robots.txt",
     "wp-content/mu-plugins/gg-site-completion.php",
+    "wp-content/themes/blankslate/header.php",
+    "wp-content/themes/blankslate/page.php",
 )
 GET_ALLOWLIST = PUT_ALLOWLIST
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
@@ -155,6 +158,10 @@ def argv(config: dict[str, Any]) -> list[str]:
         "BatchMode=yes",
         "-o",
         "StrictHostKeyChecking=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "AddressFamily=inet",
         "-P",
         str(cfg["port"]),
     ]
@@ -217,6 +224,45 @@ def plan(
             "TASK_SCOPED" if authorization is not None else "NONE"
         ),
         "task_scoped_authorization": authorization,
+        "password": False,
+        "risk_class": "RED",
+    }
+
+
+def run(
+    action: str,
+    relative: str,
+    config: dict[str, Any] | None = None,
+    *,
+    timeout: float = 20.0,
+    task_scoped_authorization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    require_agent()
+    planned = plan(
+        action,
+        relative,
+        config,
+        task_scoped_authorization=task_scoped_authorization,
+    )
+    if planned.get("task_scoped_authorization") is None:
+        raise SftpOperatorError("TASK_SCOPED_AUTHORIZATION_REQUIRED")
+    try:
+        proc = subprocess.run(
+            list(planned["argv"]),
+            input=str(planned["batch"]),
+            capture_output=True,
+            text=True,
+            timeout=max(2.0, float(timeout)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SftpOperatorError("SFTP_TIMEOUT") from exc
+    if proc.returncode != 0:
+        raise SftpOperatorError("SFTP_FAILED")
+    return {
+        "schema": "gg.sftp-operator-result.v1",
+        "action": action,
+        "relative": relative,
+        "ok": True,
         "password": False,
         "risk_class": "RED",
     }

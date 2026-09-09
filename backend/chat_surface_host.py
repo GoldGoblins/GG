@@ -1807,6 +1807,26 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
+    @Slot(result=str)
+    def cryptoDesk(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.start_desk(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoDeskReset(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.reset_desk(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
     @Slot(str, result=str)
     def cryptoSetBook(self, book_id: str) -> str:
         try:
@@ -2726,6 +2746,12 @@ class ChatSurfaceHost(QObject):
 
         self._webengine_ready = bool(ensure_webengine())
         return self._webengine_ready
+
+    @Slot(result=str)
+    def webProfilePath(self) -> str:
+        from backend.web_surface import ensure_web_profile_root
+
+        return str(ensure_web_profile_root())
 
     @Slot(int, int)
     def grokTuiResize(self, cols: int, rows: int) -> None:

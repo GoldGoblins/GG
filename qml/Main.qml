@@ -213,7 +213,10 @@ ApplicationWindow {
         root.appendShellLog(rel)
         root.appendShellLog("qml/components/UtilitySurface.qml")
         utilitySurface.setSource(root.utilityUrl())
-        workspaceLoader.setSource(root.workspaceUrl())
+        workspaceLoader.setSource(
+            root.workspaceUrl(),
+            { "shellNonce": root.shellNonce }
+        )
     }
 
     function bindUtility(item) {
@@ -245,6 +248,9 @@ ApplicationWindow {
         if (!item || root._workspaceBound)
             return
         root._workspaceBound = true
+        item.shellNonce = Qt.binding(function() {
+            return root.shellNonce
+        })
         item.showDemoFixtures = Qt.binding(function() {
             return root.alphaShowDemoFixtures
         })

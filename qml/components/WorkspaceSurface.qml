@@ -348,6 +348,10 @@ Item {
     property bool chatBusy: false
     property string engineTarget: "GROK_TUI"
     property string hostKind: "CODE"
+    property int shellNonce: 0
+    property var pendingAdoptedView: null
+    readonly property string webPaneSource:
+        "WebPane.qml?r=" + String(root.shellNonce)
     property string cryptoWalletLabel: "WALLET · DISCONNECTED"
     property int liveEpoch: 0
 
@@ -850,6 +854,19 @@ Item {
         root.spawnHostInstance()
         if (String(url || "").length > 0)
             root.goBrowse(url)
+    }
+
+    function adoptPopupView(view) {
+        if (!view)
+            return
+        root.pendingAdoptedView = view
+        root.setHostKind("WEB")
+        root.spawnHostInstance()
+        var pane = root.liveWebPane
+        if (pane && pane.takeView && root.pendingAdoptedView) {
+            pane.takeView(root.pendingAdoptedView)
+            root.pendingAdoptedView = null
+        }
     }
 
     function resetWebTab(index) {
@@ -2955,7 +2972,7 @@ Item {
                     anchors.fill: parent
                     anchors.topMargin: 22
                     active: siteHost.visible && !root.sitePreviewFullscreen
-                    source: active ? "WebPane.qml" : ""
+                    source: active ? root.webPaneSource : ""
                     onLoaded: {
                         item.siteOnly = true
                         item.pageUrl = Qt.binding(function() {
@@ -2984,7 +3001,7 @@ Item {
                         objectName: "sitePreviewFullscreenLoader"
                         anchors.fill: parent
                         active: root.sitePreviewFullscreen
-                        source: active ? "WebPane.qml" : ""
+                        source: active ? root.webPaneSource : ""
                         onLoaded: {
                             item.siteOnly = true
                             item.pageUrl = Qt.binding(function() {
@@ -3256,8 +3273,13 @@ Item {
                             webTab.objectId === root.currentObjectId
 
                         onIsCurrentChanged: {
-                            if (webTab.isCurrent && webTab.isWebTab)
+                            if (webTab.isCurrent && webTab.isWebTab) {
                                 webTab.holdWebEngine = true
+                            } else if (webTab.isWebTab) {
+                                if (webPaneLoader.item && webPaneLoader.item.haltEngine)
+                                    webPaneLoader.item.haltEngine()
+                                webTab.holdWebEngine = false
+                            }
                             if (webTab.isCurrent) {
                                 root.liveBrowseBar = tabBrowseBar
                                 if (webPaneLoader.item)
@@ -3300,7 +3322,7 @@ Item {
                                 width: parent.width
                                 height: parent.height - tabBrowseBar.height - 6
                                 active: webTab.isWebTab && webTab.holdWebEngine
-                                source: active ? "WebPane.qml" : ""
+                                source: active ? root.webPaneSource : ""
                                 onLoaded: {
                                     item.siteOnly = false
                                     item.pageUrl = Qt.binding(function() {
@@ -3308,7 +3330,12 @@ Item {
                                             ? webTab.sourcePath
                                             : "about:blank"
                                     })
-                                    item.wantEngine = true
+                                    if (root.pendingAdoptedView && item.takeView) {
+                                        item.takeView(root.pendingAdoptedView)
+                                        root.pendingAdoptedView = null
+                                    } else {
+                                        item.wantEngine = true
+                                    }
                                     if (webTab.isCurrent) {
                                         root.liveWebPane = item
                                         root.liveBrowseBar = tabBrowseBar
@@ -3318,6 +3345,9 @@ Item {
                                     })
                                     item.openNewTab.connect(function(href) {
                                         root.openWebTab(href)
+                                    })
+                                    item.popupViewReady.connect(function(view) {
+                                        root.adoptPopupView(view)
                                     })
                                     item.titled.connect(function(title) {
                                         var label = String(title || "").trim()

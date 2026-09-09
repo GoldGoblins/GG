@@ -97,7 +97,7 @@ FocusScope {
                 root.showNotice(text)
         }
         function onChatTerminalFocusRequested(id) {
-            if (id === root.terminalId && root.visible)
+            if (id === root.terminalId && root.visible && root.activeFocus)
                 Qt.callLater(root.focusTerminal)
         }
     }

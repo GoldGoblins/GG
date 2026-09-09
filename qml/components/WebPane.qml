@@ -11,10 +11,23 @@ Item {
 
     property url pageUrl: ""
     property string loadState: "IDLE"
+    property string loadFailReason: ""
+    property int pageLoadTimeoutMs: 60000
+    property int _loadRetriesLeft: 0
+    property string _loadWatchUrl: ""
+    property bool _abortingLoad: false
     property bool siteOnly: false
     property int reloadNonce: 0
     property bool wantEngine: false
     property bool engineArmed: false
+    property bool _applyingUrl: false
+    readonly property string profileStoragePath: {
+        var win = Window.window
+        var host = win && win.surfaceHost ? win.surfaceHost : null
+        if (host && host.webProfilePath)
+            return String(host.webProfilePath())
+        return "/home/GG/.local/state/goldgoblins/gg-ai-desktop/web-profile"
+    }
     property bool operatorBusy: false
     property string operatorLabel: ""
     property real agentX: 48
@@ -47,7 +60,9 @@ Item {
         root.loadState === "LOADING" ? "wait" : root.agentShape
     signal navigated(string href)
     signal openNewTab(string href)
+    signal popupViewReady(var view)
     signal titled(string title)
+    property var adoptedEngine: null
 
     readonly property bool engineActive: true
 
@@ -73,8 +88,19 @@ Item {
             root.engineArmed = true
     }
 
+    WebEngineProfile {
+        id: sessionProfile
+        objectName: "webSessionProfile"
+        storageName: "gg-web"
+        offTheRecord: false
+        persistentCookiesPolicy: WebEngineProfile.ForcePersistentCookies
+        httpCacheType: WebEngineProfile.DiskHttpCache
+        persistentStoragePath: root.profileStoragePath
+        cachePath: root.profileStoragePath + "/cache"
+    }
+
     Connections {
-        target: WebEngine.defaultProfile
+        target: sessionProfile
         function onDownloadRequested(download) {
             var win = root.Window.window
             var host = win && win.surfaceHost ? win.surfaceHost : null
@@ -110,25 +136,132 @@ Item {
         return false
     }
 
+    function liveEngine() {
+        return root.adoptedEngine || engineLoader.item
+    }
+
     function reload() {
-        if (engineLoader.item)
-            engineLoader.item.reload()
+        var engine = root.liveEngine()
+        if (engine)
+            engine.reload()
     }
 
     function goBack() {
-        if (engineLoader.item)
-            engineLoader.item.goBack()
+        var engine = root.liveEngine()
+        if (engine)
+            engine.goBack()
     }
 
     function goForward() {
-        if (engineLoader.item)
-            engineLoader.item.goForward()
+        var engine = root.liveEngine()
+        if (engine)
+            engine.goForward()
     }
 
     function currentHref() {
-        if (engineLoader.item)
-            return String(engineLoader.item.url || root.pageUrl || "")
+        var engine = root.liveEngine()
+        if (engine)
+            return String(engine.url || root.pageUrl || "")
         return String(root.pageUrl || "")
+    }
+
+    function takeView(view) {
+        if (!view)
+            return
+        root.adoptedEngine = view
+        root.engineArmed = false
+        view.parent = engineHost
+        view.anchors.fill = engineHost
+        view.visible = true
+        view.z = 2
+        function syncUrl() {
+            var href = String(view.url || "")
+            if (!href.length)
+                return
+            root._applyingUrl = true
+            root.navigated(href)
+            root._applyingUrl = false
+        }
+        view.urlChanged.connect(syncUrl)
+        view.loadingChanged.connect(function(loadRequest) {
+            root.handleEngineLoad(Number(loadRequest.status), view)
+        })
+        syncUrl()
+    }
+
+    function handleEngineLoad(status, view) {
+        if (status === WebEngineView.LoadStartedStatus) {
+            if (root._abortingLoad) {
+                pageLoadWatch.stop()
+                return
+            }
+            root.loadFailReason = ""
+            root.loadState = "LOADING"
+            root._loadWatchUrl = String((view && view.url) || root.currentHref() || "")
+            pageLoadWatch.restart()
+            return
+        }
+        if (status === WebEngineView.LoadSucceededStatus) {
+            pageLoadWatch.stop()
+            if (root._abortingLoad) {
+                root.loadState = "FAIL"
+                return
+            }
+            root._loadRetriesLeft = 0
+            root.loadFailReason = ""
+            root.loadState = "PASS"
+            if (view && view.runJavaScript)
+                view.runJavaScript("document.title", function(title) {
+                    root.titled(String(title || ""))
+                })
+            return
+        }
+        if (status === WebEngineView.LoadFailedStatus) {
+            pageLoadWatch.stop()
+            if (root._abortingLoad)
+                return
+            root._loadRetriesLeft = 0
+            root.loadFailReason = "ENGINE"
+            root.loadState = "FAIL"
+        }
+    }
+
+    function haltEngine() {
+        pageLoadWatch.stop()
+        root._loadDone = null
+        var engine = root.liveEngine()
+        if (engine && engine.stop)
+            engine.stop()
+    }
+
+    function abortStuckLoad() {
+        if (root._abortingLoad)
+            return
+        root.haltEngine()
+        if (
+            root._loadRetriesLeft > 0
+            && root._loadWatchUrl.length > 0
+            && root._loadWatchUrl.indexOf("about:blank") !== 0
+        ) {
+            root._loadRetriesLeft -= 1
+            root.loadState = "LOADING"
+            pageLoadWatch.restart()
+            var retryEngine = root.liveEngine()
+            if (retryEngine)
+                retryEngine.url = root._loadWatchUrl
+            return
+        }
+        root._abortingLoad = true
+        var engine = root.liveEngine()
+        if (engine)
+            engine.url = "about:blank"
+        root.loadFailReason = "TIMEOUT"
+        root.loadState = "FAIL"
+        if (root._loadDone) {
+            var fn = root._loadDone
+            root._loadDone = null
+            fn("TIMEOUT")
+        }
     }
 
     function runPageScript(script, done) {
@@ -141,11 +274,12 @@ Item {
         }
         root._scriptOnce = once
         scriptWatch.restart()
-        if (!engineLoader.item || !engineLoader.item.runJavaScript) {
+        var engine = root.liveEngine()
+        if (!engine || !engine.runJavaScript) {
             once("")
             return
         }
-        engineLoader.item.runJavaScript(script, once)
+        engine.runJavaScript(script, once)
     }
 
     function playOperator(cmd, done) {
@@ -322,8 +456,9 @@ Item {
     }
 
     function _grabView(done) {
-        if (engineLoader.item && engineLoader.item.update)
-            engineLoader.item.update()
+        var engine = root.liveEngine()
+        if (engine && engine.update)
+            engine.update()
         var win = Window.window
         if (win && win.update)
             win.update()
@@ -333,8 +468,9 @@ Item {
 
     function _grabViewNow(done) {
         var target = root
-        if (engineLoader.item && engineLoader.item.grabToImage)
-            target = engineLoader.item
+        var engine = root.liveEngine()
+        if (engine && engine.grabToImage)
+            target = engine
         if (!target.grabToImage) {
             done("")
             return
@@ -525,7 +661,7 @@ Item {
         var aux = String(root._opCmd.text || "") === "aux"
         var script = aux
             ? "(function(){" + root._elFindJs(selector) + ";if(!el)return JSON.stringify({ok:false,reason:'MISS'});var href=el.href||el.getAttribute('href')||'';el.dispatchEvent(new MouseEvent('auxclick',{bubbles:true,cancelable:true,button:1,which:2,buttons:4,clientX:" + hit.x + ",clientY:" + hit.y + "}));el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,button:1,which:2,clientX:" + hit.x + ",clientY:" + hit.y + "}));return JSON.stringify({ok:true,reason:'MIDDLE',url:href,title:document.title});})()"
-            : "(function(){" + root._elFindJs(selector) + ";if(!el)return JSON.stringify({ok:false,reason:'MISS'});var href=(el.tagName==='A'&&el.href)?el.href:'';if(href){setTimeout(function(){location.href=href;},0);return JSON.stringify({ok:true,reason:'CLICKED',url:href,title:document.title});}el.click();return JSON.stringify({ok:true,reason:'CLICKED',url:location.href,title:document.title});})()"
+            : "(function(){" + root._elFindJs(selector) + ";if(!el)return JSON.stringify({ok:false,reason:'MISS'});var r=el.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var opts={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0,buttons:1};el.dispatchEvent(new MouseEvent('mousedown',opts));el.dispatchEvent(new MouseEvent('mouseup',Object.assign({},opts,{buttons:0})));el.dispatchEvent(new MouseEvent('click',Object.assign({},opts,{buttons:0})));if(typeof el.click==='function')el.click();return JSON.stringify({ok:true,reason:'CLICKED',url:location.href,title:document.title});})()"
         root.runPageScript(script, function(raw) {
             var parsed = root._parse(raw)
             function doneClick() {
@@ -732,11 +868,45 @@ Item {
             root.agentShape = "default"
     }
 
-    Loader {
-        id: engineLoader
+    function applyPageUrl() {
+        var engine = root.liveEngine()
+        if (!engine || root._applyingUrl)
+            return
+        var next = String(root.pageUrl || "")
+        var cur = String(engine.url || "")
+        if (next.length === 0 || next === cur)
+            return
+        root._abortingLoad = false
+        root._loadRetriesLeft = 0
+        root.loadFailReason = ""
+        engine.url = next
+    }
+
+    onPageUrlChanged: root.applyPageUrl()
+
+    Item {
+        id: engineHost
+        objectName: "webEngineHost"
         anchors.fill: parent
-        active: root.engineArmed
-        sourceComponent: webEngineComp
+
+        Loader {
+            id: engineLoader
+            anchors.fill: parent
+            active: root.engineArmed && root.adoptedEngine === null
+            sourceComponent: webEngineComp
+            onLoaded: root.applyPageUrl()
+        }
+    }
+
+    Component {
+        id: popupEngineComp
+        WebEngineView {
+            anchors.fill: parent
+            profile: sessionProfile
+            backgroundColor: "#161616"
+            settings.javascriptEnabled: true
+            settings.localContentCanAccessFileUrls: true
+        }
     }
 
     Component {
@@ -744,29 +914,24 @@ Item {
         WebEngineView {
         id: view
         anchors.fill: parent
-        url: root.pageUrl
+        profile: sessionProfile
         backgroundColor: "#161616"
         settings.javascriptEnabled: true
         settings.localContentCanAccessFileUrls: true
 
+        Component.onCompleted: root.applyPageUrl()
+
         onUrlChanged: {
             var href = String(view.url)
-            if (href.length > 0 && href !== String(root.pageUrl))
-                root.navigated(href)
+            if (href.length === 0)
+                return
+            root._applyingUrl = true
+            root.navigated(href)
+            root._applyingUrl = false
         }
 
         onLoadingChanged: function(loadRequest) {
-            var status = Number(loadRequest.status)
-            if (status === WebEngineView.LoadStartedStatus)
-                root.loadState = "LOADING"
-            else if (status === WebEngineView.LoadSucceededStatus) {
-                root.loadState = "PASS"
-                view.runJavaScript("document.title", function(title) {
-                    root.titled(String(title || ""))
-                })
-            }
-            else if (status === WebEngineView.LoadFailedStatus)
-                root.loadState = "FAIL"
+            root.handleEngineLoad(Number(loadRequest.status), view)
         }
 
         onNavigationRequested: function(request) {
@@ -791,9 +956,14 @@ Item {
         }
 
         onNewWindowRequested: function(request) {
-            var href = String(request.requestedUrl || "")
-            if (href.length > 0)
-                root.openNewTab(href)
+            var popup = popupEngineComp.createObject(engineHost)
+            if (!popup) {
+                request.openIn(view)
+                return
+            }
+            popup.visible = false
+            request.openIn(popup)
+            root.popupViewReady(popup)
         }
         }
     }
@@ -983,6 +1153,13 @@ Item {
     }
 
     Timer {
+        id: pageLoadWatch
+        interval: root.pageLoadTimeoutMs
+        repeat: false
+        onTriggered: root.abortStuckLoad()
+    }
+
+    Timer {
         id: scriptWatch
         interval: 2500
         repeat: false
@@ -1043,7 +1220,11 @@ Item {
                     ? "URL is outside the local SITE root."
                     : "This address cannot be opened here."
             )
-            : "WebEngine could not load this page."
+            : (
+                root.loadFailReason === "TIMEOUT"
+                    ? "Sidan laddade inte inom 60 sekunder. Laddningen avbröts."
+                    : "WebEngine could not load this page."
+            )
         color: "#c8a97e"
         wrapMode: Text.WordWrap
         font.family: "monospace"

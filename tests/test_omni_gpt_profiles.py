@@ -47,6 +47,8 @@ def main() -> int:
         assert "Compact turn context" in compact
         assert "[PROFILE idekompassen" in compact
         assert "selected_for_this_turn=idekompassen" in compact
+        assert "[SAME_TASK_DESK]" in compact
+        assert "parallel_agent_brain=FORBIDDEN" in compact
 
     import main
     from backend.grok_worker_contract import ENGINE_GPT_TUI, ENGINE_LOCAL_QWEN

@@ -561,6 +561,40 @@ def main() -> int:
         "active: root.visible" not in web_pane,
         "WEB engine still tears down on visibility.",
     )
+    require(
+        "request.openIn(popup)" in web_pane
+        and "function takeView(" in web_pane
+        and "popupViewReady" in web_pane
+        and "function adoptPopupView(" in workspace_surface,
+        "WP Admin new-window still does not open a real tab like a browser.",
+    )
+    require(
+        'storageName: "gg-web"' in web_pane
+        and "ForcePersistentCookies" in web_pane
+        and "offTheRecord: false" in web_pane
+        and "profile: sessionProfile" in web_pane,
+        "WEB tabs still use an off-the-record profile, so login cookies die.",
+    )
+    require(
+        "function abortStuckLoad(" in web_pane
+        and "function haltEngine(" in web_pane
+        and "pageLoadTimeoutMs: 60000" in web_pane
+        and "id: pageLoadWatch" in web_pane
+        and "engine.stop" in web_pane
+        and 'engine.url = "about:blank"' in web_pane
+        and "Sidan laddade inte inom 60 sekunder" in web_pane,
+        "WEB pane still lets Chromium load forever without aborting.",
+    )
+    require(
+        "webTab.holdWebEngine = false" in workspace_surface
+        and "haltEngine" in workspace_surface,
+        "Background WEB tabs still keep extra Chromium engines alive.",
+    )
+    web_cursor = text("qml/components/WebAgentCursor.qml")
+    require(
+        "enabled: false" in web_cursor,
+        "Gold pointer still swallows mouse events before Chromium.",
+    )
     grok_tui_hole = text("qml/components/GrokTuiHole.qml")
     require(
         "QtWebEngine" not in grok_tui_hole,
@@ -577,7 +611,10 @@ def main() -> int:
     )
     require(
         "ensureWebEngine" in workspace_surface
-        and 'source: active ? "WebPane.qml" : ""' in workspace_surface
+        and "webPaneSource" in workspace_surface
+        and "WebPane.qml?r=" in workspace_surface
+        and "function applyPageUrl(" in web_pane
+        and "url: root.pageUrl" not in web_pane
         and "function applyWebOperator(" in workspace_surface
         and 'root.setHostKind("WEB")' in workspace_surface[workspace_surface.index("function applyWebOperator(") : workspace_surface.index("function flushPendingWebOp(")]
         and "WEB_NOT_FOCUSED" not in workspace_surface
