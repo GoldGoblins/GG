@@ -466,27 +466,36 @@ def main() -> int:
         "function applySaveAsUrl(",
         'title: "SAVE AS"',
         'text: "CODE"',
-        'text: "TERMINAL"',
+        'text: "CMD"',
         'text: "WEB"',
-        'text: "EXTERNAL"',
+        'text: "EXT"',
         'text: "SITE"',
         'text: "CRYPTO"',
-        'text: "MARKETPLACE"',
+        'text: "MP"',
         'text: "TMOG"',
+        'text: "OSINT"',
+        'text: "QIP"',
         'text: "MEDIA"',
         'text: "DRAW"',
+        'text: "GAME ENGINE"',
         'hostKind === "CRYPTO"',
         'hostKind === "MARKETPLACE"',
         'hostKind === "TMOG"',
+        'hostKind === "OSINT"',
         'hostKind === "MEDIA"',
         'hostKind === "DRAW"',
+        'hostKind === "GAME_ENGINE"',
         'objectName: "workspaceMarketplacePane"',
         'objectName: "workspaceTmogPane"',
+        'objectName: "workspaceOsintPane"',
+        'objectName: "workspaceQipPane"',
         'objectName: "workspaceMediaPane"',
         'objectName: "workspaceDrawPane"',
+        'objectName: "workspaceGameEnginePane"',
         "MarketplaceSurface {",
         "MediaSurface {",
         "DrawSurface {",
+        "GameEngineSurface {",
         "function applyLiveReload()",
         "liveEpoch",
         'objectName: "workspaceWebHost"',
@@ -707,7 +716,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "MEDIA", "DRAW"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE"]',
     ):
         require(
             marker in settings_workspace,
@@ -1438,7 +1447,10 @@ def main() -> int:
         and "active: !root.settingsOpen && root.hostKind === \"CRYPTO\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"MARKETPLACE\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"TMOG\"" in ws_qml
-        and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml,
+        and "active: !root.settingsOpen && root.hostKind === \"OSINT\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"QIP\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"GAME_ENGINE\"" in ws_qml,
         "Unused workspace function panes are still kept alive.",
     )
     require(

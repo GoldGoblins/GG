@@ -589,6 +589,7 @@ ApplicationWindow {
         ? Window.FullScreen
         : (root.desktopShell ? Window.Windowed : Window.Maximized)
     color: root.canvas
+    font.family: "monospace"
 
     ListModel {
         id: chatModel

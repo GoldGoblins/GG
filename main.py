@@ -9,7 +9,9 @@ import json
 import os
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
-    "--disable-gpu --disable-extensions --disable-background-networking --disable-sync",
+    "--disable-extensions --disable-background-networking --disable-sync "
+    "--ignore-gpu-blocklist --enable-webgl --enable-webgl2 "
+    "--enable-unsafe-swiftshader",
 )
 import stat
 import subprocess
@@ -20,6 +22,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from backend import shell_load
@@ -11980,6 +11983,9 @@ def main() -> int:
         raise RuntimeError("Task-scoped mandate requirement mismatch.")
 
     app = QApplication(sys.argv)
+    desk_font = QFont("monospace")
+    desk_font.setStyleHint(QFont.StyleHint.Monospace)
+    app.setFont(desk_font)
     engine = QQmlApplicationEngine()
     engine.setInitialProperties(
         qml_initial_properties(config)

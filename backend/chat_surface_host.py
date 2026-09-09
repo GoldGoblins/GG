@@ -29,9 +29,12 @@ from PySide6.QtCore import (
 
 from backend.chat_sessions import forget_session, list_for_ui, sync_owned
 from backend import crypto_host
+from backend import game_engine_host
 from backend import libretro_host
 from backend import marketplace_host
 from backend import media_host
+from backend import osint_host
+from backend import qip_lab
 from backend import tmog_contract
 from backend.grok_wallet import snapshot as grok_wallet_snapshot
 from backend.codex_wallet import (
@@ -163,6 +166,7 @@ class ChatSurfaceHost(QObject):
     mediaStateChanged = Signal()
     mediaSeekChanged = Signal(float)
     terminalScrollChanged = Signal(str, int, int, int)
+    osintUpdated = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -176,6 +180,8 @@ class ChatSurfaceHost(QObject):
         self._media_embed: object | None = None
         self._torlink_embed: object | None = None
         self._draw_embed: object | None = None
+        self._osint = osint_host.OsintHost(self)
+        self._osint.updated.connect(self.osintUpdated)
         self._pending_tui_size: tuple[int, int] | None = None
         self._fs: QFileSystemWatcher | None = None
         self._fs_suppress: set[str] = set()
@@ -1146,6 +1152,26 @@ class ChatSurfaceHost(QObject):
         self._tmog_pulse_at = now
         return raw
 
+    @Slot(str, result=str)
+    def osintSnapshot(self, page: str = "OVERVIEW") -> str:
+        return self._osint.snapshot(str(page or "OVERVIEW"))
+
+    @Slot(str, result=bool)
+    def osintRefresh(self, page: str = "OVERVIEW") -> bool:
+        return bool(self._osint.refresh(str(page or "OVERVIEW")))
+
+    @Slot(str, result=str)
+    def osintPlanRoute(self, spec_json: str = "{}") -> str:
+        return self._osint.planRoute(str(spec_json or "{}"))
+
+    @Slot(str)
+    def osintCopy(self, text: str) -> None:
+        from PySide6.QtGui import QGuiApplication
+
+        clip = QGuiApplication.clipboard()
+        if clip is not None:
+            clip.setText(str(text or "")[:4000])
+
     @Slot(result=bool)
     def chatIoActive(self) -> bool:
         return bool(self._chat_io_at) and (time.monotonic() - self._chat_io_at) < 0.28
@@ -1712,6 +1738,75 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
+    @Slot(str, str, str, str, result=str)
+    def cryptoPolymarketQuery(
+        self,
+        preset: str,
+        query_date: str,
+        hour: str,
+        slug: str,
+    ) -> str:
+        try:
+            return json.dumps(
+                crypto_host.start_polymarket_query(
+                    preset,
+                    query_date,
+                    hour,
+                    slug,
+                ),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoPolymarketStatus(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.poll_polymarket_query(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoPolymarketReset(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.reset_polymarket_query(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoStrategyFactory(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.start_strategy_factory(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoStrategyFactoryStatus(self) -> str:
+        try:
+            payload = crypto_host.status_payload()
+            return json.dumps(payload, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoStrategyFactoryReset(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.reset_strategy_factory(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
     @Slot(str, result=str)
     def cryptoSetBook(self, book_id: str) -> str:
         try:
@@ -1759,6 +1854,76 @@ class ChatSurfaceHost(QObject):
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
+
+    @Slot(str, result=str)
+    def qipInspect(self, path: str) -> str:
+        try:
+            return json.dumps(qip_lab.inspect_file(path), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, str, result=str)
+    def qipRun(self, path: str, input_text: str) -> str:
+        try:
+            return json.dumps(
+                qip_lab.run_file(path, input_text),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    def _game_engine_json(self, value: object) -> str:
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({
+                "schema": game_engine_host.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(result=str)
+    def gameEngineStatus(self) -> str:
+        return self._game_engine_json(game_engine_host.status_payload())
+
+    @Slot(result=str)
+    def gameEngineStart(self) -> str:
+        return self._game_engine_json(game_engine_host.start())
+
+    @Slot(result=str)
+    def gameEnginePause(self) -> str:
+        return self._game_engine_json(game_engine_host.pause())
+
+    @Slot(result=str)
+    def gameEngineReset(self) -> str:
+        return self._game_engine_json(game_engine_host.reset())
+
+    @Slot(result=str)
+    def gameEngineStep(self) -> str:
+        return self._game_engine_json(game_engine_host.step())
+
+    @Slot(result=str)
+    def gameEngineBurst(self) -> str:
+        return self._game_engine_json(game_engine_host.burst())
+
+    @Slot(bool, result=str)
+    def gameEngineStress(self, enabled: bool) -> str:
+        return self._game_engine_json(game_engine_host.set_stress(bool(enabled)))
+
+    @Slot(str, result=str)
+    def gameEngineInput(self, raw: str) -> str:
+        return self._game_engine_json(game_engine_host.set_input(str(raw or "{}")))
+
+    @Slot(result=str)
+    def gameEngineRecordStart(self) -> str:
+        return self._game_engine_json(game_engine_host.start_recording())
+
+    @Slot(result=str)
+    def gameEngineRecordStop(self) -> str:
+        return self._game_engine_json(game_engine_host.stop_recording())
+
+    @Slot(result=str)
+    def gameEngineReplay(self) -> str:
+        return self._game_engine_json(game_engine_host.play_replay())
 
     @Slot(result=str)
     def marketplaceStatus(self) -> str:
@@ -3728,6 +3893,8 @@ class ChatSurfaceHost(QObject):
         self._draw_embed = None
         if draw is not None:
             draw.stop()
+        self._osint.shutdown()
+        game_engine_host.shutdown()
         media_host.stop()
 
     def _pty_readable(self, terminal_id: str) -> None:

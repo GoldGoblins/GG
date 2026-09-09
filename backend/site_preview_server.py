@@ -26,7 +26,7 @@ def _landing(root: Path) -> bytes:
     body = (
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<title>SITE preview</title>"
-        "<style>body{font-family:sans-serif;background:#121212;color:#e6e6e6;"
+        "<style>body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#121212;color:#e6e6e6;"
         "margin:2rem}a{color:#c8a97e}</style></head><body>"
         "<h1>Local SITE preview</h1>"
         "<p>This is 127.0.0.1 only. PHP is not running, so WordPress pages "

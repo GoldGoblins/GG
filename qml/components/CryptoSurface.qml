@@ -19,7 +19,9 @@ Item {
         "BACKTEST",
         "SIGNAL",
         "ARB",
-        "ACTIVITY"
+        "ACTIVITY",
+        "FACTORY",
+        "POLY"
     ]
     readonly property bool backtestRunning: String((root.status.backtest_job || {}).state || "") === "running"
     signal walletLabelChanged(string label)
@@ -53,6 +55,18 @@ Item {
     readonly property var trader: root.status.trader || {}
     readonly property var arb: root.status.arb || {}
     readonly property var lab: root.status.lab || {}
+    readonly property var polymarket: root.status.polymarket || {}
+    readonly property var polyResult: root.polymarket.result || {}
+    readonly property bool polyRunning: String(root.polymarket.state || "") === "running"
+    readonly property var strategyFactory: root.status.strategy_factory || {}
+    readonly property var strategyFactoryJob: root.status.strategy_factory_job || {}
+    readonly property var strategyFactoryResult: root.strategyFactory
+    readonly property bool strategyFactoryRunning:
+        String(root.strategyFactoryJob.state || "") === "running"
+    property string polyPreset: "SUMMARY"
+    property string polyDate: root.utcDate()
+    property string polyHour: root.utcHour()
+    property string polySlug: ""
     readonly property string legend: String(root.status.legend || "TESTNET")
     readonly property bool connected: String(root.wallet.pubkey || "").length > 12
     readonly property var quote: root.status.quote || {}
@@ -119,6 +133,22 @@ Item {
         return out
     }
 
+    function twoDigits(value) {
+        var number = Number(value)
+        return number < 10 ? "0" + String(number) : String(number)
+    }
+
+    function utcDate() {
+        var now = new Date()
+        return String(now.getUTCFullYear()) + "-"
+            + twoDigits(now.getUTCMonth() + 1) + "-"
+            + twoDigits(now.getUTCDate())
+    }
+
+    function utcHour() {
+        return twoDigits(new Date().getUTCHours())
+    }
+
     function refresh() {
         if (!root.surfaceHost)
             return
@@ -147,6 +177,52 @@ Item {
         }
         var w = root.status.wallet || {}
         root.walletLabelChanged(String(w.label || "WALLET · DISCONNECTED"))
+    }
+
+    function runPolymarketQuery() {
+        if (!root.surfaceHost || !root.surfaceHost.cryptoPolymarketQuery)
+            return
+        root.statusJson = root.surfaceHost.cryptoPolymarketQuery(
+            root.polyPreset,
+            polyDateField.text,
+            polyHourField.text,
+            polySlugField.text
+        )
+    }
+
+    function pollPolymarketQuery() {
+        if (!root.surfaceHost || !root.surfaceHost.cryptoPolymarketStatus)
+            return
+        root.statusJson = root.surfaceHost.cryptoPolymarketStatus()
+    }
+
+    function resetPolymarketQuery() {
+        if (!root.surfaceHost || !root.surfaceHost.cryptoPolymarketReset)
+            return
+        root.statusJson = root.surfaceHost.cryptoPolymarketReset()
+    }
+
+    function factoryRolesText() {
+        var roles = (root.strategyFactoryResult.orchestration || {}).roles || []
+        var out = []
+        for (var i = 0; i < roles.length; i++) {
+            var role = roles[i] || {}
+            out.push(String(role.id || "ROLE") + "=" + String(role.state || "—"))
+        }
+        return out.join("  ·  ")
+    }
+
+    function factoryMetric(row) {
+        var item = row || {}
+        var ret = item.return_pct !== undefined ? item.return_pct : "—"
+        var drawdown = item.max_drawdown_pct !== undefined
+            ? item.max_drawdown_pct : "—"
+        var trades = item.trades !== undefined ? item.trades : "—"
+        var wins = item.win_rate_pct !== undefined ? item.win_rate_pct : "—"
+        return "ret " + String(ret) + "%"
+            + "  maxDD " + String(drawdown) + "%"
+            + "  trades " + String(trades)
+            + "  win " + String(wins) + "%"
     }
 
     function connectWatch() {
@@ -298,6 +374,21 @@ Item {
 
     Timer {
         interval: 1000
+        running: root.visible && root.page === "POLY" && root.polyRunning
+        repeat: true
+        onTriggered: root.pollPolymarketQuery()
+    }
+
+    Timer {
+        interval: 1000
+        running: root.visible && root.page === "FACTORY"
+            && root.strategyFactoryRunning
+        repeat: true
+        onTriggered: root.refresh()
+    }
+
+    Timer {
+        interval: 1000
         running: root.visible && String(root.lab.label || "") === "LAB STARTING"
         repeat: true
         onTriggered: root.refresh()
@@ -395,6 +486,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     active: root.backtestRunning
                         || String(root.lab.label || "") === "LAB STARTING"
+                        || root.strategyFactoryRunning
                     cell: 5
                 }
                 Text {
@@ -1234,6 +1326,409 @@ Item {
                     color: "#a8b0b8"
                     font.family: "monospace"
                     font.pixelSize: 12
+                }
+            }
+
+            Flickable {
+                id: factoryScroll
+                anchors.fill: parent
+                visible: root.page === "FACTORY"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: factoryCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: factoryCol
+                    width: factoryScroll.width
+                    height: childrenRect.height
+                    spacing: 8
+
+                    Text {
+                        text: "STRATEGY FACTORY"
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 16
+                    }
+                    Text {
+                        text: "ECC LOOP  ·  BOUNDED WORKERS  ·  PAPER ONLY"
+                        color: "#b6a6c8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        width: factoryCol.width
+                        text: "Hypothesis → backtest → validation → paper review. "
+                            + "This surface never places orders and never arms a wallet."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Row {
+                        spacing: 14
+                        Text {
+                            text: root.strategyFactoryRunning ? "RUNNING…" : "RUN FACTORY"
+                            color: root.strategyFactoryRunning ? "#c8a97e" : "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.strategyFactoryRunning
+                                            || !root.surfaceHost
+                                            || !root.surfaceHost.cryptoStrategyFactory)
+                                        return
+                                    root.statusJson = root.surfaceHost.cryptoStrategyFactory()
+                                }
+                            }
+                        }
+                        Text {
+                            text: "RESET"
+                            color: "#c8a97e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (!root.surfaceHost
+                                            || !root.surfaceHost.cryptoStrategyFactoryReset)
+                                        return
+                                    root.statusJson = root.surfaceHost.cryptoStrategyFactoryReset()
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        width: factoryCol.width
+                        text: "STATE · "
+                            + String(root.strategyFactoryJob.state || "idle").toUpperCase()
+                            + "  ·  " + String(root.strategyFactoryJob.note || root.strategyFactoryResult.note || "")
+                        color: root.strategyFactoryRunning ? "#c8a97e" : "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: factoryCol.width
+                        visible: root.strategyFactoryResult.source !== undefined
+                        text: {
+                            var source = root.strategyFactoryResult.source || {}
+                            var split = root.strategyFactoryResult.split || {}
+                            return "SOURCE · " + String(source.symbol || "SOLUSDT")
+                                + "  " + String(source.interval || "—")
+                                + "  " + String(source.bars || 0) + " bars"
+                                + "  friction " + String(source.fee_bps || 0)
+                                + "+" + String(source.slippage_bps || 0) + " bps"
+                                + "\nSPLIT · train " + String(split.train_pct || 60)
+                                + "%  validate " + String(split.validation_pct || 20)
+                                + "%  test " + String(split.test_pct || 20) + "%"
+                        }
+                        color: "#8fa8a0"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: factoryCol.width
+                        text: "ROLES · " + root.factoryRolesText()
+                            + "\nGATES · " + (((root.strategyFactoryResult.orchestration || {}).gates || []).join("  ·  "))
+                        color: "#7f8994"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    Repeater {
+                        model: (root.strategyFactoryResult.candidates || []).length
+                        delegate: Rectangle {
+                            required property int index
+                            width: factoryCol.width
+                            height: candidateBody.implicitHeight + 16
+                            color: "#121212"
+                            border.width: 1
+                            border.color: "#4c4c4c"
+                            radius: 2
+
+                            Column {
+                                id: candidateBody
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 4
+                                readonly property var row:
+                                    (root.strategyFactoryResult.candidates || [])[index] || {}
+                                Text {
+                                    width: candidateBody.width
+                                    text: String(candidateBody.row.label || candidateBody.row.id || "CANDIDATE")
+                                        + "  [" + String(candidateBody.row.verdict || "—") + "]"
+                                    color: String(candidateBody.row.verdict || "") === "PASS"
+                                        ? "#8db89a"
+                                        : (String(candidateBody.row.verdict || "") === "REJECT"
+                                            ? "#c98989" : "#c8a97e")
+                                    font.family: "monospace"
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                }
+                                Text {
+                                    width: candidateBody.width
+                                    text: String(candidateBody.row.hypothesis || "")
+                                    color: "#a8b0b8"
+                                    font.family: "monospace"
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                }
+                                Text {
+                                    width: candidateBody.width
+                                    text: "TRAIN  " + root.factoryMetric(candidateBody.row.train)
+                                        + "\nVALID  " + root.factoryMetric(candidateBody.row.validation)
+                                        + "\nTEST   " + root.factoryMetric(candidateBody.row.test)
+                                    color: "#c8cdd4"
+                                    font.family: "monospace"
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                }
+                                Text {
+                                    width: candidateBody.width
+                                    text: String(candidateBody.row.gate_reason || "")
+                                    color: "#7f8994"
+                                    font.family: "monospace"
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        width: factoryCol.width
+                        visible: (root.strategyFactoryResult.candidates || []).length === 0
+                        text: "No factory result yet. Run the bounded local research loop."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+
+            Flickable {
+                id: polyScroll
+                anchors.fill: parent
+                visible: root.page === "POLY"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: polyCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: polyCol
+                    width: polyScroll.width
+                    height: childrenRect.height
+                    spacing: 8
+
+                    Text {
+                        text: "POLYMARKET RESEARCH"
+                        color: "#d8dee9"
+                        font.family: "monospace"
+                        font.pixelSize: 16
+                    }
+                    Text {
+                        text: "PENDULUMFLOW V3  ·  REMOTE PARQUET  ·  READ ONLY"
+                        color: "#b6a6c8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: "One UTC hour per query. No wallet, order placement or automatic archive sync is connected."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Row {
+                        width: polyCol.width
+                        spacing: 8
+                        Text {
+                            text: "UTC"
+                            color: "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        GgField {
+                            id: polyDateField
+                            width: 112
+                            height: 26
+                            placeholderText: "YYYY-MM-DD"
+                            text: root.polyDate
+                        }
+                        GgField {
+                            id: polyHourField
+                            width: 54
+                            height: 26
+                            placeholderText: "HH"
+                            text: root.polyHour
+                        }
+                    }
+
+                    Row {
+                        width: polyCol.width
+                        spacing: 12
+                        Text {
+                            text: "SUMMARY"
+                            color: root.polyPreset === "SUMMARY" ? "#d8dee9" : "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: root.polyPreset === "SUMMARY"
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.polyPreset = "SUMMARY"
+                            }
+                        }
+                        Text {
+                            text: "TRADES"
+                            color: root.polyPreset === "TRADES" ? "#d8dee9" : "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: root.polyPreset === "TRADES"
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.polyPreset = "TRADES"
+                            }
+                        }
+                        Text {
+                            text: "TOUCH"
+                            color: root.polyPreset === "TOUCH" ? "#d8dee9" : "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: root.polyPreset === "TOUCH"
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.polyPreset = "TOUCH"
+                            }
+                        }
+                    }
+
+                    Row {
+                        width: polyCol.width
+                        spacing: 8
+                        Text {
+                            text: "SLUG"
+                            color: root.polyPreset === "TOUCH" ? "#c8cdd4" : "#5d6670"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        GgField {
+                            id: polySlugField
+                            width: Math.max(120, polyCol.width - 58)
+                            height: 26
+                            enabled: root.polyPreset === "TOUCH"
+                            placeholderText: "market slug for TOUCH / optional otherwise"
+                            text: root.polySlug
+                        }
+                    }
+
+                    Row {
+                        spacing: 14
+                        Text {
+                            text: root.polyRunning ? "READING…" : "RUN QUERY"
+                            color: root.polyRunning ? "#c8a97e" : "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.runPolymarketQuery()
+                            }
+                        }
+                        Text {
+                            text: "RESET"
+                            color: "#c8a97e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.resetPolymarketQuery()
+                            }
+                        }
+                    }
+
+                    Text {
+                        width: polyCol.width
+                        text: {
+                            var state = String(root.polymarket.state || "IDLE").toUpperCase()
+                            var mode = String(root.polymarket.preset || root.polyPreset || "SUMMARY")
+                            return "STATE · " + state + "  ·  " + mode
+                        }
+                        color: root.polyRunning ? "#c8a97e" : "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: String(root.polymarket.note || "")
+                        visible: text.length > 0
+                        color: String(root.polymarket.state || "") === "error" ? "#c98989" : "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: "ARCHIVE · " + String(root.polymarket.url || "")
+                        visible: String(root.polymarket.url || "").length > 0
+                        color: "#8fa8a0"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: "SQL PREVIEW\n" + String(root.polymarket.sql || "")
+                        visible: String(root.polymarket.sql || "").length > 0
+                        color: "#7f8994"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: ((root.polyResult || {}).lines || []).join("\n")
+                        visible: ((root.polyResult || {}).lines || []).length > 0
+                        color: "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Text {
+                        width: polyCol.width
+                        visible: !root.polyRunning
+                            && ((root.polyResult || {}).lines || []).length === 0
+                            && String(root.polymarket.state || "") !== "error"
+                        text: "No result yet. SUMMARY and TRADES need only a UTC hour; TOUCH also needs a market slug."
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        width: polyCol.width
+                        text: "POLY_DATA · " + String((root.polymarket.poly_data || {}).state || "OPTIONAL")
+                            + "\n" + String((root.polymarket.poly_data || {}).note || "")
+                        color: "#7f8994"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
                 }
             }
 

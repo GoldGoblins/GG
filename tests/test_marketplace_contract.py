@@ -34,7 +34,7 @@ def main() -> int:
     if "leftLegend: \"MARKETPLACE\"" in qml:
         raise AssertionError("marketplace pane still nests a MARKETPLACE GgFrame")
     crypto_at = ws.index('text: "CRYPTO"')
-    market_at = ws.index('text: "MARKETPLACE"')
+    market_at = ws.index('text: "MP"')
     tmog_at = ws.index('text: "TMOG"')
     if not (crypto_at < market_at < tmog_at):
         raise AssertionError("MARKETPLACE tab not between CRYPTO and TMOG")

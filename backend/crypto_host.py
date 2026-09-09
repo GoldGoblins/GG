@@ -16,6 +16,8 @@ from backend.crypto_keys import (
 )
 from backend import crypto_strategy004
 from backend import crypto_bots, crypto_flash_arb, crypto_trader
+from backend import crypto_strategy_factory
+from backend import polymarket_research
 from backend.crypto_lab import (
     current_slot,
     has_blockhash,
@@ -456,6 +458,120 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     return decorate_ledger_row(row)
 
 
+_strategy_factory_lock = threading.Lock()
+_strategy_factory_job: dict[str, Any] = {
+    "state": "idle",
+    "note": "",
+    "started": 0.0,
+    "result": crypto_strategy_factory.empty_snapshot(),
+}
+
+
+def strategy_factory_status() -> dict[str, Any]:
+    with _strategy_factory_lock:
+        job = dict(_strategy_factory_job)
+        result = job.get("result")
+        if isinstance(result, dict):
+            job["result"] = result
+        return job
+
+
+def _factory_frames() -> dict[str, dict[str, Any]]:
+    try:
+        highs, lows, closes, volumes = fetch_klines(
+            "1h",
+            1000,
+            timeout=8.0,
+        )
+        return {
+            "1h": {
+                "highs": highs,
+                "lows": lows,
+                "closes": closes,
+                "volumes": volumes,
+                "times": list(_kline_times.get("1h", [])),
+            }
+        }
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ):
+        chart = chart_snapshot()
+        closes: list[float] = []
+        for raw in chart.get("closes") or []:
+            try:
+                closes.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        return {
+            "15m": {
+                "closes": closes,
+                "times": list(chart.get("times") or []),
+            }
+        }
+
+
+def _run_strategy_factory_job() -> None:
+    try:
+        report = crypto_strategy_factory.run_factory(_factory_frames())
+        with _strategy_factory_lock:
+            _strategy_factory_job["state"] = "done"
+            _strategy_factory_job["note"] = str(report.get("note") or "")
+            _strategy_factory_job["result"] = report
+    except Exception as exc:
+        with _strategy_factory_lock:
+            _strategy_factory_job["state"] = "error"
+            _strategy_factory_job["note"] = "STRATEGY_FACTORY_ERROR: " + str(exc)[:160]
+            _strategy_factory_job["result"] = {
+                **crypto_strategy_factory.empty_snapshot(),
+                "state": "ERROR",
+                "note": "Strategy factory could not finish safely.",
+                "orchestration": crypto_strategy_factory.orchestration_snapshot("ERROR"),
+            }
+
+
+def start_strategy_factory() -> dict[str, Any]:
+    launch = False
+    with _strategy_factory_lock:
+        if str(_strategy_factory_job.get("state") or "") != "running":
+            _strategy_factory_job["state"] = "running"
+            _strategy_factory_job["note"] = (
+                "SOLUSDT 1h · max 2 workers · paper only"
+            )
+            _strategy_factory_job["started"] = time.time()
+            _strategy_factory_job["result"] = {
+                **crypto_strategy_factory.empty_snapshot(),
+                "state": "RUNNING",
+                "note": _strategy_factory_job["note"],
+                "orchestration": crypto_strategy_factory.orchestration_snapshot("RUNNING"),
+            }
+            launch = True
+    if launch:
+        threading.Thread(
+            target=_run_strategy_factory_job,
+            name="gg-crypto-strategy-factory",
+            daemon=True,
+        ).start()
+    payload = status_payload()
+    payload["strategy_factory_job"] = strategy_factory_status()
+    return payload
+
+
+def reset_strategy_factory() -> dict[str, Any]:
+    with _strategy_factory_lock:
+        if str(_strategy_factory_job.get("state") or "") == "running":
+            return status_payload()
+        _strategy_factory_job["state"] = "idle"
+        _strategy_factory_job["note"] = ""
+        _strategy_factory_job["started"] = 0.0
+        _strategy_factory_job["result"] = crypto_strategy_factory.empty_snapshot()
+    return status_payload()
+
+
 def status_payload(rail: bool = False) -> dict[str, Any]:
     wallet = load_wallet()
     pubkey = str(wallet.get("pubkey") or "")
@@ -567,6 +683,12 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
         "arb": crypto_flash_arb.pool_status(),
         "trader": dict(crypto_trader.snapshot(), books=crypto_bots.catalog()),
         "backtest_job": backtest_job(),
+        "polymarket": polymarket_research.snapshot(),
+        "strategy_factory": strategy_factory_status().get(
+            "result",
+            crypto_strategy_factory.empty_snapshot(),
+        ),
+        "strategy_factory_job": strategy_factory_status(),
         "proven": load_proven(),
         "bots": [
             {
@@ -687,6 +809,34 @@ def reset_flash_arb() -> dict[str, Any]:
     crypto_flash_arb.reset_pools()
     payload = status_payload()
     payload["arb_last"] = {"side": "arb", "txid": "RESET"}
+    return payload
+
+
+def start_polymarket_query(
+    preset: str,
+    query_date: str,
+    hour: str,
+    slug: str = "",
+) -> dict[str, Any]:
+    payload = status_payload()
+    payload["polymarket"] = polymarket_research.start_query(
+        preset,
+        query_date,
+        hour,
+        slug,
+    )
+    return payload
+
+
+def poll_polymarket_query() -> dict[str, Any]:
+    payload = status_payload()
+    payload["polymarket"] = polymarket_research.snapshot()
+    return payload
+
+
+def reset_polymarket_query() -> dict[str, Any]:
+    payload = status_payload()
+    payload["polymarket"] = polymarket_research.reset()
     return payload
 
 

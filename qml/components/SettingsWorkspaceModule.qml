@@ -42,12 +42,13 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "MEDIA", "DRAW"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE"]
 
                 delegate: Text {
                     required property string modelData
                     required property int index
-                    text: (index === 0 ? "" : " | ") + modelData
+                    text: (index === 0 ? "" : " | ")
+                        + (modelData === "GAME_ENGINE" ? "GAME ENGINE" : modelData)
                     color: root.hostKind === modelData
                         ? "#d8dee9"
                         : "#5d6670"
@@ -95,7 +96,12 @@ Item {
                 + "window embed exists. MEDIA is playlists, radio, TV "
                 + "and older-console games; the bottom strip is the player. "
                 + "DRAW hosts Krita, GIMP, Inkscape or darktable in this box "
-                + "when they are on PATH, plus a small sketch pad."
+                + "when they are on PATH, plus a small sketch pad. OSINT is "
+                + "the native OSIRIS public-feed dashboard; its RECON page "
+                + "stays read-only and target-free. QIP is a local-only WASM "
+                + "component lab; host imports and I/O stay blocked. GAME ENGINE "
+                + "is a separate local Quick3D playground with fixed-step "
+                + "simulation, bounded pools and deterministic replay."
             color: "#8a8a8a"
             wrapMode: Text.WordWrap
             font.pixelSize: 12

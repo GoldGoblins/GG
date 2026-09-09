@@ -170,8 +170,7 @@ Item {
                 persistentSelection: true
                 color: root.objectType === "CODE" || root.objectType === "TERMINAL"
                     ? "#d8dee9" : "#e6edf3"
-                font.family: root.objectType === "CODE" || root.objectType === "TERMINAL"
-                    ? "monospace" : ""
+                font.family: "monospace"
                 font.pixelSize: 12
                 wrapMode: root.grokTui
                     ? TextEdit.NoWrap

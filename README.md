@@ -19,6 +19,116 @@ chmod +x run-gg-ai-desktop.sh
 Needs: Python 3, PySide6 + Qt WebEngine, Grok Build CLI, `grok login`.
 Update: `git pull`. Push new features from this tree after they land here.
 
+## Patch notes · 2026-09-09 · OSINT globe, shared chrome fonts, one live map
+
+What GitHub had until this push: TMoG dashboard parity, first-try native TUI
+input, GPTUI scrollback/copy, and the current desktop screenshot. This patch
+does not replace that screenshot.
+
+**OSINT is a real dark globe.** Overview and Event Map share one MapLibre
+WebGL globe (the same engine family as [OSIRIS](https://osirisai.live/)). A
+bundled Natural Earth land layer is always present so continents stay
+visible even offline. When the network is up, OpenFreeMap dark tiles cover
+that land with country names, coastlines and a cartographic globe instead of
+a grey placeholder sphere. The dark local land paints first so the previous
+blue style no longer sits behind a second copy.
+
+**Public-read-only feeds.** OpenSky aircraft, USGS earthquakes, NASA EONET
+fires, GDELT geolocated headlines, a reference conflict watchlist, and a
+bundled sample of OSM/DeFlock ALPR *location pins* (not live video). The
+intelligence stream is liveuamap-style: click a row to fly the globe and
+open a detail pane. Aircraft heading ticks only appear after zoom 4.
+
+**NAV lives in the stream pane, not on the map.** FROM / stops / TO as the
+same chip style, drag-and-drop reorder, Enter/ROUTE, and waypoint dots on
+the globe. Routing is Nominatim + OSRM through the host allowlist. GPS/Wi‑Fi
+location can be used as FROM.
+
+**Desktop chrome is monospace; the map keeps its own labels.** GG AI Desktop
+UI text uses a monospace stack across tabs. OpenStreetMap place names on the
+globe keep the map style's own font. The desktop still does not open camera
+streams, scan IPs, or accept user-supplied targets. No credentials, session
+state or model weights are added to git.
+
+## Patch notes · 2026-09-09 · separate GAME ENGINE playground
+
+The workspace now has a `GAME ENGINE` tab directly after `DRAW`. It is a
+separate surface from `MEDIA → GAME`, which remains the lightweight
+media/emulator player. The first engine slice is a local, asset-light
+playground built around a fixed 60 Hz simulation, bounded data-oriented
+entity and particle pools, a spatial-grid broadphase, chunk interest data,
+live performance inspection, pooled debris bursts and deterministic input
+record/replay.
+
+The scene uses QtQuick3D primitives so it can be exercised immediately on
+the existing desktop without adding a native compiler or shipping proprietary
+game assets. A visible local-loopback network seam documents the future MMO
+boundary, but no sockets, server, account access or live multiplayer are
+enabled. The architecture takes inspiration from the requested fast,
+gameplay-first engines while remaining original code; no source code or
+assets from those projects are bundled.
+
+## Patch notes · 2026-09-08 · bounded crypto research + QIP/WASM lab
+
+Crypto now has a `FACTORY` page for bounded, paper-only strategy research.
+It evaluates a small catalogue of transparent candidates with explicit fees
+and slippage, no-lookahead signals, train/validation/test splits and visible
+PASS/WATCH/REJECT evidence. The research board exposes separate researcher,
+data-validator, implementer, reviewer and risk lanes, but keeps model-agent
+spawning disabled and does not connect to an order path.
+
+The implementation takes the useful workflow ideas from
+[ECC](https://github.com/affaan-m/ECC)—plan, test, review, verify and retain
+evidence—without installing its alpha harness into the desktop. Hype claims
+from public crypto posts are not treated as trading evidence.
+
+The workspace also has a `QIP` tab between `OSINT` and `MEDIA`. It is a local
+QIP/WASM component lab inspired by
+[qip.dev](https://qip.dev/), its
+[component debugger](https://qip.dev/component-debugger) and
+[royalicing/qip](https://github.com/royalicing/qip): import-free modules only,
+bounded memory/table/module sizes, explicit UTF-8 input, deterministic output
+checking and no network or host I/O. The first slice supports a narrow
+`render` ABI through the installed Node runtime; the QIP instruction-stepper
+is deliberately left as a later, separately bounded slice.
+
+## Patch notes · 2026-09-08 · read-only Polymarket research
+
+Crypto now has a `POLY` page for bounded market research against one selected
+UTC hour in Pendulumflow's V3 Parquet archive. `SUMMARY`, `TRADES` and
+`TOUCH` use fixed, visible DuckDB queries; the selected archive URL and SQL
+preview remain visible for auditability.
+
+The page is intentionally separate from the Solana wallet and all trading
+paths. It does not place orders, request credentials or start `poly_data`
+sync. DuckDB is optional; without it the desktop still starts and shows the
+validated query preview. The public `poly_data` repository is documented as
+an optional future ingestion source rather than vendored into the app.
+
+## Patch notes · 2026-09-08 · native OSIRIS / OSINT surface
+
+The desktop now includes an `OSINT` tab between `TMOG` and `MEDIA`, based on
+the public, MIT-licensed [simplifaisoul/osiris project](https://github.com/simplifaisoul/osiris).
+It keeps the OSIRIS idea and information architecture while rendering it as a
+native Obsidian/Ledger surface instead of embedding a second Next.js app.
+
+**Live public feeds.** The native panel can collect bounded, read-only data
+from USGS earthquakes, OpenSky aircraft, NASA EONET events, CelesTrak station
+objects, NOAA space weather and BBC World news. Every source has an explicit
+health row, response limits and a visible status; network work runs away from
+the Qt GUI thread and only starts when the OSINT surface is opened.
+
+**OSIRIS-style views.** Overview, Event Map, Flights, Seismic, Fires, Space
+Weather, News, Conflict watch, Sources and Recon boundary are available from
+the new sidebar. The map uses the same dark dashboard language as TMoG and
+shows bounded data points, while the reference conflict layer is clearly
+labelled as a watchlist rather than live verified intelligence.
+
+**Safe native boundary.** The integration intentionally does not expose port
+scans, IP sweeps, arbitrary target probing or credential access. The Recon
+page explains that boundary and the source panel makes public references
+copyable without accepting a user-supplied URL or target.
+
 ## Patch notes · 2026-09-08 · TMoG parity, native input and approval stability
 
 What GitHub had until this push: GPTUI scrollback, copy, the existing

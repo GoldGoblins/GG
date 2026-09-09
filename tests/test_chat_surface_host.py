@@ -260,6 +260,8 @@ def main() -> int:
         raise AssertionError("crypto lab start/stop missing")
     if "tmogSnapshot" not in src or "startTmog" not in src:
         raise AssertionError("tmog host slots missing")
+    if "osintSnapshot" not in src or "osintRefresh" not in src:
+        raise AssertionError("osint host slots missing")
     if "marketplaceStatus" not in src or "marketplaceList" not in src:
         raise AssertionError("marketplace host slots missing")
     if "marketplacePaperBuy" not in src or "marketplaceDelist" not in src:

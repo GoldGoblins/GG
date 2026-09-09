@@ -30,7 +30,7 @@ SEED_INDEX = """<!DOCTYPE html>
   <meta charset="utf-8">
   <title>GoldGoblins site</title>
   <style>
-    body { font-family: sans-serif; background: #121212; color: #e6e6e6; margin: 2rem; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #121212; color: #e6e6e6; margin: 2rem; }
     code { color: #c8a97e; }
   </style>
 </head>

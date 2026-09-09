@@ -604,6 +604,10 @@ Item {
             return "MARKETPLACE"
         if (objectType === "TMOG_DESK")
             return "TMOG"
+        if (objectType === "OSINT_DESK")
+            return "OSINT"
+        if (objectType === "QIP_DESK")
+            return "QIP"
         if (objectType === "DRAW_DESK" || objectType === "IMAGE")
             return "DRAW"
         if (objectType === "PDF")
@@ -635,7 +639,7 @@ Item {
         )
             root.scratchHost().ensureWebEngine()
         root.hostKind = kind
-        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "MEDIA" || kind === "DRAW")
+        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "OSINT" || kind === "QIP" || kind === "MEDIA" || kind === "DRAW" || kind === "GAME_ENGINE")
             return
         if (
             kind === "CODE"
@@ -2200,7 +2204,9 @@ Item {
 
     readonly property string frameKindLabel: root.settingsOpen
         ? "SETTINGS"
-        : String(root.hostKind || "")
+        : (root.hostKind === "GAME_ENGINE"
+            ? "GAME ENGINE"
+            : String(root.hostKind || ""))
     readonly property int tabStripLeft:
         root.frameKindLabel.length > 0
             ? (20 + root.frameKindLabel.length * 8)
@@ -2337,8 +2343,11 @@ Item {
                 && root.hostKind !== "CRYPTO"
                 && root.hostKind !== "MARKETPLACE"
                 && root.hostKind !== "TMOG"
+                && root.hostKind !== "OSINT"
+                && root.hostKind !== "QIP"
                 && root.hostKind !== "MEDIA"
                 && root.hostKind !== "DRAW"
+                && root.hostKind !== "GAME_ENGINE"
             width: visible ? spawnTabRow.width : 0
             height: 18
 
@@ -2496,11 +2505,14 @@ Item {
                 ? ((cryptoPane.item && cryptoPane.item.legend) || "TESTNET")
                 : (root.hostKind === "MARKETPLACE"
                     ? ((marketplacePane.item && marketplacePane.item.legend) || "TESTNET")
-                    : (
-                        root.currentObjectTitle.length > 0
-                            ? "@current"
-                            : "@workspace"
-                    )))
+                    : (root.hostKind === "GAME_ENGINE"
+                        ? ((gameEnginePane.item && gameEnginePane.item.legend)
+                            || "LOCAL · FIXED 60 HZ")
+                        : (
+                            root.currentObjectTitle.length > 0
+                                ? "@current"
+                                : "@workspace"
+                        ))))
         bottomLeftLegend: ""
         bottomRightLegend: root.editorDirty
             ? (
@@ -2585,8 +2597,11 @@ Item {
                     && root.hostKind !== "CRYPTO"
                     && root.hostKind !== "MARKETPLACE"
                     && root.hostKind !== "TMOG"
+                    && root.hostKind !== "OSINT"
+                    && root.hostKind !== "QIP"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
+                    && root.hostKind !== "GAME_ENGINE"
                     && (
                         root.currentObjectProvenance === "REAL_LOCAL_FILE"
                         || (
@@ -3117,6 +3132,46 @@ Item {
             }
 
             Loader {
+                id: osintPane
+                objectName: "workspaceOsintPane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "OSINT"
+                visible: active
+                sourceComponent: Component {
+                    OsintSurface {
+                        objectName: "workspaceOsintPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
+                id: qipPane
+                objectName: "workspaceQipPane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "QIP"
+                visible: active
+                sourceComponent: Component {
+                    QipSurface {
+                        objectName: "workspaceQipPane"
+                        surfaceHost: root.scratchHost()
+                    }
+                }
+            }
+
+            Loader {
                 id: mediaPane
                 objectName: "workspaceMediaPane"
                 z: 20
@@ -3143,6 +3198,27 @@ Item {
                 sourceComponent: Component {
                     DrawSurface {
                         objectName: "workspaceDrawPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
+                id: gameEnginePane
+                objectName: "workspaceGameEnginePane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "GAME_ENGINE"
+                visible: active
+                sourceComponent: Component {
+                    GameEngineSurface {
+                        objectName: "workspaceGameEnginePane"
                         surfaceHost: root.scratchHost()
                         frameBorder: root.frameBorder
                         frameRadius: root.frameRadius
@@ -3331,8 +3407,11 @@ Item {
                     && root.hostKind !== "CRYPTO"
                     && root.hostKind !== "MARKETPLACE"
                     && root.hostKind !== "TMOG"
+                    && root.hostKind !== "OSINT"
+                    && root.hostKind !== "QIP"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
+                    && root.hostKind !== "GAME_ENGINE"
                     && root.currentObjectProvenance === "SYNTHETIC_UI_FIXTURE"
 
                 Text {
@@ -3418,7 +3497,7 @@ Item {
 
         Text {
             objectName: "workspaceKindTERMINAL"
-            text: "TERMINAL"
+            text: "CMD"
             color: root.hostKind === "TERMINAL" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
             font.pixelSize: 12
@@ -3461,7 +3540,7 @@ Item {
         }
 
         Text {
-            text: "EXTERNAL"
+            text: "EXT"
             color: root.hostKind === "EXTERNAL" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
             font.pixelSize: 12
@@ -3525,7 +3604,7 @@ Item {
         }
 
         Text {
-            text: "MARKETPLACE"
+            text: "MP"
             color: root.hostKind === "MARKETPLACE" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
             font.pixelSize: 12
@@ -3568,6 +3647,50 @@ Item {
         }
 
         Text {
+            objectName: "workspaceKindOSINT"
+            text: "OSINT"
+            color: root.hostKind === "OSINT" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "OSINT"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("OSINT")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            objectName: "workspaceKindQIP"
+            text: "QIP"
+            color: root.hostKind === "QIP" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "QIP"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("QIP")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
             text: "MEDIA"
             color: root.hostKind === "MEDIA" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
@@ -3599,6 +3722,28 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("DRAW")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            objectName: "workspaceKindGameEngine"
+            text: "GAME ENGINE"
+            color: root.hostKind === "GAME_ENGINE" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "GAME_ENGINE"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("GAME_ENGINE")
             }
         }
     }

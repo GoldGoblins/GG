@@ -623,7 +623,7 @@ Item {
                         text: "☰"
                         color: root.ink
                         font.pixelSize: 20
-                        font.family: "sans-serif"
+                        font.family: "monospace"
                     }
                     MouseArea {
                         anchors.fill: parent
@@ -651,7 +651,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.navIcon(modelData)
                             color: root.page === modelData ? root.ledgerGold : root.muted
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 15
                         }
                         Text {
@@ -662,7 +662,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.navLabel(modelData)
                             color: root.page === modelData ? root.ink : root.text
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 12
                             font.bold: root.page === modelData
                             elide: Text.ElideRight
@@ -672,7 +672,7 @@ Item {
                             anchors.centerIn: parent
                             text: root.navIcon(modelData)
                             color: root.page === modelData ? root.ledgerGold : root.muted
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 15
                         }
                         MouseArea {
@@ -723,7 +723,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.navIcon(modelData)
                             color: root.page === modelData ? root.ledgerGold : root.muted
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 15
                         }
                         Text {
@@ -734,7 +734,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.navLabel(modelData)
                             color: root.page === modelData ? root.ink : root.text
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 12
                             font.bold: root.page === modelData
                             elide: Text.ElideRight
@@ -744,7 +744,7 @@ Item {
                             anchors.centerIn: parent
                             text: root.navIcon(modelData)
                             color: root.page === modelData ? root.ledgerGold : root.muted
-                            font.family: "sans-serif"
+                            font.family: "monospace"
                             font.pixelSize: 15
                         }
                         MouseArea {
@@ -779,7 +779,7 @@ Item {
                     anchors.bottomMargin: 42
                     text: "TMOG"
                     color: "#6f9d9a"
-                    font.family: "sans-serif"
+                    font.family: "monospace"
                     font.pixelSize: 16
                     font.bold: true
                     font.letterSpacing: 1.2
@@ -791,7 +791,7 @@ Item {
                     anchors.bottomMargin: 12
                     text: "⚙  SETTINGS       ◈  COLORS"
                     color: root.muted
-                    font.family: "sans-serif"
+                    font.family: "monospace"
                     font.pixelSize: 11
                 }
                 Text {
@@ -799,6 +799,7 @@ Item {
                     anchors.centerIn: parent
                     text: "⚙"
                     color: root.muted
+                    font.family: "monospace"
                     font.pixelSize: 16
                 }
             }

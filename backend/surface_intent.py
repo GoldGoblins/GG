@@ -27,6 +27,18 @@ _TMOG = re.compile(
     r"\b(tmog|task\s*manager)\b",
     re.IGNORECASE,
 )
+_OSINT = re.compile(
+    r"\b(osint|osiris(?:ai)?|intelligence|recon(?:naissance)?)\b",
+    re.IGNORECASE,
+)
+_QIP = re.compile(
+    r"\b(qip|wasm|webassembly|component\s+debugger)\b",
+    re.IGNORECASE,
+)
+_GAME_ENGINE = re.compile(
+    r"\b(game\s+engine|gameengine|spelmotor(?:n)?|spel\s+motor)\b",
+    re.IGNORECASE,
+)
 _MARKETPLACE = re.compile(
     r"\b(marketplace|nft|handelsplats(?:en)?|marknad(?:en)?)\b",
     re.IGNORECASE,
@@ -51,6 +63,16 @@ _BARE = {
     "sajt": "SITE",
     "hemsida": "SITE",
     "tmog": "TMOG",
+    "osint": "OSINT",
+    "osiris": "OSINT",
+    "osirisai": "OSINT",
+    "qip": "QIP",
+    "wasm": "QIP",
+    "webassembly": "QIP",
+    "game engine": "GAME_ENGINE",
+    "gameengine": "GAME_ENGINE",
+    "spelmotor": "GAME_ENGINE",
+    "spelmotorn": "GAME_ENGINE",
     "marketplace": "MARKETPLACE",
     "nft": "MARKETPLACE",
     "handelsplats": "MARKETPLACE",
@@ -88,6 +110,12 @@ def parse_surface_intent(text: str) -> str:
         return "SITE"
     if _TMOG.search(value):
         return "TMOG"
+    if _OSINT.search(value):
+        return "OSINT"
+    if _QIP.search(value):
+        return "QIP"
+    if _GAME_ENGINE.search(value):
+        return "GAME_ENGINE"
     if _MARKETPLACE.search(value):
         return "MARKETPLACE"
     if _MEDIA.search(value):
