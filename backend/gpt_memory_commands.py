@@ -135,7 +135,40 @@ def flush() -> str:
         target.write_text("\n".join(lines), encoding="utf-8")
     except OSError as exc:
         return f"[GPT memory] /flush failed: {exc}"
+    last_prompt = prompts[-1] if prompts else ""
+    _sync_long_memory(
+        last_prompt,
+        kind="episodic",
+        note="GPT session flush: " + (last_prompt[:160] if last_prompt else target.name),
+        motor="GPT_TUI",
+        consolidate_after=True,
+    )
     return f"[GPT memory] /flush saved {target.name} ({len(prompts)} prompts, {len(replies)} replies)"
+
+
+def _sync_long_memory(
+    query: str,
+    *,
+    kind: str,
+    note: str = "",
+    motor: str = "GPT_TUI",
+    consolidate_after: bool = False,
+    force: bool = False,
+) -> None:
+    try:
+        from backend import long_memory
+
+        recorded = long_memory.capture(
+            query,
+            motor=motor,
+            kind=kind,
+            note=note,
+            force=force,
+        )
+        if consolidate_after and recorded.get("status") == "RECORDED":
+            long_memory.consolidate()
+    except Exception:
+        return
 
 
 def run(command: str) -> str:
@@ -158,6 +191,13 @@ def run(command: str) -> str:
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             with (root / "MEMORY.md").open("a", encoding="utf-8") as stream:
                 stream.write(f"\n- {arg.strip()}\n")
+            _sync_long_memory(
+                arg.strip(),
+                kind="semantic",
+                note=arg.strip(),
+                motor="GPT_TUI",
+                force=True,
+            )
             return "[GPT memory] remembered"
         except OSError as exc:
             return f"[GPT memory] /remember failed: {exc}"
@@ -177,8 +217,16 @@ def run(command: str) -> str:
             headings.append(f"- {title.lstrip('# ').strip()} — `{path.name}`")
         try:
             target.write_text("# Consolidated session memory\n\n" + "\n".join(headings) + "\n", encoding="utf-8")
-        except OSError as exc:
-            return f"[GPT memory] /dream failed: {exc}"
+        except OSError as rec:
+            return f"[GPT memory] /dream failed: {rec}"
+        _sync_long_memory(
+            "consolidate session memory",
+            kind="procedural",
+            note="GPT /dream merged " + str(len(headings)) + " session files",
+            motor="GPT_TUI",
+            consolidate_after=True,
+            force=True,
+        )
         return f"[GPT memory] /dream consolidated {len(headings)} session files"
     if name == "/skills":
         names: set[str] = set()

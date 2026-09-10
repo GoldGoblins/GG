@@ -42,7 +42,7 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW"]
 
                 delegate: Text {
                     required property string modelData
@@ -101,7 +101,9 @@ Item {
                 + "stays read-only and target-free. QIP is a local-only WASM "
                 + "component lab; host imports and I/O stay blocked. GAME ENGINE "
                 + "is a separate local Quick3D playground with fixed-step "
-                + "simulation, bounded pools and deterministic replay."
+                + "simulation, bounded pools and deterministic replay. NODES is "
+                + "the Geometry Nodes-style editor for agent and information "
+                + "streams: blocks, edge ports, and wires on the machine graph."
             color: "#8a8a8a"
             wrapMode: Text.WordWrap
             font.pixelSize: 12

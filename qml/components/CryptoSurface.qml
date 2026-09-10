@@ -9,14 +9,24 @@ Item {
     property var surfaceHost: null
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
+    readonly property color ink: "#e6edf3"
+    readonly property color text: "#c8cdd4"
+    readonly property color muted: "#8b949e"
+    readonly property color panel: "#181818"
+    readonly property color panelRaised: "#202020"
+    readonly property color selectedPanel: "#34383d"
+    readonly property color ledgerGold: "#c8a97e"
+    readonly property color ledgerGreen: "#8db89a"
+    property bool sidebarCollapsed: false
     property string statusJson: "{}"
     property string botTab: "trader"
     property string botTape: "live"
     property string page: "PORTFOLIO"
     readonly property var nav: [
         "PORTFOLIO",
-        "TRADER",
         "BACKTEST",
+        "TRADER",
+        "KASPA",
         "SIGNAL",
         "ARB",
         "ACTIVITY",
@@ -40,13 +50,16 @@ Item {
     readonly property var ledger: {
         var rows = root.status.ledger || []
         var out = []
-        var testnet = String(root.status.legend || "TESTNET") !== "MAINNET"
+        var live = String(root.status.legend || "TESTNET") === "MAINNET"
+            || String(root.status.legend || "") === "OBSERVE"
         for (var i = rows.length - 1; i >= 0; i--) {
             var row = rows[i] || {}
             var err = String(row.error || "")
             var hint = String(row.hint || "")
-            if (testnet && (err === "MAINNET_NOT_ARMED"
-                            || hint.indexOf("Mainnet stays locked") >= 0))
+            if (!live && (err === "MAINNET_NOT_ARMED"
+                            || err === "MAINNET_OBSERVE_ONLY"
+                            || hint.indexOf("Mainnet stays locked") >= 0
+                            || hint.indexOf("observe-only") >= 0))
                 continue
             out.push(row)
         }
@@ -65,6 +78,7 @@ Item {
     readonly property bool strategyFactoryRunning:
         String(root.strategyFactoryJob.state || "") === "running"
     readonly property var desk: root.status.desk || {}
+    readonly property var kaspa: root.status.kaspa || {}
     readonly property var deskJob: root.status.desk_job || {}
     readonly property bool deskRunning: String(root.deskJob.state || "") === "running"
     property string polyPreset: "SUMMARY"
@@ -135,6 +149,97 @@ Item {
                 out.push({ "time": ts, "value": val })
         }
         return out
+    }
+
+    function navLabel(value) {
+        var labels = {
+            "PORTFOLIO": "Portfolio",
+            "BACKTEST": "Backtest",
+            "TRADER": "Trader",
+            "KASPA": "Kaspa",
+            "SIGNAL": "Signal",
+            "ARB": "Flash arb",
+            "ACTIVITY": "Fills",
+            "FACTORY": "Factory",
+            "DESK": "Desk",
+            "POLY": "Polymarket"
+        }
+        return labels[String(value || "")] || String(value || "")
+    }
+
+    function navIcon(value) {
+        var icons = {
+            "PORTFOLIO": "⌂",
+            "BACKTEST": "◒",
+            "TRADER": "▥",
+            "KASPA": "◆",
+            "SIGNAL": "∿",
+            "ARB": "ϟ",
+            "ACTIVITY": "▤",
+            "FACTORY": "⚙",
+            "DESK": "▦",
+            "POLY": "◇"
+        }
+        return icons[String(value || "")] || "·"
+    }
+
+    function menuKids(pageId) {
+        var id = String(pageId || "")
+        var out = []
+        var i
+        if (id === "BACKTEST" || id === "TRADER") {
+            var books = root.trader.books || []
+            for (i = 0; i < books.length; i++) {
+                var row = books[i] || {}
+                out.push({
+                    "id": String(row.id || ""),
+                    "name": String(row.name || row.id || "")
+                })
+            }
+            return out
+        }
+        if (id === "POLY")
+            return [
+                {"id": "SUMMARY", "name": "SUMMARY"},
+                {"id": "TRADES", "name": "TRADES"},
+                {"id": "TOUCH", "name": "TOUCH"},
+                {"id": "SCAN", "name": "SCAN"}
+            ]
+        if (id === "KASPA")
+            return [
+                {"id": "paper", "name": "Paper"},
+                {"id": "testnet", "name": "Kaspa TN"},
+                {"id": "mainnet", "name": "Kaspa live"}
+            ]
+        if (id === "SIGNAL")
+            return [{"id": "004", "name": "Strategy004"}]
+        return out
+    }
+
+    function kidActive(pageId, kid) {
+        var id = String((kid && kid.id) || "")
+        if (pageId === "BACKTEST" || pageId === "TRADER")
+            return id === String(root.trader.book || "gg")
+        if (pageId === "POLY")
+            return id === String(root.polyPreset || "SUMMARY")
+        if (pageId === "KASPA")
+            return id === String(root.kaspa.network || "paper")
+        if (pageId === "SIGNAL")
+            return root.page === "SIGNAL"
+        return false
+    }
+
+    function pickChild(pageId, kid) {
+        var id = String((kid && kid.id) || "")
+        root.page = pageId
+        if ((pageId === "BACKTEST" || pageId === "TRADER")
+                && root.surfaceHost && root.surfaceHost.cryptoSetBook)
+            root.statusJson = root.surfaceHost.cryptoSetBook(id || "gg")
+        else if (pageId === "POLY")
+            root.polyPreset = id || "SUMMARY"
+        else if (pageId === "KASPA"
+                && root.surfaceHost && root.surfaceHost.cryptoKaspaSetNetwork)
+            root.statusJson = root.surfaceHost.cryptoKaspaSetNetwork(id || "paper")
     }
 
     function twoDigits(value) {
@@ -479,41 +584,311 @@ Item {
     }
 
     Item {
+        id: chrome
         anchors.fill: parent
-        anchors.leftMargin: 6
-        anchors.rightMargin: 6
-        anchors.topMargin: 4
-        anchors.bottomMargin: 6
+        anchors.leftMargin: 8
+        anchors.rightMargin: 12
+        anchors.topMargin: 8
+        anchors.bottomMargin: 10
 
-        Item {
-            id: topBar
-            width: parent.width
-            height: 20
+        Rectangle {
+            anchors.fill: parent
+            color: "#161616"
+            border.color: "#4a4a4a"
+            border.width: 1
+            radius: 4
+            antialiasing: true
+        }
 
-            Row {
-                spacing: 0
-                Repeater {
-                    model: root.nav
-                    Text {
-                        required property int index
-                        required property string modelData
-                        text: index > 0 ? ("  |  " + modelData) : modelData
-                        color: root.page === modelData ? "#d8dee9" : "#a8b0b8"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        font.bold: root.page === modelData
-                        MouseArea {
+        Rectangle {
+            id: sidebar
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: root.sidebarCollapsed ? 48 : Math.max(168, Math.min(220, parent.width * 0.18))
+            color: root.panel
+            border.color: "#4a4a4a"
+            border.width: 1
+            radius: 4
+            antialiasing: true
+
+            Behavior on width {
+                NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+            }
+
+            Component {
+                id: navEntry
+                Column {
+                    id: group
+                    required property string modelData
+                    width: navCol.width
+                    spacing: 1
+                    readonly property var kids: root.menuKids(modelData)
+                    readonly property bool opened: !root.sidebarCollapsed
+                        && root.page === modelData
+                        && kids.length > 0
+
+                    Item {
+                        width: parent.width
+                        height: 29
+                        Rectangle {
                             anchors.fill: parent
+                            radius: 3
+                            color: root.page === group.modelData
+                                ? root.selectedPanel
+                                : (navHit.containsMouse ? "#2a2a2a" : "transparent")
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navIcon(group.modelData)
+                            color: root.page === group.modelData ? root.ledgerGold : root.muted
+                            font.family: "monospace"
+                            font.pixelSize: 13
+                        }
+                        Text {
+                            visible: !root.sidebarCollapsed
+                            anchors.left: parent.left
+                            anchors.leftMargin: 32
+                            anchors.right: caretMark.left
+                            anchors.rightMargin: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.navLabel(group.modelData)
+                            color: root.page === group.modelData ? root.ink : root.text
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: root.page === group.modelData
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            id: caretMark
+                            visible: !root.sidebarCollapsed && group.kids.length > 0
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: group.opened ? "▾" : "▸"
+                            color: root.muted
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                        Text {
+                            visible: root.sidebarCollapsed
+                            anchors.centerIn: parent
+                            text: root.navIcon(group.modelData)
+                            color: root.page === group.modelData ? root.ledgerGold : root.muted
+                            font.family: "monospace"
+                            font.pixelSize: 14
+                        }
+                        MouseArea {
+                            id: navHit
+                            anchors.fill: parent
+                            hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.page = modelData
+                            onClicked: root.page = group.modelData
+                        }
+                    }
+
+                    Repeater {
+                        model: group.opened ? group.kids : []
+                        delegate: Item {
+                            required property var modelData
+                            width: group.width
+                            height: 22
+                            readonly property var kid: modelData
+                            readonly property bool on: root.kidActive(group.modelData, kid)
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 3
+                                color: parent.on
+                                    ? "#2a2e33"
+                                    : (kidHit.containsMouse ? "#222222" : "transparent")
+                            }
+                            Text {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 32
+                                anchors.right: parent.right
+                                anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: String((parent.kid && parent.kid.name) || "")
+                                color: parent.on ? root.ledgerGold : root.muted
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                font.bold: parent.on
+                                elide: Text.ElideRight
+                            }
+                            MouseArea {
+                                id: kidHit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.pickChild(group.modelData, parent.kid)
+                            }
                         }
                     }
                 }
             }
 
+            Flickable {
+                id: navFlick
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: navBottom.top
+                anchors.margins: 10
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentWidth: width
+                contentHeight: navCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: navCol
+                    width: navFlick.width
+                    spacing: 3
+
+                    Item {
+                        width: navCol.width
+                        height: 30
+                        Text {
+                            anchors.centerIn: parent
+                            text: "☰"
+                            color: root.ink
+                            font.family: "monospace"
+                            font.pixelSize: 19
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
+                        }
+                    }
+
+                    Repeater {
+                        model: root.nav.slice(0, 4)
+                        delegate: navEntry
+                    }
+
+                    Item { width: 1; height: 7 }
+
+                    Rectangle {
+                        width: navCol.width
+                        height: 1
+                        color: "#3a3a3a"
+                    }
+
+                    Text {
+                        width: navCol.width
+                        text: root.sidebarCollapsed ? "" : "LAB"
+                        color: root.ledgerGold
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                        font.bold: true
+                        leftPadding: 12
+                        topPadding: 4
+                        bottomPadding: 2
+                    }
+
+                    Repeater {
+                        model: root.nav.slice(4)
+                        delegate: navEntry
+                    }
+                }
+            }
+
+            Item {
+                id: navBottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: root.sidebarCollapsed ? 50 : 74
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: 1
+                    color: "#3a3a3a"
+                }
+                Text {
+                    visible: !root.sidebarCollapsed
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 42
+                    text: "CRYPTO"
+                    color: root.ledgerGold
+                    font.family: "monospace"
+                    font.pixelSize: 16
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                }
+                Text {
+                    visible: !root.sidebarCollapsed
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 14
+                    text: root.legend === "OBSERVE" ? "OBSERVE · NO SEND" : "PAPER · TESTNET"
+                    color: root.muted
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                }
+                Text {
+                    visible: root.sidebarCollapsed
+                    anchors.centerIn: parent
+                    text: "◈"
+                    color: root.ledgerGold
+                    font.family: "monospace"
+                    font.pixelSize: 16
+                }
+            }
+        }
+
+        Rectangle {
+            id: navSep
+            anchors.left: sidebar.right
+            anchors.leftMargin: 12
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 1
+            color: "#3a3a3a"
+        }
+
+        Item {
+            id: mainHeader
+            anchors.left: navSep.right
+            anchors.leftMargin: 18
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: 54
+
+            Text {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.topMargin: 5
+                text: "GG / CRYPTO · SOL · "
+                    + (root.legend === "OBSERVE" ? "OBSERVE" : "PAPER")
+                color: root.muted
+                font.family: "monospace"
+                font.pixelSize: 9
+            }
+            Text {
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 5
+                text: root.navLabel(root.page).toUpperCase()
+                color: root.ink
+                font.family: "monospace"
+                font.pixelSize: 18
+            }
+
             Row {
                 anchors.right: parent.right
-                spacing: 12
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 8
+
                 BufferMark {
                     objectName: "cryptoBuffer"
                     anchors.verticalCenter: parent.verticalCenter
@@ -522,51 +897,25 @@ Item {
                         || root.strategyFactoryRunning
                     cell: 5
                 }
-                Text {
-                    text: "TESTNET"
-                    color: root.legend === "TESTNET" ? "#d8dee9" : "#a8b0b8"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                    font.bold: root.legend === "TESTNET"
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (root.surfaceHost)
-                                root.surfaceHost.cryptoSetNetwork("testnet")
-                            root.refresh()
-                        }
+
+                Rectangle {
+                    width: labLabel.implicitWidth + 22
+                    height: 27
+                    color: "#181b1f"
+                    border.color: root.lab.healthy ? root.ledgerGreen : "#3c444d"
+                    border.width: 1
+                    radius: 3
+                    Text {
+                        id: labLabel
+                        anchors.centerIn: parent
+                        text: String(root.lab.label || (root.lab.healthy ? "LAB ON" : "LAB OFF"))
+                        color: root.lab.healthy ? root.ledgerGreen : root.ledgerGold
+                        font.family: "monospace"
+                        font.pixelSize: 10
                     }
-                }
-                Text {
-                    text: "MAINNET"
-                    color: root.legend === "MAINNET" ? "#d8dee9" : "#a8b0b8"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                    font.bold: root.legend === "MAINNET"
                     MouseArea {
                         anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (root.surfaceHost)
-                                root.surfaceHost.cryptoSetNetwork("mainnet")
-                            root.refresh()
-                        }
-                    }
-                }
-                Text {
-                    text: root.status.signer ? "SIGNER ON DISK" : "WATCH ONLY"
-                    color: root.status.signer ? "#8db89a" : "#c8cdd4"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                }
-                Text {
-                    text: String(root.lab.label || (root.lab.healthy ? "LAB ON" : "LAB OFF"))
-                    color: root.lab.healthy ? "#8db89a" : "#c8a97e"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                    MouseArea {
-                        anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             if (!root.surfaceHost)
@@ -578,21 +927,16 @@ Item {
                         }
                     }
                 }
-                Text {
-                    text: "PROVEN " + String((root.status.proven || {}).label || "0/5")
-                    color: (root.status.proven || {}).ready ? "#8db89a" : "#a8b0b8"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                }
             }
         }
 
         Item {
             id: field
-            anchors.top: topBar.bottom
-            anchors.topMargin: 8
-            anchors.left: parent.left
+            anchors.left: navSep.right
+            anchors.leftMargin: 18
             anchors.right: parent.right
+            anchors.top: mainHeader.bottom
+            anchors.topMargin: 4
             anchors.bottom: parent.bottom
 
             Column {
@@ -690,31 +1034,10 @@ Item {
                             onClicked: root.botTape = "bt1"
                         }
                     }
-                    Repeater {
-                        model: (root.trader.books || []).length
-                        Text {
-                            text: String(((root.trader.books || [])[index] || {}).name || "")
-                            color: String(((root.trader.books || [])[index] || {}).id || "")
-                                   === String(root.trader.book || "gg")
-                                   ? "#d8dee9" : "#5d6670"
-                            font.family: "monospace"
-                            font.pixelSize: 12
-                            font.bold: String(((root.trader.books || [])[index] || {}).id || "")
-                                       === String(root.trader.book || "gg")
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    var row = (root.trader.books || [])[index] || {}
-                                    if (!root.surfaceHost || !root.surfaceHost.cryptoSetBook)
-                                        return
-                                    root.statusJson = root.surfaceHost.cryptoSetBook(String(row.id || "gg"))
-                                }
-                            }
-                        }
-                    }
                     Text {
-                        text: root.backtestRunning ? "BACKTEST…" : "RUN BACKTEST"
+                        text: root.backtestRunning
+                            ? "BACKTEST…"
+                            : ("RUN  " + String(root.trader.book || "gg").toUpperCase())
                         color: root.backtestRunning ? "#c8a97e" : "#8db89a"
                         font.family: "monospace"
                         font.pixelSize: 12
@@ -731,6 +1054,64 @@ Item {
                                 root.statusJson = root.surfaceHost.cryptoBacktestTrader()
                             }
                         }
+                    }
+                }
+                Row {
+                    spacing: 14
+                    Text {
+                        text: root.trader.armed ? "TRADER OFF" : "ARM TRADER"
+                        color: root.trader.armed ? "#c8a97e" : "#8db89a"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: true
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (!root.surfaceHost)
+                                    return
+                                root.statusJson = root.surfaceHost.cryptoArmTrader(!root.trader.armed)
+                                root.refresh()
+                            }
+                        }
+                    }
+                    Text {
+                        text: "TICK"
+                        color: "#c8a97e"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (root.surfaceHost)
+                                    root.statusJson = root.surfaceHost.cryptoTickTrader()
+                                root.refresh()
+                            }
+                        }
+                    }
+                    Text {
+                        text: "RESET BOOK"
+                        color: "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (root.surfaceHost)
+                                    root.statusJson = root.surfaceHost.cryptoResetTrader()
+                                root.refresh()
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.trader.armed
+                            ? "paper ticks 15s · " + String(root.trader.book || "gg")
+                            : String(root.trader.book || "gg") + " · paper only"
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
                     }
                 }
                 Text {
@@ -835,17 +1216,14 @@ Item {
 
             Loader {
                 id: tapeLoader
-                active: root.visible
-                    && ((root.page === "PORTFOLIO" && (root.chartHasTimes || root.closes.length > 1))
-                        || (root.page === "BACKTEST" && root.botHasTimes))
-                width: parent.width
-                y: root.page === "BACKTEST" ? btHead.height + 6 : portHead.height + 6
-                height: {
-                    var bot = 0
-                    if (root.page === "PORTFOLIO")
-                        bot = portFoot.height + 8
-                    return Math.max(80, field.height - y - bot)
-                }
+                active: true
+                visible: root.page === "PORTFOLIO" || root.page === "BACKTEST"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.topMargin: (root.page === "BACKTEST" ? btHead.height : portHead.height) + 6
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: root.page === "PORTFOLIO" ? Math.min(168, portFoot.height) + 8 : 0
                 sourceComponent: tapeComp
             }
 
@@ -879,6 +1257,8 @@ Item {
                 anchors.bottom: parent.bottom
                 spacing: 6
                 visible: root.page === "PORTFOLIO"
+                height: Math.min(childrenRect.height, 168)
+                clip: true
                 Text {
                     visible: root.closes.length > 1
                     text: String((root.sparkChart || {}).interval || "15m") + " live SOL"
@@ -1014,6 +1394,32 @@ Item {
                     color: "#a8b0b8"
                     font.family: "monospace"
                     font.pixelSize: 12
+                }
+                Text {
+                    visible: root.ledger.length > 0
+                    text: "FILLS"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.page = "ACTIVITY"
+                    }
+                }
+                Repeater {
+                    model: Math.min(root.ledger.length, 2)
+                    delegate: Text {
+                        width: portFoot.width
+                        readonly property var row: root.ledger[index] || {}
+                        text: String(row.side || "").toUpperCase()
+                            + "  "
+                            + (String(row.hint || row.error || row.txid || ""))
+                        color: row.error ? "#c98989" : "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
                 }
             }
 
@@ -1355,7 +1761,7 @@ Item {
                     }
                 }
                 Text {
-                    text: "Atomic lab swap. Mainnet stays unarmed."
+                    text: "Atomic lab swap. Sends stay on testnet/lab."
                     color: "#a8b0b8"
                     font.family: "monospace"
                     font.pixelSize: 12
@@ -1379,9 +1785,9 @@ Item {
 
                     Text {
                         text: "STRATEGY FACTORY"
-                        color: "#d8dee9"
+                        color: "#b6a6c8"
                         font.family: "monospace"
-                        font.pixelSize: 16
+                        font.pixelSize: 12
                     }
                     Text {
                         text: "ECC LOOP  ·  BOUNDED WORKERS  ·  PAPER ONLY"
@@ -1586,12 +1992,12 @@ Item {
 
                     Text {
                         text: "PAPER DESK"
-                        color: "#d8dee9"
+                        color: "#b6a6c8"
                         font.family: "monospace"
-                        font.pixelSize: 16
+                        font.pixelSize: 12
                     }
                     Text {
-                        text: "SIX SEATS  ·  FRONT MAN IN CODE  ·  MAINNET NOT ARMED"
+                        text: "SIX SEATS  ·  FRONT MAN IN CODE  ·  OBSERVE ONLY"
                         color: "#b6a6c8"
                         font.family: "monospace"
                         font.pixelSize: 12
@@ -1730,6 +2136,161 @@ Item {
             }
 
             Flickable {
+                id: kaspaScroll
+                anchors.fill: parent
+                visible: root.page === "KASPA"
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentHeight: kaspaCol.height
+                ScrollBar.vertical: GgScrollBar {}
+
+                Column {
+                    id: kaspaCol
+                    width: kaspaScroll.width
+                    height: childrenRect.height
+                    spacing: 8
+
+                    Text {
+                        text: "KASPA PAPER COVENANT"
+                        color: "#b6a6c8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        text: "UTXO SUCCESSOR  ·  COUNTER  ·  OBSERVE ONLY"
+                        color: "#b6a6c8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        width: kaspaCol.width
+                        text: String(root.kaspa.hint || "State lives in the redeem preimage. Address changes. Covenant id stays.")
+                        color: "#a8b0b8"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        text: String(root.kaspa.legend || "PAPER")
+                            + "  ·  " + String((root.kaspa.lab || {}).label || "SILVERC OFF")
+                            + (root.kaspa.error ? ("  ·  " + String(root.kaspa.error)) : "")
+                        color: root.kaspa.error ? "#c98989" : "#8db89a"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        text: "count " + String(root.kaspa.count)
+                            + "  ·  " + String(root.kaspa.value_kas || "—") + " KAS"
+                        color: "#e6e6e6"
+                        font.family: "monospace"
+                        font.pixelSize: 18
+                        font.bold: true
+                    }
+                    Text {
+                        width: kaspaCol.width
+                        text: "addr  " + String(root.kaspa.address || "—")
+                        color: "#c8cdd4"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Text {
+                        width: kaspaCol.width
+                        text: "cov   " + String(root.kaspa.covenant_id || "—")
+                        color: "#7f8994"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Row {
+                        spacing: 14
+                        Text {
+                            text: "GENESIS"
+                            color: "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.surfaceHost && root.surfaceHost.cryptoKaspaGenesis)
+                                        root.statusJson = root.surfaceHost.cryptoKaspaGenesis()
+                                }
+                            }
+                        }
+                        Text {
+                            text: "ADD 5"
+                            color: "#8db89a"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.surfaceHost && root.surfaceHost.cryptoKaspaTransition)
+                                        root.statusJson = root.surfaceHost.cryptoKaspaTransition("add", 5)
+                                }
+                            }
+                        }
+                        Text {
+                            text: "SUB 3"
+                            color: "#c8a97e"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.surfaceHost && root.surfaceHost.cryptoKaspaTransition)
+                                        root.statusJson = root.surfaceHost.cryptoKaspaTransition("subtract", 3)
+                                }
+                            }
+                        }
+                        Text {
+                            text: "SILVERC"
+                            color: "#b6a6c8"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.surfaceHost && root.surfaceHost.cryptoKaspaCompile)
+                                        root.statusJson = root.surfaceHost.cryptoKaspaCompile()
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        width: kaspaCol.width
+                        visible: String(root.kaspa.compile_note || "").length > 0
+                        text: String(root.kaspa.compile_note || "")
+                        color: root.kaspa.compiled ? "#8db89a" : "#c8a97e"
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    Repeater {
+                        model: (root.kaspa.history || []).length
+                        delegate: Text {
+                            width: kaspaCol.width
+                            readonly property var row: (root.kaspa.history || [])[index] || {}
+                            text: String(row.op || "")
+                                + "  count=" + String(row.count)
+                                + "  " + String(row.note || "")
+                            color: "#a8b0b8"
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+
+            Flickable {
                 id: polyScroll
                 anchors.fill: parent
                 visible: root.page === "POLY"
@@ -1746,9 +2307,9 @@ Item {
 
                     Text {
                         text: "POLYMARKET RESEARCH"
-                        color: "#d8dee9"
+                        color: "#b6a6c8"
                         font.family: "monospace"
-                        font.pixelSize: 16
+                        font.pixelSize: 12
                     }
                     Text {
                         text: "PENDULUMFLOW V3  ·  REMOTE PARQUET  ·  READ ONLY"

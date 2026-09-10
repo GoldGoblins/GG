@@ -4,6 +4,50 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
+## Patch notes · 2026-09-10 · wallet box, CRYPTO desk, FLOW TUI, house chrome
+
+What GitHub had until this push: same-task thought desk, paper CRYPTO DESK,
+WEB hang guard, OSINT globe, GAME ENGINE, QIP lab, FACTORY/POLY research and
+OmniGPT profiles.
+
+**House chrome is wallet-quality boxes.** Frames are real rectangles: even
+1 px `#4a4a4a`, radius 4, antialiased corners. Hanging legends sit *on* the
+border (CHAT · UNIVERSAL OPERATIONAL STREAM, CODE tabs, MEDIA / UTILITIES),
+not on an inner title strip. That is the default for every box, not a
+one-off for wallet.
+
+**Wallet is a window.** The top-bar `WALLET` chip opens a real overlay.
+`WALLET` goes green when an account is connected; the address is the
+logged-in signal. Drag by the six-dot grip (`⋮⋮`) left of close. Close with
+`✕` or the chip. Clicking elsewhere does not dismiss it. Solana TESTNET /
+OBSERVE lives in the wallet. The CRYPTO rail lists known accounts (green =
+active); click to switch. CREATE / IMPORT / CONNECT adds to that list. No
+SIGNER badge. WATCH only appears as `addr · WATCH` when there is no key on
+disk.
+
+**CRYPTO nav matches TMOG / OSINT.** Left sidebar with accordion children:
+books under Backtest and Trader, Kaspa Paper / Kaspa TN / Kaspa live,
+Polymarket SUMMARY / TRADES / TOUCH / SCAN. Mainnet is observe-only; sends,
+airdrop and arb stay on testnet/lab. Kaspa paper Counter covenant is the
+UTXO analog of the Solana lab (successor output, covenant id stays). Tape
+keeps the chart engine alive and skips identical payloads so the SOL spark
+does not flicker.
+
+**FLOW TUI.** Additive motor after GPTUI. Two named motors in one house,
+merge, then a reflect pass. GROK TUI and GPTUI stay usable if FLOW breaks.
+The chat legend is still `CHAT · UNIVERSAL OPERATIONAL STREAM`.
+
+**Long memory.** Compact lessons on the laser-Merkle tree. `/flush` writes
+session notes; `/dream` rebuilds the bounded working set. Idle learn stays
+local; a bounded public GET tick exists for allowlisted feeds.
+
+**Screenshot.** `docs/gg-ai-desktop.png` is this drop: wallet box, hanging
+legends, CRYPTO rail accounts, GROK TUI, MEDIA/UTILITIES.
+
+Unchanged: GROK TUI as default motor, no GGUF in git, `PARALLEL_AGENT_BRAIN`
+forbidden, `GENERAL_ACTION_AUTHORITY` NONE. Python host edits still need a
+desktop restart; QML often RELOAD. Live sends stay off.
+
 ## Patch notes · 2026-09-09 · same-task desk, paper trading desk, WEB hang guard
 
 What GitHub had until this push: the OSINT globe, GAME ENGINE playground, QIP

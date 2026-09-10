@@ -33,6 +33,8 @@ def main() -> int:
     assert parse_surface_intent("öppna wasm") == "QIP"
     assert parse_surface_intent("game engine") == "GAME_ENGINE"
     assert parse_surface_intent("öppna spelmotorn") == "GAME_ENGINE"
+    assert parse_surface_intent("nodes") == "NODES"
+    assert parse_surface_intent("öppna noder") == "NODES"
     assert parse_surface_intent("game") == "MEDIA"
     assert parse_surface_intent("öppna game") == "MEDIA"
     assert parse_surface_intent("marketplace") == "MARKETPLACE"

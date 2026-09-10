@@ -350,10 +350,18 @@ def build_context(
             "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
             "Apply every live seat to this same task now.\n[/SAME_TASK_DESK]"
         )
+    try:
+        from backend.long_memory import render as render_long_memory
+
+        mem_cap = 280 if not include_registry else 900
+        mem_text = render_long_memory(user_text, budget=mem_cap)
+    except Exception:
+        mem_text = ""
     desk_cap = 720 if not include_registry else 1400
     if len(desk_text) > desk_cap:
         desk_text = desk_text[: desk_cap - 18].rstrip() + "\n[/SAME_TASK_DESK]"
-    tail = apply_line + "\n" + desk_text + "\n" + closer
+    memory_block = ("\n" + mem_text) if mem_text else ""
+    tail = apply_line + "\n" + desk_text + memory_block + "\n" + closer
     remaining = int(max_chars) - sum(len(chunk) + 1 for chunk in chunks) - len(tail) - 1
     remaining = max(0, remaining)
     for record in selected:
@@ -388,20 +396,37 @@ def build_context(
         )
         chunks.append(block)
         remaining -= len(block) + 1
-    chunks.extend([apply_line, desk_text, closer])
-    joined = "\n".join(chunks)
+
+    def _join(desk: str, memory: str) -> str:
+        parts = list(chunks) + [apply_line, desk]
+        if memory:
+            parts.append(memory)
+        parts.append(closer)
+        return "\n".join(parts)
+
+    joined = _join(desk_text, mem_text)
     if len(joined) > int(max_chars):
         overflow = len(joined) - int(max_chars)
-        keep = max(0, len(desk_text) - overflow)
-        if keep < 80:
-            desk_text = (
-                "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
-                "[/SAME_TASK_DESK]"
-            )
-        else:
-            desk_text = desk_text[: keep - 18].rstrip() + "\n[/SAME_TASK_DESK]"
-        chunks[-2] = desk_text
-        joined = "\n".join(chunks)[: int(max_chars)]
+        if mem_text:
+            keep_mem = len(mem_text) - overflow
+            if keep_mem < 80:
+                overflow -= len(mem_text) + 1
+                mem_text = ""
+            else:
+                mem_text = (
+                    mem_text[: keep_mem - 18].rstrip() + "\n[/GG LONG MEMORY]"
+                )
+                overflow = 0
+        if overflow > 0:
+            keep = max(0, len(desk_text) - overflow)
+            if keep < 80:
+                desk_text = (
+                    "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
+                    "[/SAME_TASK_DESK]"
+                )
+            else:
+                desk_text = desk_text[: keep - 18].rstrip() + "\n[/SAME_TASK_DESK]"
+        joined = _join(desk_text, mem_text)[: int(max_chars)]
     return joined
 
 

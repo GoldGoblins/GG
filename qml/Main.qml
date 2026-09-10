@@ -34,6 +34,9 @@ ApplicationWindow {
     property string grokWalletJson: "{}"
     property string gptWalletJson: "{}"
     property string cryptoStatusJson: "{}"
+    property bool walletOpen: false
+    property real walletX: -1
+    property real walletY: -1
 
     onSurfaceHostChanged: {
         root.pullCryptoStatus()
@@ -464,7 +467,7 @@ ApplicationWindow {
     readonly property color textMain: "#e6e6e6"
     readonly property color textMuted: "#8a8a8a"
     property color cyan: "#8a8a8a"
-    property color frameBorder: "#6a6a6a"
+    property color frameBorder: "#4a4a4a"
     property int frameRadius: 4
     property bool showOpenTabInInput: false
     property bool showInnerEditorChrome: true
@@ -1383,50 +1386,70 @@ ApplicationWindow {
                     font.pixelSize: 13
                 }
 
-                Text {
+                Item {
                     objectName: "topBarWalletChip"
-                    text: {
+                    width: walletChipRow.width
+                    height: walletChipRow.height
+                    readonly property string walletShort: {
                         if (workspace) {
                             var live = String(workspace.cryptoWalletLabel || "")
-                            if (
-                                live.length > 0
-                                && live.indexOf("DISCONNECTED") < 0
-                            )
-                                return live
+                            if (live.indexOf("WALLET · ") === 0
+                                    && live.indexOf("DISCONNECTED") < 0)
+                                return live.slice(9)
                         }
                         try {
-                            var parsed = JSON.parse(
-                                root.cryptoStatusJson || "{}"
-                            )
+                            var parsed = JSON.parse(root.cryptoStatusJson || "{}")
                             var w = parsed.wallet || {}
-                            if (w.label)
-                                return String(w.label)
                             var key = String(w.pubkey || "")
                             if (key.length >= 8)
-                                return "WALLET · "
-                                    + key.slice(0, 4)
-                                    + "…"
-                                    + key.slice(-4)
+                                return key.slice(0, 4) + "…" + key.slice(-4)
                             if (key.length > 0)
-                                return "WALLET · " + key
+                                return key
                         } catch (err) {
                         }
-                        return "WALLET · DISCONNECTED"
+                        return ""
                     }
-                    color: {
-                        var chip = text
-                        return String(chip).indexOf("DISCONNECTED") >= 0
-                            ? "#c8cdd4"
-                            : root.green
+                    readonly property bool walletOn: walletShort.length > 0
+
+                    Row {
+                        id: walletChipRow
+                        spacing: 0
+                        Text {
+                            text: "WALLET"
+                            color: walletChipRow.parent.walletOn ? root.green : "#c8cdd4"
+                            font.family: "monospace"
+                            font.pixelSize: 13
+                            font.bold: walletChipRow.parent.walletOn
+                        }
+                        Text {
+                            text: walletChipRow.parent.walletOn
+                                ? (" · " + walletChipRow.parent.walletShort)
+                                : " · DISCONNECTED"
+                            color: walletChipRow.parent.walletOn ? "#e6edf3" : "#c8cdd4"
+                            font.family: "monospace"
+                            font.pixelSize: 13
+                        }
+                        Text {
+                            text: root.walletOpen ? "  ▴" : "  ▾"
+                            color: walletChipRow.parent.walletOn ? root.green : "#c8cdd4"
+                            font.family: "monospace"
+                            font.pixelSize: 13
+                        }
                     }
-                    font.family: "monospace"
-                    font.pixelSize: 13
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            if (workspace)
-                                workspace.setHostKind("CRYPTO")
+                            root.walletOpen = !root.walletOpen
+                            if (root.walletOpen) {
+                                if (root.walletX < 0) {
+                                    root.walletX = Math.max(12, root.width - 346)
+                                    root.walletY = 44
+                                }
+                                if (root.surfaceHost
+                                        && root.surfaceHost.cryptoStatus)
+                                    root.cryptoStatusJson = root.surfaceHost.cryptoStatus()
+                            }
                         }
                     }
                 }
@@ -1504,10 +1527,25 @@ ApplicationWindow {
                     surfaceHost: root.surfaceHost
                 }
 
+                FlowTuiHole {
+                    id: flowTuiHost
+                    objectName: "flowTuiHost"
+                    visible: root.engineTarget === "FLOW_TUI"
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: composer.top
+                    anchors.leftMargin: chatChrome.padding
+                    anchors.rightMargin: chatChrome.padding
+                    anchors.topMargin: chatChrome.topChrome
+                    anchors.bottomMargin: 0
+                    surfaceHost: root.surfaceHost
+                }
+
                 Flickable {
                     id: chatFlick
                     objectName: "chatCockpit"
-                    visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+                    visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI" && root.engineTarget !== "FLOW_TUI"
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -1981,6 +2019,7 @@ ApplicationWindow {
                             || value === "GROK_WORKER"
                             || value === "GROK_TUI"
                             || value === "GPT_TUI"
+                            || value === "FLOW_TUI"
                         ) {
                             root.engineTarget = value
                             root.persistDesktopSettings()
@@ -2120,6 +2159,14 @@ ApplicationWindow {
                 chatSessionsJson: root.chatSessionsJson
                 activeChatSession: root.activeChatSession
                 cryptoStatusJson: root.cryptoStatusJson
+                onCryptoAccountChosen: function(pubkey) {
+                    if (!root.surfaceHost || !root.surfaceHost.cryptoSelectAccount)
+                        return
+                    var raw = root.surfaceHost.cryptoSelectAccount(pubkey)
+                    if (raw)
+                        root.cryptoStatusJson = raw
+                    root.applyCryptoWalletLabel()
+                }
                 onSnippetChosen: function(path) {
                     if (workspace)
                         workspace.chooseSnippet(path)
@@ -2230,6 +2277,40 @@ ApplicationWindow {
                 active: root.shellLoading
                 cell: 6
             }
+        }
+    }
+
+    WalletPopup {
+        id: walletPopup
+        objectName: "walletPopup"
+        z: 9999
+        visible: root.walletOpen
+        x: root.walletX < 0 ? Math.max(12, root.width - 346) : root.walletX
+        y: root.walletY < 0 ? 44 : root.walletY
+        surfaceHost: root.surfaceHost
+        frameBorder: root.frameBorder
+        frameRadius: root.frameRadius
+        statusJson: root.cryptoStatusJson
+        onRequestClose: root.walletOpen = false
+        onWalletStatusUpdated: function(raw) {
+            root.cryptoStatusJson = raw
+            root.applyCryptoWalletLabel()
+        }
+        onOpenDesk: {
+            if (workspace)
+                workspace.setHostKind("CRYPTO")
+        }
+        onXChanged: {
+            if (visible)
+                root.walletX = x
+        }
+        onYChanged: {
+            if (visible)
+                root.walletY = y
+        }
+        onVisibleChanged: {
+            if (visible)
+                walletPopup.pull()
         }
     }
 

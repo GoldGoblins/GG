@@ -8,6 +8,8 @@ Item {
     property var markers: []
     property var equity: []
 
+    property string lastPayload: ""
+
     function payloadJson() {
         return JSON.stringify({
             "points": root.points || [],
@@ -19,8 +21,12 @@ Item {
     function push() {
         if (!engineLoader.item)
             return
+        var raw = root.payloadJson()
+        if (raw === root.lastPayload)
+            return
+        root.lastPayload = raw
         engineLoader.item.runJavaScript(
-            "window.setTape && window.setTape(" + root.payloadJson() + ")"
+            "window.setTape && window.setTape(" + raw + ")"
         )
     }
 
@@ -31,13 +37,12 @@ Item {
         if (visible)
             Qt.callLater(root.push)
     }
-    onWidthChanged: Qt.callLater(root.push)
-    onHeightChanged: Qt.callLater(root.push)
 
     Loader {
         id: engineLoader
         anchors.fill: parent
-        active: root.visible && root.width > 8 && root.height > 8
+        active: true
+        visible: root.visible && root.width > 8 && root.height > 8
         sourceComponent: tapeEngine
     }
 

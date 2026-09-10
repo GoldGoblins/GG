@@ -327,6 +327,7 @@ Item {
             border.color: root.frameBorder
             border.width: 1
             radius: root.frameRadius
+            antialiasing: true
         }
 
         Rectangle {

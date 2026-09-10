@@ -931,6 +931,30 @@ def _tool_path(event: dict[str, Any], repo: Path) -> str:
     return ""
 
 
+def _capture_long_memory(
+    query: str,
+    *,
+    motor: str,
+    kind: str,
+    note: str,
+    tree_root: Path | None = None,
+) -> None:
+    try:
+        if __package__:
+            from . import long_memory as _long_memory
+        else:
+            import long_memory as _long_memory
+        _long_memory.capture(
+            query,
+            motor=motor,
+            kind=kind,
+            note=note,
+            tree_root=tree_root,
+        )
+    except Exception:
+        return
+
+
 def observe_event(
     event: dict[str, Any],
     *,
@@ -969,6 +993,13 @@ def observe_event(
             payload["thought_fact_id"] = thought.get("fact_id")
             payload["kind"] = "thought"
             payload["path"] = "prompt"
+            _capture_long_memory(
+                query,
+                motor="GROK_TUI",
+                kind="episodic",
+                note=query,
+                tree_root=root,
+            )
         write_head_snapshot(payload, tree_root=root)
         return payload
     if name in {"post_tool_use", "posttooluse"}:
@@ -997,6 +1028,14 @@ def observe_event(
             project_root=project_root,
             tree_root=root,
         )
+        if payload.get("status") == "RECORDED":
+            _capture_long_memory(
+                query,
+                motor="GROK_TUI",
+                kind="procedural",
+                note="wrote " + rel,
+                tree_root=root,
+            )
         write_head_snapshot(payload, tree_root=root)
         return payload
     return {

@@ -79,7 +79,7 @@ class CapabilityRegistryTests(
 
         self.assertEqual(
             summary["capability_count"],
-            34,
+            35,
         )
 
         self.assertEqual(

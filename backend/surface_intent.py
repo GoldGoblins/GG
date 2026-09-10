@@ -39,6 +39,10 @@ _GAME_ENGINE = re.compile(
     r"\b(game\s+engine|gameengine|spelmotor(?:n)?|spel\s+motor)\b",
     re.IGNORECASE,
 )
+_NODES = re.compile(
+    r"\b(nodes?|nod(?:er|erna)?|geometry\s*nodes|flöde(?:t)?|node\s*graph)\b",
+    re.IGNORECASE,
+)
 _MARKETPLACE = re.compile(
     r"\b(marketplace|nft|handelsplats(?:en)?|marknad(?:en)?)\b",
     re.IGNORECASE,
@@ -73,6 +77,9 @@ _BARE = {
     "gameengine": "GAME_ENGINE",
     "spelmotor": "GAME_ENGINE",
     "spelmotorn": "GAME_ENGINE",
+    "nodes": "NODES",
+    "noder": "NODES",
+    "node": "NODES",
     "marketplace": "MARKETPLACE",
     "nft": "MARKETPLACE",
     "handelsplats": "MARKETPLACE",
@@ -116,6 +123,8 @@ def parse_surface_intent(text: str) -> str:
         return "QIP"
     if _GAME_ENGINE.search(value):
         return "GAME_ENGINE"
+    if _NODES.search(value):
+        return "NODES"
     if _MARKETPLACE.search(value):
         return "MARKETPLACE"
     if _MEDIA.search(value):

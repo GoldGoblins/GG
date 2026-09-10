@@ -9,6 +9,7 @@ from typing import Any
 STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/crypto")
 LEDGER_NAME = "ledger.jsonl"
 WALLET_NAME = "wallet.json"
+ACCOUNTS_NAME = "accounts.json"
 NETWORK_DEFAULT = "testnet"
 PUBLIC_DEVNET = "https://api.devnet.solana.com"
 RPC_ALLOWLIST = {
@@ -183,7 +184,73 @@ def save_wallet(
     path = wallet_path()
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)
+    remember_account(key)
     return load_wallet()
+
+
+def _accounts_path() -> Path:
+    return ensure_state_dir() / ACCOUNTS_NAME
+
+
+def load_accounts() -> list[dict[str, Any]]:
+    path = _accounts_path()
+    rows: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        payload = {}
+    raw = payload.get("accounts") if isinstance(payload, dict) else payload
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("pubkey") or "")
+            if not key:
+                continue
+            rows.append({"pubkey": key})
+    active = str(load_wallet().get("pubkey") or "")
+    if active and not any(row["pubkey"] == active for row in rows):
+        rows.insert(0, {"pubkey": active})
+    return rows
+
+
+def remember_account(pubkey: str) -> None:
+    try:
+        key = validate_pubkey(pubkey)
+    except ValueError:
+        return
+    rows = load_accounts()
+    if any(row["pubkey"] == key for row in rows):
+        return
+    rows.append({"pubkey": key})
+    path = _accounts_path()
+    path.write_text(
+        json.dumps({"accounts": rows}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def account_catalog() -> list[dict[str, Any]]:
+    active = str(load_wallet().get("pubkey") or "")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in load_accounts():
+        key = str(row.get("pubkey") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "pubkey": key,
+                "short": short_pubkey(key),
+                "active": key == active,
+            }
+        )
+    return out
 
 
 def clear_wallet() -> dict[str, Any]:
@@ -233,7 +300,8 @@ ERROR_HINTS = {
     "RPC_UNREACHABLE": "Lab RPC is down. Turn LAB ON.",
     "NEED_FEE_SOL": "Too little SOL for fees. AIRDROP first.",
     "NO_SIGNER": "CREATE TEST WALLET first.",
-    "MAINNET_NOT_ARMED": "Mainnet stays locked until testnet is proven.",
+    "MAINNET_NOT_ARMED": "Mainnet is observe-only. Sends stay on testnet/lab.",
+    "MAINNET_OBSERVE_ONLY": "Mainnet is observe-only. Sends stay on testnet/lab.",
     "NO_PROFIT": "Arb reverted. Pools unchanged.",
     "NO_MARKET_DATA": "Market feed quiet. EVAL needs a SOL chart.",
     "AIRDROP_FAIL": "Lab airdrop failed. Retry after LAB ON.",

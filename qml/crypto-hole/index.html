@@ -21,6 +21,8 @@
     var series = null;
     var equitySeries = null;
     var pending = null;
+    var lastSig = "";
+    var lastCount = 0;
 
     function uniqPoints(rows) {
       var out = [];
@@ -92,16 +94,26 @@
           return;
       }
       var points = uniqPoints(payload.points || []);
-      series.setData(points);
-      series.setMarkers(payload.markers || []);
+      var markers = payload.markers || [];
       var eq = uniqPoints(payload.equity || []);
+      var sig = points.length + ":" + (points.length ? points[0].time : 0)
+        + ":" + (points.length ? points[points.length - 1].time : 0)
+        + ":" + (points.length ? points[points.length - 1].value : 0)
+        + ":" + markers.length + ":" + eq.length
+        + ":" + (eq.length ? eq[eq.length - 1].value : 0);
+      if (sig === lastSig)
+        return;
+      lastSig = sig;
+      series.setData(points);
+      series.setMarkers(markers);
       if (equitySeries) {
         equitySeries.setData(eq);
         if (chart)
           chart.priceScale("left").applyOptions({ visible: eq.length > 1 });
       }
-      if (chart)
+      if (chart && points.length !== lastCount)
         chart.timeScale().fitContent();
+      lastCount = points.length;
       pending = null;
     }
 

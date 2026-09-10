@@ -126,6 +126,28 @@ Item {
                         root.engineTargetChangedByUser("GPT_TUI")
                 }
             }
+            Text {
+                text: " | "
+                color: "#a8b0b8"
+                font.family: "monospace"
+                font.pixelSize: 12
+            }
+            Text {
+                text: "FLOW TUI"
+                color: root.engineTarget === "FLOW_TUI"
+                    ? "#d8dee9"
+                    : "#5d6670"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: root.engineTarget === "FLOW_TUI"
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked:
+                        root.engineTargetChangedByUser("FLOW_TUI")
+                }
+            }
         }
 
         GgCheck {

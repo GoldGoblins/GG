@@ -588,8 +588,10 @@ Item {
         Rectangle {
             anchors.fill: parent
             color: "#161616"
-            border.color: "#333333"
+            border.color: "#4a4a4a"
             border.width: 1
+            radius: 4
+            antialiasing: true
         }
 
         Rectangle {
@@ -599,8 +601,10 @@ Item {
             anchors.bottom: parent.bottom
             width: root.sidebarCollapsed ? 48 : Math.max(154, Math.min(210, parent.width * 0.17))
             color: "#181818"
-            border.color: "#333333"
+            border.color: "#4a4a4a"
             border.width: 1
+            radius: 4
+            antialiasing: true
 
             Behavior on width {
                 NumberAnimation { duration: 150; easing.type: Easing.OutCubic }

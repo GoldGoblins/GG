@@ -17,6 +17,7 @@ Item {
     property string cryptoStatusJson: "{}"
     signal snippetChosen(string path)
     signal chatSessionChosen(string sessionId, string engine)
+    signal cryptoAccountChosen(string pubkey)
 
     readonly property string modelDetails:
         "Local model runner is connected.\n"
@@ -31,7 +32,7 @@ Item {
         + "Lösenord stannar utanför chat, loggar och filer. Backup, verifiering "
         + "och rollback hanteras inom den aktuella uppgiften."
 
-    property color frameBorder: "#6a6a6a"
+    property color frameBorder: "#4a4a4a"
     property int frameRadius: 4
 
     readonly property var wallet: {
@@ -79,6 +80,7 @@ Item {
         var empty = {
             "legend": "TESTNET",
             "signer": false,
+            "accounts": [],
             "holdings": [],
             "wallet": {}
         }
@@ -445,6 +447,7 @@ Item {
 
                 Text {
                     width: parent.width
+                    visible: (root.crypto.accounts || []).length === 0
                     text: {
                         var w = root.crypto.wallet || {}
                         if (!w.pubkey)
@@ -455,7 +458,7 @@ Item {
                         return key
                     }
                     color: (root.crypto.wallet && root.crypto.wallet.pubkey)
-                        ? "#d8dee9"
+                        ? "#8db89a"
                         : "#6a6a6a"
                     font.family: "monospace"
                     font.pixelSize: 12
@@ -463,12 +466,26 @@ Item {
                     elide: Text.ElideMiddle
                 }
 
-                Text {
-                    width: parent.width
-                    text: root.crypto.signer ? "SIGNER  YES" : "SIGNER  NO"
-                    color: root.crypto.signer ? "#8db89a" : "#c8cdd4"
-                    font.family: "monospace"
-                    font.pixelSize: 12
+                Repeater {
+                    model: root.crypto.accounts || []
+                    delegate: Text {
+                        required property var modelData
+                        width: cryptoColumn.width
+                        text: String(modelData.short || "")
+                        color: modelData.active ? "#8db89a" : "#8b949e"
+                        font.family: "monospace"
+                        font.pixelSize: 12
+                        font.bold: Boolean(modelData.active)
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                var key = String(modelData.pubkey || "")
+                                if (key)
+                                    root.cryptoAccountChosen(key)
+                            }
+                        }
+                    }
                 }
 
                 Text {

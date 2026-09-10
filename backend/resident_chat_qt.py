@@ -20,6 +20,7 @@ from backend.controlled_information_tools import (
 )
 from backend.resident_chat_runner import classify_runtime_failure
 from backend.grok_worker_contract import (
+    ENGINE_FLOW_TUI,
     ENGINE_GPT_TUI,
     ENGINE_GROK_TUI,
     ENGINE_GROK_WORKER,
@@ -168,6 +169,13 @@ class ResidentChatTransport(QObject):
         _workspace_context: dict[str, object],
     ) -> bool:
         target = self._engine_target()
+        if target == ENGINE_FLOW_TUI:
+            prompt = str(request.get("prompt") or "")
+            host = self._surface_host
+            if host is None or not callable(getattr(host, "flowTuiSubmit", None)):
+                raise ResidentChatQtError("FLOW_TUI_HOST_MISSING")
+            host.flowTuiSubmit(prompt)
+            return True
         if target == ENGINE_GROK_TUI:
             prompt = str(request.get("prompt") or "")
             host = self._surface_host

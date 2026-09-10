@@ -71,8 +71,12 @@ def main() -> int:
         != "NEED_FEE_SOL"
     ):
         raise AssertionError("short insufficient")
-    if "locked" not in crypto_contract.human_error("MAINNET_NOT_ARMED").lower():
+    if "observe-only" not in crypto_contract.human_error("MAINNET_OBSERVE_ONLY").lower():
         raise AssertionError("mainnet hint")
+    if crypto_contract.human_error("MAINNET_NOT_ARMED") != crypto_contract.human_error(
+        "MAINNET_OBSERVE_ONLY"
+    ):
+        raise AssertionError("old MAINNET_NOT_ARMED must alias observe-only")
 
     proven = crypto_contract.mark_proven("lab")
     if not proven["lab"] or proven["ready"]:
@@ -103,8 +107,8 @@ def main() -> int:
     fired = crypto_host.ingest_paper_signal(
         '{"side":"buy","size_sol":0.01,"symbol":"SOL","source":"manual"}'
     )
-    if fired.get("error") != "MAINNET_NOT_ARMED":
-        raise AssertionError("mainnet armed? " + json.dumps(fired))
+    if fired.get("error") != "MAINNET_OBSERVE_ONLY":
+        raise AssertionError("mainnet send? " + json.dumps(fired))
 
     crypto_contract.save_network("testnet")
     crypto_contract.save_wallet(key, 0, "testnet")
@@ -267,7 +271,7 @@ def main() -> int:
     crypto_contract.save_network("mainnet")
     payload = crypto_host.run_flash_arb()
     last = payload.get("arb_last") or {}
-    if last.get("error") != "MAINNET_NOT_ARMED":
+    if last.get("error") != "MAINNET_OBSERVE_ONLY":
         raise AssertionError("arb mainnet " + json.dumps(last))
 
     print("CRYPTO_HOST_TEST=PASS")

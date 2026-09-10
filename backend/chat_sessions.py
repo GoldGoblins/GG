@@ -30,6 +30,7 @@ ENGINE_LABEL = {
     "GROK_WORKER": "GROK",
     "LOCAL_QWEN": "QWEN",
     "GPT_TUI": "GPTUI",
+    "FLOW_TUI": "FLOW TUI",
 }
 
 

@@ -423,8 +423,10 @@ Item {
         anchors.topMargin: 8
         anchors.bottomMargin: 10
         color: "#161616"
-        border.color: "#333333"
+        border.color: "#4a4a4a"
         border.width: 1
+        radius: 4
+        antialiasing: true
     }
 
     Rectangle {
@@ -437,8 +439,10 @@ Item {
         anchors.bottomMargin: 10
         width: root.sidebarCollapsed ? 48 : Math.max(168, Math.min(205, parent.width * 0.18))
         color: root.panel
-        border.color: "#333333"
+        border.color: "#4a4a4a"
         border.width: 1
+        radius: 4
+        antialiasing: true
 
         Behavior on width {
             NumberAnimation { duration: 150; easing.type: Easing.OutCubic }

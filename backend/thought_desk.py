@@ -20,9 +20,9 @@ from backend.chat_context_compiler import work_intent
 
 
 SCHEMA = "gg.thought-desk.v1"
-MAX_SEATS = 5
+MAX_SEATS = 6
 MAX_LOOPS = 3
-MAX_WORKERS = 5
+MAX_WORKERS = 6
 PARALLEL_AGENT_BRAIN = "FORBIDDEN"
 FLAT_MODEL_COMMAND_LOOP = "FORBIDDEN"
 
@@ -91,6 +91,29 @@ def _evidence(text: str) -> dict[str, Any]:
         "profiles": slugs,
         "named_files": files,
         "work": work_intent(text),
+    }
+
+
+def _memory(text: str) -> dict[str, Any]:
+    try:
+        from backend.long_memory import density, recall
+
+        hits = recall(text, limit=3)
+        fill = density()
+    except Exception:
+        hits = []
+        fill = 0.0
+    statements = [
+        str(item.get("statement") or "")
+        for item in hits
+        if str(item.get("statement") or "").strip()
+    ][:3]
+    return {
+        "id": "MEMORY",
+        "hits": statements,
+        "count": len(statements),
+        "density": fill,
+        "retrieval": "LASER_IDENTITY",
     }
 
 
@@ -171,16 +194,19 @@ def _compile_seats(text: str, builder_hint: dict[str, Any] | None = None) -> dic
         intent_f = pool.submit(_intent, text)
         risk_f = pool.submit(_risk, text)
         evidence_f = pool.submit(_evidence, text)
+        memory_f = pool.submit(_memory, text)
         builder_f = pool.submit(_builder, text)
         intent = intent_f.result()
         risk = risk_f.result()
         evidence = evidence_f.result()
+        memory = memory_f.result()
         builder = builder_hint or builder_f.result()
         critic = _critic(text, builder)
     return {
         "intent": intent,
         "risk": risk,
         "evidence": evidence,
+        "memory": memory,
         "critic": critic,
         "builder": builder,
     }
@@ -239,6 +265,7 @@ def render(board: dict[str, Any], *, compact: bool = False) -> str:
     intent = seats.get("intent") or {}
     risk = seats.get("risk") or {}
     evidence = seats.get("evidence") or {}
+    memory = seats.get("memory") or {}
     critic = seats.get("critic") or {}
     builder = seats.get("builder") or {}
     moves = " | ".join(str(item) for item in (builder.get("moves") or [])[:3])
@@ -254,6 +281,10 @@ def render(board: dict[str, Any], *, compact: bool = False) -> str:
         "light=" + str(man.get("light") or "HOLD"),
         "INTENT " + str(intent.get("ask") or ""),
         "RISK " + str(risk.get("light") or "GREEN"),
+        "MEMORY hits="
+        + str(memory.get("count") or 0)
+        + " density="
+        + str(memory.get("density") or 0),
         "EVIDENCE profiles=" + profiles,
         "CRITIC " + flags,
         "BUILDER " + str(builder.get("mode") or "TALK") + ((" · " + moves) if moves else ""),

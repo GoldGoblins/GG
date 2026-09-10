@@ -19,6 +19,7 @@ from backend import crypto_bots, crypto_flash_arb, crypto_trader
 from backend import crypto_strategy_factory
 from backend import crypto_desk
 from backend import polymarket_research
+from backend import kaspa_covenant
 from backend.crypto_lab import (
     current_slot,
     has_blockhash,
@@ -47,6 +48,7 @@ from backend.crypto_contract import (
     save_wallet,
     short_error,
     validate_pubkey,
+    account_catalog,
 )
 
 
@@ -387,7 +389,7 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     pubkey = str(wallet.get("pubkey") or "")
     row: dict[str, Any] = {
         "ts": int(time.time()),
-        "mode": "LIVE" if live else "TESTNET",
+        "mode": "OBSERVE" if live else "TESTNET",
         "network": chain,
         "side": signal["side"],
         "size_sol": signal["size_sol"],
@@ -397,8 +399,8 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
         "wallet": pubkey,
     }
     if live:
-        row["error"] = "MAINNET_NOT_ARMED"
-        row["hint"] = human_error("MAINNET_NOT_ARMED")
+        row["error"] = "MAINNET_OBSERVE_ONLY"
+        row["hint"] = human_error("MAINNET_OBSERVE_ONLY")
         append_ledger(row)
         return decorate_ledger_row(row)
     if not has_signer():
@@ -662,7 +664,7 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
     if pyusd:
         wallet["pyusd"] = pyusd.get("display")
         wallet["pyusd_decimals"] = pyusd.get("decimals")
-    legend = "MAINNET" if chain == "mainnet" else "TESTNET"
+    legend = "OBSERVE" if chain == "mainnet" else "TESTNET"
     rpc = str(RPC_ALLOWLIST.get(chain) or "")
     holdings: list[dict[str, Any]] = []
     if pubkey:
@@ -689,6 +691,7 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
             },
             "legend": legend,
             "signer": has_signer(),
+            "accounts": account_catalog(),
             "holdings": holdings[:8],
             "lab": {
                 "running": pid is not None,
@@ -725,8 +728,10 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
         ledger = [
             item
             for item in ledger
-            if str(item.get("error") or "") != "MAINNET_NOT_ARMED"
+            if str(item.get("error") or "")
+            not in ("MAINNET_NOT_ARMED", "MAINNET_OBSERVE_ONLY")
             and "Mainnet stays locked" not in str(item.get("hint") or "")
+            and "observe-only" not in str(item.get("hint") or "").lower()
         ]
     ledger = ledger[-16:]
     last = ledger[-1] if ledger else {}
@@ -742,8 +747,10 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
     return {
         "wallet": wallet,
         "legend": legend,
+        "mainnet_observe": chain == "mainnet",
         "rpc": rpc,
         "signer": has_signer(),
+        "accounts": account_catalog(),
         "tokens": tokens,
         "holdings": holdings,
         "last_signal": last,
@@ -763,6 +770,7 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
         "strategy_factory_job": strategy_factory_status(),
         "desk": desk_status().get("result", crypto_desk.empty_snapshot()),
         "desk_job": desk_status(),
+        "kaspa": kaspa_covenant.snapshot(),
         "proven": load_proven(),
         "bots": [
             {
@@ -784,6 +792,22 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
     }
 
 
+def kaspa_genesis() -> dict[str, Any]:
+    return kaspa_covenant.genesis()
+
+
+def kaspa_transition(function: str, amount: int) -> dict[str, Any]:
+    return kaspa_covenant.transition(function, amount)
+
+
+def kaspa_compile() -> dict[str, Any]:
+    return kaspa_covenant.compile_counter()
+
+
+def kaspa_set_network(network: str) -> dict[str, Any]:
+    return kaspa_covenant.set_network(network)
+
+
 def import_keypair_file(path: str) -> dict[str, Any]:
     pubkey = import_solana_keypair(path)
     chain = load_network()
@@ -796,6 +820,14 @@ def import_keypair_file(path: str) -> dict[str, Any]:
 
 def disconnect() -> dict[str, Any]:
     return clear_wallet()
+
+
+def select_account(pubkey: str) -> dict[str, Any]:
+    key = validate_pubkey(pubkey)
+    chain = load_network()
+    lamports = fetch_balance(key, chain) if chain in RPC_ALLOWLIST else None
+    save_wallet(key, lamports, chain)
+    return status_payload()
 
 
 def lab_on() -> dict[str, Any]:
@@ -817,10 +849,13 @@ def run_flash_arb(usd_units: str | None = None) -> dict[str, Any]:
     chain = load_network()
     if chain == "mainnet":
         row = {
+            "ts": int(time.time()),
+            "mode": "OBSERVE",
+            "network": chain,
             "side": "arb",
             "txid": "UNSENT",
-            "error": "MAINNET_NOT_ARMED",
-            "hint": human_error("MAINNET_NOT_ARMED"),
+            "error": "MAINNET_OBSERVE_ONLY",
+            "hint": human_error("MAINNET_OBSERVE_ONLY"),
         }
         append_ledger(row)
         payload = status_payload()
@@ -1607,6 +1642,20 @@ def tick_trader() -> dict[str, Any]:
         if px_tf is None:
             raise RuntimeError("NO_MARKET_DATA")
         atr = crypto_trader.atr_pct(px_tf[0], px_tf[1], px_tf[2])
+        if crypto_bots.selected() == "optimal":
+            from backend import crypto_optimal
+
+            vol_row = h1[3] if h1 is not None and len(h1) > 3 else []
+            state = crypto_trader.load_state()
+            open_lots = list(state.get("open") or state.get("lots") or [])
+            in_pos = bool(open_lots) or int(state.get("float_sol") or 0) > 0
+            gate = crypto_optimal.live_gate(
+                list(h1[2]) if h1 is not None else list(px_tf[2]),
+                list(vol_row) if vol_row else [1.0] * len(px_tf[2]),
+                in_position=in_pos,
+                trades_today=int(state.get("fills_today") or 0),
+            )
+            votes = crypto_optimal.apply_live_votes(votes, gate)
         sig = {
             "super": votes.get("1m") or votes.get("5m") or "none",
             "mtf": votes,
@@ -1694,7 +1743,7 @@ def start_backtest_trader() -> dict[str, Any]:
         if not already:
             _backtest_job["state"] = "running"
             _backtest_job["note"] = (
-                crypto_bots.selected() + " · 1h clock, off the UI thread"
+                crypto_bots.selected() + " · 1h clock, last 4000 bars, off UI thread"
             )
             _backtest_job["started"] = time.time()
             launch = True
@@ -1724,7 +1773,10 @@ def backtest_trader(tfs: tuple[str, ...] | None = None) -> dict[str, Any]:
     frames: dict[str, dict[str, Any]] = {}
     names = tfs or ("1m", "5m", "15m", "1h", "4h", "8h", "1d")
     if names == crypto_trader.TIMEFRAMES:
-        names = tuple(tf for tf in names if tf not in ("1m", "5m"))
+        # 15m/8h on a 2020→now SOL tape is thousands of pages. 1h is the clock.
+        names = ("1h", "4h", "1d")
+    if crypto_bots.selected() == "optimal":
+        names = ("1h",)
     for tf in names:
         try:
             h, l, c, v, times = fetch_klines_history(tf)

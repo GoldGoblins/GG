@@ -643,7 +643,7 @@ Item {
         )
             root.scratchHost().ensureWebEngine()
         root.hostKind = kind
-        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "OSINT" || kind === "QIP" || kind === "MEDIA" || kind === "DRAW" || kind === "GAME_ENGINE")
+        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "OSINT" || kind === "QIP" || kind === "MEDIA" || kind === "DRAW" || kind === "GAME_ENGINE" || kind === "NODES" || kind === "FLOW")
             return
         if (
             kind === "CODE"
@@ -2223,7 +2223,11 @@ Item {
         ? "SETTINGS"
         : (root.hostKind === "GAME_ENGINE"
             ? "GAME ENGINE"
-            : String(root.hostKind || ""))
+            : (root.hostKind === "NODES"
+                ? "NODES"
+                : (root.hostKind === "FLOW"
+                    ? "FLOW"
+                    : String(root.hostKind || ""))))
     readonly property int tabStripLeft:
         root.frameKindLabel.length > 0
             ? (20 + root.frameKindLabel.length * 8)
@@ -2619,6 +2623,8 @@ Item {
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
                     && root.hostKind !== "GAME_ENGINE"
+                    && root.hostKind !== "NODES"
+                    && root.hostKind !== "FLOW"
                     && (
                         root.currentObjectProvenance === "REAL_LOCAL_FILE"
                         || (
@@ -3243,6 +3249,48 @@ Item {
                 }
             }
 
+            Loader {
+                id: nodePane
+                objectName: "workspaceNodePane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "NODES"
+                visible: active
+                sourceComponent: Component {
+                    NodeSurface {
+                        objectName: "workspaceNodePane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
+                id: agentFlowPane
+                objectName: "workspaceAgentFlowPane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "FLOW"
+                visible: active
+                sourceComponent: Component {
+                    AgentFlowSurface {
+                        objectName: "workspaceAgentFlowPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
             Item {
                 id: webHost
                 objectName: "workspaceWebHost"
@@ -3774,6 +3822,50 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("GAME_ENGINE")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            objectName: "workspaceKindNodes"
+            text: "NODES"
+            color: root.hostKind === "NODES" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "NODES"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("NODES")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            objectName: "workspaceKindFlow"
+            text: "FLOW"
+            color: root.hostKind === "FLOW" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "FLOW"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("FLOW")
             }
         }
     }

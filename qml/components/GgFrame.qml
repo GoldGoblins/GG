@@ -8,7 +8,7 @@ Item {
     property string bottomLeftLegend: ""
     property string bottomRightLegend: ""
     property color backgroundColor: "#161616"
-    property color borderColor: "#6a6a6a"
+    property color borderColor: "#4a4a4a"
     property color leftLegendColor: "#e6edf3"
     property color rightLegendColor: "#c8cdd4"
     property int radius: 4
@@ -38,12 +38,11 @@ Item {
     Rectangle {
         id: frame
         anchors.fill: parent
-        anchors.margins: 1
         radius: root.radius
         color: root.backgroundColor
         border.width: 1
         border.color: root.borderColor
-        antialiasing: false
+        antialiasing: true
         clip: false
     }
 
@@ -58,7 +57,7 @@ Item {
         width: leftLegendRow.implicitWidth + 12
         color: root.backgroundColor
         radius: Math.min(3, Math.max(1, root.radius - 1))
-        antialiasing: false
+        antialiasing: true
 
         Row {
             id: leftLegendRow
@@ -94,7 +93,7 @@ Item {
         width: rightLegendText.implicitWidth + 12
         color: root.backgroundColor
         radius: Math.min(3, Math.max(1, root.radius - 1))
-        antialiasing: false
+        antialiasing: true
 
         Text {
             id: rightLegendText
@@ -118,7 +117,7 @@ Item {
         width: bottomLeftLegendText.implicitWidth + 12
         color: root.backgroundColor
         radius: Math.min(3, Math.max(1, root.radius - 1))
-        antialiasing: false
+        antialiasing: true
 
         Text {
             id: bottomLeftLegendText
@@ -142,7 +141,7 @@ Item {
         width: bottomRightLegendText.implicitWidth + 12
         color: root.backgroundColor
         radius: Math.min(3, Math.max(1, root.radius - 1))
-        antialiasing: false
+        antialiasing: true
 
         Text {
             id: bottomRightLegendText

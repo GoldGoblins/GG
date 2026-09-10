@@ -278,6 +278,9 @@ def main() -> int:
         "parseSurfaceIntent(text)",
         "function beginGrokWorkerStream(",
         'objectName: "grokTuiHost"',
+        'objectName: "gptTuiHost"',
+        'objectName: "flowTuiHost"',
+        'leftLegend: "CHAT · UNIVERSAL OPERATIONAL STREAM"',
         "chatChrome.padding",
         "chatChrome.topChrome",
         "ScrollBar.AlwaysOff",
@@ -478,6 +481,8 @@ def main() -> int:
         'text: "MEDIA"',
         'text: "DRAW"',
         'text: "GAME ENGINE"',
+        'text: "NODES"',
+        'text: "FLOW"',
         'hostKind === "CRYPTO"',
         'hostKind === "MARKETPLACE"',
         'hostKind === "TMOG"',
@@ -485,6 +490,8 @@ def main() -> int:
         'hostKind === "MEDIA"',
         'hostKind === "DRAW"',
         'hostKind === "GAME_ENGINE"',
+        'hostKind === "NODES"',
+        'hostKind === "FLOW"',
         'objectName: "workspaceMarketplacePane"',
         'objectName: "workspaceTmogPane"',
         'objectName: "workspaceOsintPane"',
@@ -492,10 +499,13 @@ def main() -> int:
         'objectName: "workspaceMediaPane"',
         'objectName: "workspaceDrawPane"',
         'objectName: "workspaceGameEnginePane"',
+        'objectName: "workspaceNodePane"',
+        'objectName: "workspaceAgentFlowPane"',
         "MarketplaceSurface {",
         "MediaSurface {",
         "DrawSurface {",
         "GameEngineSurface {",
+        "NodeSurface {",
         "function applyLiveReload()",
         "liveEpoch",
         'objectName: "workspaceWebHost"',
@@ -753,7 +763,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW"]',
     ):
         require(
             marker in settings_workspace,
@@ -1454,8 +1464,8 @@ def main() -> int:
     )
     a1_2_frame = text("qml/components/GgFrame.qml")
     require(
-        "antialiasing: true" not in a1_2_frame,
-        "GgFrame still antialiases every chrome rectangle.",
+        "antialiasing: true" in a1_2_frame,
+        "GgFrame corners are still aliased.",
     )
     require(
         "property int padding: 8" in a1_2_frame
@@ -1487,7 +1497,8 @@ def main() -> int:
         and "active: !root.settingsOpen && root.hostKind === \"OSINT\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"QIP\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml
-        and "active: !root.settingsOpen && root.hostKind === \"GAME_ENGINE\"" in ws_qml,
+        and "active: !root.settingsOpen && root.hostKind === \"GAME_ENGINE\"" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"NODES\"" in ws_qml,
         "Unused workspace function panes are still kept alive.",
     )
     require(

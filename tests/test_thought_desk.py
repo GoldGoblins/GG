@@ -19,6 +19,8 @@ def main() -> int:
     assert talk["model_agents"] is False
     assert talk["front_man"]["in_code"] is True
     assert talk["seats"]["builder"]["mode"] == "TALK"
+    assert talk["seats"]["memory"]["id"] == "MEMORY"
+    assert "MEMORY hits=" in talk["text"]
     assert "SAME_TASK_DESK" in talk["text"]
 
     linear = thought_desk.sit(

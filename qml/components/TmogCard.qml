@@ -6,7 +6,7 @@ Item {
     property string rightLegend: ""
     property var tabs: []
     property string activeTab: ""
-    property color borderColor: "#6a6a6a"
+    property color borderColor: "#4a4a4a"
     property color fill: "#141414"
     property bool fitContent: false
     property bool lamp: false
@@ -30,7 +30,7 @@ Item {
         color: root.fill
         border.color: root.borderColor
         border.width: 1
-        radius: 2
+        radius: 4
     }
 
     Rectangle {

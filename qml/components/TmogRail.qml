@@ -13,7 +13,7 @@ Item {
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         height: 1
-        color: "#6a6a6a"
+        color: "#4a4a4a"
     }
 
     Rectangle {

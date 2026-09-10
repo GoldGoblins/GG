@@ -38,6 +38,11 @@ BOOKS = (
         "name": "HYBRID",
         "source": "GG MTF + TimesFM + Hummingbot-style triple barrier (paper)",
     },
+    {
+        "id": "optimal",
+        "name": "GG+",
+        "source": "GG band + vol size + Front Man + barriers + CORE_KEEP (paper)",
+    },
 )
 
 
@@ -80,6 +85,10 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         from backend import crypto_hybrid
 
         report = crypto_hybrid.run_backtest(frames)
+    elif bid == "optimal":
+        from backend import crypto_optimal
+
+        report = crypto_optimal.run_backtest(frames)
     else:
         report = crypto_trader.run_flow_backtest(frames)
     report["book"] = bid

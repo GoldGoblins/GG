@@ -41,13 +41,14 @@ Item {
     readonly property bool nativeTuiTarget:
         root.engineTarget === "GROK_TUI"
         || root.engineTarget === "GPT_TUI"
+        || root.engineTarget === "FLOW_TUI"
 
     function lampBlink(active, phase) {
         return active && ((root.diskLampTick + phase) % 6) < 3
     }
 
     // implicitHeight: root.engineTarget === "GROK_TUI" (legacy contract marker)
-    implicitHeight: (root.engineTarget === "GROK_TUI" || root.engineTarget === "GPT_TUI")
+    implicitHeight: (root.engineTarget === "GROK_TUI" || root.engineTarget === "GPT_TUI" || root.engineTarget === "FLOW_TUI")
         ? 28
         : (root.assignmentExpanded ? 166 : 102)
     implicitWidth: 720
@@ -71,7 +72,8 @@ Item {
     }
 
     readonly property bool canSend: input.text.trim().length > 0
-    readonly property string engineLabel: root.engineTarget === "GPT_TUI" ? "GPTUI" :
+    readonly property string engineLabel: root.engineTarget === "FLOW_TUI" ? "FLOW TUI" :
+        root.engineTarget === "GPT_TUI" ? "GPTUI" :
         root.engineTarget === "GROK_TUI"
             ? "GROK TUI"
             : (
@@ -347,7 +349,7 @@ Item {
         width: peopleRow.width + 12
         height: 20
         color: "#161616"
-        visible: peopleRow.width > 0 && root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+        visible: peopleRow.width > 0 && !root.nativeTuiTarget
     }
 
     Row {
@@ -359,7 +361,7 @@ Item {
         anchors.bottomMargin: -8
         height: 20
         spacing: 0
-        visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+        visible: !root.nativeTuiTarget
         Text {
             id: assignmentOptionsButton
             objectName: "orchestratorAssignmentOptionsButton"
@@ -388,7 +390,7 @@ Item {
         width: sendRow.width + 12
         height: 20
         color: "#161616"
-        visible: sendRow.width > 0 && root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+        visible: sendRow.width > 0 && !root.nativeTuiTarget
     }
 
     Row {
@@ -400,7 +402,7 @@ Item {
         anchors.bottomMargin: -8
         height: 20
         spacing: 0
-        visible: root.engineTarget !== "GROK_TUI" && root.engineTarget !== "GPT_TUI"
+        visible: !root.nativeTuiTarget
         Text {
             id: sendButton
             text: "Send"
@@ -540,6 +542,28 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.engineTargetRequested("GPT_TUI")
+            }
+        }
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+        Text {
+            id: flowTuiEngineTarget
+            text: "FLOW TUI"
+            color: root.engineTarget === "FLOW_TUI"
+                ? "#d8dee9"
+                : "#5d6670"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.engineTarget === "FLOW_TUI"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.engineTargetRequested("FLOW_TUI")
             }
         }
     }

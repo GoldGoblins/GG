@@ -30,6 +30,9 @@ from PySide6.QtCore import (
 from backend.chat_sessions import forget_session, list_for_ui, sync_owned
 from backend import crypto_host
 from backend import game_engine_host
+from backend import agent_flow
+from backend import flow_tui
+from backend import node_flow
 from backend import libretro_host
 from backend import marketplace_host
 from backend import media_host
@@ -248,6 +251,10 @@ class ChatSurfaceHost(QObject):
         self._crypto_timer.setInterval(60000)
         self._crypto_timer.timeout.connect(self._crypto_idle_tick)
         self._crypto_timer.start()
+        self._idle_learn_timer = QTimer(self)
+        self._idle_learn_timer.setInterval(45000)
+        self._idle_learn_timer.timeout.connect(self._idle_learn_tick)
+        self._idle_learn_timer.start()
         self._tmog_pulse_at = 0.0
         self._tmog_pulse_raw = ""
         self._chat_io_at = 0.0
@@ -1661,6 +1668,18 @@ class ChatSurfaceHost(QObject):
         return json.dumps(crypto_host.disconnect(), separators=(",", ":"))
 
     @Slot(str, result=str)
+    def cryptoSelectAccount(self, pubkey: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.select_account(pubkey),
+                separators=(",", ":"),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, result=str)
     def cryptoSetNetwork(self, network: str) -> str:
         try:
             payload = crypto_host.set_network(network)
@@ -1681,6 +1700,42 @@ class ChatSurfaceHost(QObject):
     def cryptoLabOff(self) -> str:
         try:
             return json.dumps(crypto_host.lab_off(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoKaspaGenesis(self) -> str:
+        try:
+            crypto_host.kaspa_genesis()
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, int, result=str)
+    def cryptoKaspaTransition(self, function: str, amount: int) -> str:
+        try:
+            crypto_host.kaspa_transition(function, int(amount))
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(result=str)
+    def cryptoKaspaCompile(self) -> str:
+        try:
+            crypto_host.kaspa_compile()
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
+    @Slot(str, result=str)
+    def cryptoKaspaSetNetwork(self, network: str) -> str:
+        try:
+            crypto_host.kaspa_set_network(network)
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
@@ -1711,6 +1766,25 @@ class ChatSurfaceHost(QObject):
             name="gg-crypto-idle",
             daemon=True,
         ).start()
+
+    def _idle_learn_tick(self) -> None:
+        if self._chat_io_at and (time.monotonic() - self._chat_io_at) < 8.0:
+            return
+        threading.Thread(
+            target=self._idle_learn_work,
+            name="gg-idle-learn",
+            daemon=True,
+        ).start()
+
+    def _idle_learn_work(self) -> None:
+        try:
+            from backend.idle_learn import tick as idle_learn_tick
+            from backend.idle_frontier import tick as idle_frontier_tick
+
+            idle_learn_tick()
+            idle_frontier_tick()
+        except Exception:
+            return
 
     def _crypto_idle_work(self) -> None:
         try:
@@ -1944,6 +2018,120 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def gameEngineReplay(self) -> str:
         return self._game_engine_json(game_engine_host.play_replay())
+
+    def _node_flow_json(self, value: object) -> str:
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({
+                "schema": node_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(result=str)
+    def nodeFlowStatus(self) -> str:
+        return self._node_flow_json(node_flow.snapshot())
+
+    @Slot(result=str)
+    def nodeFlowReset(self) -> str:
+        node_flow.reset()
+        return self._node_flow_json(node_flow.snapshot())
+
+    @Slot(str, str, str, str, result=str)
+    def nodeFlowConnect(
+        self,
+        from_node: str,
+        from_port: str,
+        to_node: str,
+        to_port: str,
+    ) -> str:
+        try:
+            return self._node_flow_json(
+                node_flow.connect(from_node, from_port, to_node, to_port)
+            )
+        except Exception as exc:
+            return self._node_flow_json({
+                "schema": node_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(str, result=str)
+    def nodeFlowDisconnect(self, edge_id: str) -> str:
+        try:
+            return self._node_flow_json(node_flow.disconnect(edge_id))
+        except Exception as exc:
+            return self._node_flow_json({
+                "schema": node_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(str, float, float, result=str)
+    def nodeFlowMove(self, node_id: str, x: float, y: float) -> str:
+        return self._node_flow_json(node_flow.move(node_id, x, y))
+
+    def _agent_flow_json(self, value: object) -> str:
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({
+                "schema": agent_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(result=str)
+    def agentFlowStatus(self) -> str:
+        return self._agent_flow_json(agent_flow.snapshot())
+
+    @Slot(result=str)
+    def agentFlowReset(self) -> str:
+        return self._agent_flow_json(agent_flow.reset())
+
+    @Slot(str, result=str)
+    def agentFlowRun(self, text: str) -> str:
+        try:
+            return self._agent_flow_json(agent_flow.run(text))
+        except Exception as exc:
+            return self._agent_flow_json({
+                "schema": agent_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    def _flow_tui_json(self, value: object) -> str:
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({
+                "schema": flow_tui.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(result=str)
+    def flowTuiStatus(self) -> str:
+        return self._flow_tui_json(flow_tui.snapshot())
+
+    @Slot(result=str)
+    def flowTuiReset(self) -> str:
+        return self._flow_tui_json(flow_tui.reset())
+
+    @Slot(str, result=str)
+    def flowTuiSubmit(self, text: str) -> str:
+        try:
+            return self._flow_tui_json(flow_tui.submit(text))
+        except Exception as exc:
+            return self._flow_tui_json({
+                "schema": flow_tui.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
+
+    @Slot(str, str, float, result=str)
+    def nodeFlowSetParam(self, node_id: str, key: str, value: float) -> str:
+        try:
+            return self._node_flow_json(node_flow.set_param(node_id, key, value))
+        except Exception as exc:
+            return self._node_flow_json({
+                "schema": node_flow.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
 
     @Slot(result=str)
     def marketplaceStatus(self) -> str:
@@ -3891,6 +4079,8 @@ class ChatSurfaceHost(QObject):
             self.chatSessionsChanged.emit(listing)
 
     def shutdown(self) -> None:
+        self._idle_learn_timer.stop()
+        self._crypto_timer.stop()
         self._tui_focus_timer.stop()
         self._tui_focus_terminal = ""
         self._gpt_capture_timer.stop()

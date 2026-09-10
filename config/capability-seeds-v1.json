@@ -1201,7 +1201,7 @@
       "kind": "STATE_SERVICE",
       "source_path": "projects/gg-ai-desktop/backend/grok_knowledge_tree.py",
       "manifest_key": "backend/grok_knowledge_tree.py",
-      "content_sha256": "5a19dddc81857fb93778797c8b92e109d89d37af298450ef3e281d020a8405a8",
+      "content_sha256": "253b730b65de13c670d9856e6dc5baf530575c06901336cc8d6bb90b99f244c6",
       "entrypoint_kind": "python_symbol",
       "entrypoint": "lookup",
       "contract": {
@@ -1241,6 +1241,51 @@
         "neighborhood",
         "knowledge",
         "head",
+        "content_addressed",
+        "fail_closed"
+      ]
+    },
+    {
+      "human_id": "state.memory.long",
+      "description": "Motor-independent long-term memory on the laser-Merkle FactStore: compact episodes, token posting lists, bounded WORKING.md. Lookup is identity-in nearby-lessons-out; it does not dump transcripts or promote canonical policy.",
+      "kind": "STATE_SERVICE",
+      "source_path": "projects/gg-ai-desktop/backend/long_memory.py",
+      "manifest_key": "backend/long_memory.py",
+      "content_sha256": "28630cc1e3b09cbe0d7f5a306690102d67e1bd0fc7d6f1293d100b57206dc414",
+      "entrypoint_kind": "python_symbol",
+      "entrypoint": "recall",
+      "contract": {
+        "effect_class": "RUNTIME_STATE_WRITE",
+        "risk_floor": "YELLOW",
+        "persistent_write": "LOCAL_STATE",
+        "network": "NONE",
+        "sudo": "NO",
+        "execution_authority": "NONE",
+        "model_inference": false
+      },
+      "depends_on": [
+        "state.fact.store",
+        "focus.grok.knowledge_tree"
+      ],
+      "relations": [
+        {
+          "type": "USED_WITH",
+          "target": "state.fact.store"
+        },
+        {
+          "type": "USED_WITH",
+          "target": "focus.grok.knowledge_tree"
+        }
+      ],
+      "tags": [
+        "memory",
+        "long_term",
+        "laser",
+        "merkle",
+        "fact",
+        "episode",
+        "lesson",
+        "shared",
         "content_addressed",
         "fail_closed"
       ]
