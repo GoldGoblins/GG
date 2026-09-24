@@ -1,0 +1,11 @@
+{
+  "schema": "gg.authored.world-kit.v1",
+  "asset_id": "gg-clay-palm",
+  "kind": "PALM",
+  "style_id": "GG_CLAY_LOW_POLY",
+  "source_policy": "ORIGINAL_GEOMETRY_REFERENCE_INSPIRED_NO_SOURCE_COPY",
+  "source": "authored/world/gg-clay-palm.glb",
+  "anchor": "FEET",
+  "height_m": 4.16,
+  "mesh_objects": 13
+}

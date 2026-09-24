@@ -570,9 +570,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
@@ -590,9 +594,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.pixelSize: 13
                     }
 
@@ -683,9 +691,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.pixelSize: 13
                     }
 
@@ -699,9 +711,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
@@ -721,9 +737,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.family: "monospace"
                         font.pixelSize: 12
                     }
@@ -769,9 +789,13 @@ Item {
                         selectByMouse: true
                         selectByKeyboard: true
                         persistentSelection: true
+                        selectionColor: "#3a3a3a"
+                        selectedTextColor: "#f2f2f2"
                         textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.WordWrap
                         height: implicitHeight
+
+                        SelectionGuard {}
                         font.family: "monospace"
                         font.pixelSize: 12
                     }

@@ -168,6 +168,12 @@ Item {
                 selectByMouse: true
                 selectByKeyboard: true
                 persistentSelection: true
+                selectionColor: "#3a3a3a"
+                selectedTextColor: "#f2f2f2"
+
+                SelectionGuard {
+                    editor: bodyView
+                }
                 color: root.objectType === "CODE" || root.objectType === "TERMINAL"
                     ? "#d8dee9" : "#e6edf3"
                 font.family: "monospace"

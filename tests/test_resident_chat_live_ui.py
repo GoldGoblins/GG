@@ -158,6 +158,13 @@ def main() -> int:
     )
 
     bridge = desktop.ChatBridge(root, app)
+    # The persisted desktop preference may select GPT_TUI.  This test owns a
+    # resident-chat stub, so bind the transport to the local resident path
+    # after ChatBridge has hydrated desktop settings.
+    require(
+        bool(root.setProperty("engineTarget", "LOCAL_QWEN")),
+        "Could not bind LOCAL_QWEN for resident-chat UI test.",
+    )
     root.bridgeSubmit.connect(bridge.submit)
     root.contextSnapshotSync.connect(bridge.syncContextSnapshot)
     root.bridgeStop.connect(bridge.stopActive)
@@ -181,7 +188,7 @@ def main() -> int:
         "YOU",
         "REQUEST",
         "Svara med exakt ordet PING och inget mer.",
-        "@current · ws.file.context-composer",
+        "@current · ws.file.chat-node",
         "SUBMITTED",
         0,
         "",
@@ -189,7 +196,7 @@ def main() -> int:
     bridge.submit(
         "Svara med exakt ordet PING och inget mer.",
         "@current",
-        "ws.file.context-composer",
+        "ws.file.chat-node",
     )
 
     loop = QEventLoop()
@@ -197,9 +204,9 @@ def main() -> int:
     def observe() -> bool:
         nodes = dump_chat(root)
         responses = [
-            node for node in nodes if node.get("nodeKind") == "RESPONSE"
+            node for node in nodes if node.get("nodeKind") == "STREAM"
         ]
-        require(len(responses) == 1, "Expected exactly one RESPONSE node.")
+        require(len(responses) == 1, "Expected exactly one STREAM node.")
         state = str(responses[0]["stateLabel"])
         return state in {"PASS", "FAIL", "CANCELLED"}
 
@@ -217,8 +224,8 @@ def main() -> int:
     loop.exec()
 
     nodes = dump_chat(root)
-    responses = [node for node in nodes if node.get("nodeKind") == "RESPONSE"]
-    require(len(responses) == 1, "RESPONSE node cardinality drifted.")
+    responses = [node for node in nodes if node.get("nodeKind") == "STREAM"]
+    require(len(responses) == 1, "STREAM node cardinality drifted.")
     response = responses[0]
     require(response["stateLabel"] == "PASS", "Stream did not reach PASS.")
     require("STARTING" in seen_states, "STARTING state missing.")

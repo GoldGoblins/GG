@@ -1,0 +1,38 @@
+{
+  "schema": "gg.authored.asset.v1",
+  "asset_id": "gg-clay-critter",
+  "variant": "critter",
+  "style_id": "GG_CLAY_LOW_POLY",
+  "source_policy": "ORIGINAL_GEOMETRY_REFERENCE_INSPIRED_NO_SOURCE_COPY",
+  "coordinate_up": "Z",
+  "root_anchor": "feet_at_y_0",
+  "sockets": [
+    "HEAD",
+    "CHEST",
+    "MAIN_HAND",
+    "OFF_HAND",
+    "BACK",
+    "FEET"
+  ],
+  "clips": [
+    {
+      "name": "Idle",
+      "duration_s": 1.458
+    },
+    {
+      "name": "Walk",
+      "duration_s": 0.958
+    },
+    {
+      "name": "Sprint",
+      "duration_s": 0.708
+    },
+    {
+      "name": "Air",
+      "duration_s": 0.708
+    }
+  ],
+  "mesh_objects": 32,
+  "triangle_budget_target": 2600,
+  "crowd_lod_policy": "LOD0_HERO_LOD1_NPC_LOD2_CROWD"
+}

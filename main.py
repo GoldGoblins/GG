@@ -7,6 +7,9 @@ import copy
 import hashlib
 import json
 import os
+# EXT hosts Blender as a native child of this window.  That only works when
+# the desktop itself is X11/XWayland, same as a QML pane — not a Tool overlay.
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--disable-extensions --disable-background-networking --disable-sync "
@@ -40,6 +43,7 @@ from backend import action_task_continuity
 from backend import live_mandate_store
 from backend import participant_task_receiver
 from backend import idekompass_decision_ingress
+from backend import visual_commands
 from backend import orchestrator_mandate_evaluation_adapter
 from backend import task_scoped_action_grant
 from backend import machine_graph
@@ -6074,6 +6078,41 @@ class ChatBridge(QObject):
         except (AttributeError, RuntimeError, TypeError):
             return
 
+    def _dispatch_visual_command(
+        self,
+        text: str,
+        *,
+        terminal_id: str = "",
+        context_reference: str = "@current",
+        workspace_object_id: str = "",
+    ) -> bool:
+        """Send presentation commands through the one shared visual ingress."""
+        parsed = visual_commands.parse_visual_command(text)
+        if parsed is None:
+            return False
+        transport = getattr(self, "_resident_chat", None)
+        surface_host = getattr(transport, "_surface_host", None)
+        dispatch = getattr(surface_host, "dispatchVisualCommand", None)
+        if not callable(dispatch):
+            return False
+        try:
+            message = str(dispatch(str(text)) or "")
+        except (AttributeError, RuntimeError, TypeError):
+            message = visual_commands.command_message(parsed)
+        if terminal_id:
+            self._show_tui_notice(terminal_id, message)
+        else:
+            self._append(
+                "GG SETTINGS",
+                "VISUAL",
+                message,
+                str(context_reference or "@current")
+                + (" · " + str(workspace_object_id) if workspace_object_id else ""),
+                "ROUTED",
+                12,
+            )
+        return True
+
     def _waiting_chat_native_mandates(self) -> list[dict[str, object]]:
         return [
             pending
@@ -6117,7 +6156,8 @@ class ChatBridge(QObject):
         ingress as the composer. Its shared OmniGPT/Idékompass layer is
         injected into Codex's hidden developer instructions at session start.
         Concrete task requests and the user's ja/nej gate are handled for
-        both TUIs; slash commands remain native.
+        both TUIs.  The finite visual slash commands are shared with the
+        composer; all other slash commands remain native.
         """
         terminal_key = str(terminal_id or "").strip()
         if terminal_key not in {
@@ -6128,6 +6168,9 @@ class ChatBridge(QObject):
         value = str(text or "").strip()
         if not value:
             return False
+
+        if self._dispatch_visual_command(value, terminal_id=terminal_key):
+            return True
 
         chat_approval = parse_chat_approval(value)
         resume_request = parse_chat_resume_request(value)
@@ -9082,6 +9125,13 @@ class ChatBridge(QObject):
         value = text.strip()
 
         if not value:
+            return
+
+        if self._dispatch_visual_command(
+            value,
+            context_reference=context_reference,
+            workspace_object_id=workspace_object_id,
+        ):
             return
 
         try:

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QCoreApplication, QObject, QProcess
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer
 
 from backend.controlled_information_tools import (
     MAX_TOOL_ROUNDS,
@@ -106,6 +106,12 @@ class ResidentChatTransport(QObject):
         from backend.desktop_settings import apply_to_root
 
         apply_to_root(root)
+        # Legacy desktop settings hydrate first.  Re-apply the presentation
+        # profile on the next event-loop turn so a selected theme/profile is
+        # the final shared visual layer after both state stores are available.
+        visual_loader = getattr(root, "loadVisualLayoutState", None)
+        if callable(visual_loader):
+            QTimer.singleShot(0, lambda: visual_loader())
 
         app = QCoreApplication.instance()
         if app is not None:

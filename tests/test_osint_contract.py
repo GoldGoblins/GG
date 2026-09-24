@@ -79,6 +79,76 @@ def main() -> int:
     assert len(sampled) == osint_contract.MAX_ROWS
     assert sampled[0]["heading"] == 90
     assert sampled[0]["on_ground"] is False
+    adsb = osint_contract._normalize_adsb_ac(
+        {
+            "ac": [
+                {
+                    "hex": "abc123",
+                    "flight": "SAS123",
+                    "lat": 59.3,
+                    "lon": 18.1,
+                    "alt_baro": 35000,
+                    "gs": 420,
+                    "track": 270,
+                    "squawk": "1234",
+                }
+            ]
+        }
+    )
+    assert adsb[0]["callsign"] == "SAS123"
+    assert adsb[0]["heading"] == 270
+    assert adsb[0]["alt_m"] == round(35000 * 0.3048)
+    assert osint_contract._normalize_aircraft({"states": None}) == []
+    lod_rows = [
+        {
+            "id": f"lod-{index}",
+            "lat": 45.0 + (index % 40) * 0.4,
+            "lon": -10.0 + (index % 80) * 0.5,
+            "heading": 90,
+            "on_ground": False,
+        }
+        for index in range(2400)
+    ]
+    low_zoom = osint_contract._render_rows(
+        lod_rows,
+        "aircraft",
+        osint_contract.MAX_AIRCRAFT_RENDER,
+        {"zoom": 2.2, "bounds": [[-180, -90], [180, 90]]},
+    )
+    assert len(low_zoom) < len(lod_rows)
+    assert sum(
+        int(row.get("aircraft_count") or 1) if row.get("cluster") else 1
+        for row in low_zoom
+    ) == len(lod_rows)
+    osint_contract._rebuild_geo_lod("aircraft", lod_rows)
+    indexed_low_zoom = osint_contract._render_rows(
+        lod_rows,
+        "aircraft",
+        osint_contract.MAX_AIRCRAFT_RENDER,
+        {"zoom": 2.2, "bounds": [[-180, -90], [180, 90]]},
+    )
+    assert len(indexed_low_zoom) < len(lod_rows)
+    assert sum(
+        int(row.get("aircraft_count") or 1) if row.get("cluster") else 1
+        for row in indexed_low_zoom
+    ) == len(lod_rows)
+    high_zoom = osint_contract._render_rows(
+        lod_rows,
+        "aircraft",
+        osint_contract.MAX_AIRCRAFT_RENDER,
+        {"zoom": 8.0, "bounds": [[-15, 40], [30, 65]]},
+    )
+    assert len(high_zoom) == len(lod_rows)
+    assert not any(row.get("cluster") for row in high_zoom)
+    assert osint_contract._map_api_allowed(
+        "https://api.airplanes.live/v2/point/52.000/10.000/450"
+    )
+    assert osint_contract._map_api_allowed(
+        "https://api.adsb.lol/v2/lat/59.300/lon/18.100/dist/350"
+    )
+    assert not osint_contract._map_api_allowed(
+        "https://api.airplanes.live/v2/all"
+    )
 
     fires = osint_contract._normalize_fires(
         {
@@ -169,6 +239,24 @@ def main() -> int:
     alpr = osint_contract._load_local_alpr()
     assert alpr[0]["live_video"] is False
     assert alpr[0]["lat"] is not None
+    bundled = osint_contract._load_bundled_cctv()
+    assert len(bundled) > 20
+    assert bundled[0]["live_video"] is True
+    assert str(bundled[0]["photo"]).startswith("https://")
+    assert osint_contract.TFL_CAM_URL.startswith("https://api.tfl.gov.uk/")
+    tfl_rows = osint_contract._normalize_tfl_cameras(
+        [{
+            "id": "tfl-test",
+            "commonName": "Test Cam",
+            "lat": 51.5,
+            "lon": -0.12,
+            "additionalProperties": [
+                {"key": "imageUrl", "value": "https://example.invalid/cam.jpg"},
+            ],
+        }]
+    )
+    assert tfl_rows[0]["live_video"] is True
+    assert tfl_rows[0]["photo"].endswith("cam.jpg")
 
     qml = (PROJECT / "qml/components/OsintSurface.qml").read_text(
         encoding="utf-8"
@@ -219,6 +307,9 @@ def main() -> int:
         'url: Qt.resolvedUrl("../osint-map/index.html")',
         "webGLEnabled: true",
         "function focusPoint",
+        "function showPopup",
+        "takeOsintPick",
+        "lastPickSeq",
     ):
         assert marker in globe, marker
     for marker in (
@@ -227,7 +318,13 @@ def main() -> int:
         "data/alpr.geojson",
         "window.setOsintPoints",
         "window.focusOsintPoint",
+        "window.showOsintPopup",
+        "window.takeOsintPick",
         "window.setOsintRoute",
+        "gg-pop",
+        "gg-pop-legend",
+        "window.setOsintProjection",
+        "attributionControl: false",
         "router.project-osrm.org",
         "source: 'waypoints'",
         "setRouteData(route.geometry, points)",
@@ -236,8 +333,19 @@ def main() -> int:
         "LineString",
         "conflict-label",
         "minzoom: 4",
+        "TRACKS_MIN_ZOOM",
+        "cluster_count",
+        "event-clusters",
+        "window.osintMapReady",
+        "pixelRatio: 1",
+        "minzoom: 5",
+        "catalogCounts",
+        "BLIPS",
     ):
         assert marker in script, marker
+    assert "['case'," not in script
+    assert "filter: ['==', ['get', 'cluster'], true]" in script
+    assert "function syncMapReady" in globe
     assert "tiles.openfreemap.org" in html
     assert "nominatim.openstreetmap.org" in html
     assert 'id="nav"' in html
@@ -248,6 +356,45 @@ def main() -> int:
     assert "TYPE A PLACE + ENTER" in qml
     assert "function applyRoute" in globe
     assert "osintPlanRoute" in qml
+    assert "function selectEvent" in qml
+    assert "osintLoadUi" in qml
+    assert "osintLookupFlight" in qml
+    assert "eventFacts" in qml
+    assert "lastViewportKey" in qml
+    assert "renderedPointCount" in qml
+    empty_lookup = osint_contract.lookup_flight("", "")
+    assert empty_lookup["ok"] is False
+    assert osint_contract._map_api_allowed(
+        "https://api.adsbdb.com/v0/callsign/SAS123"
+    )
+    assert osint_contract._map_api_allowed(
+        "https://api.adsbdb.com/v0/aircraft/abc123"
+    )
+    assert not osint_contract._map_api_allowed(
+        "https://api.adsbdb.com/v0/stats"
+    )
+    assert not osint_contract._map_api_allowed(
+        "https://example.invalid/v0/callsign/SAS123"
+    )
+    osint_contract._collections["aircraft"] = [{
+        "id": "abc123",
+        "callsign": "CES570",
+        "country": "Mexico",
+        "lat": 25.4,
+        "lon": -101.0,
+        "alt_m": 9000,
+        "heading": 90,
+        "speed_mps": 200.0,
+        "on_ground": False,
+        "squawk": "1234",
+        "last_contact": "",
+    }]
+    stream = osint_contract._build_stream()
+    osint_contract._collections["aircraft"] = []
+    assert any(
+        row.get("kind") == "aircraft" and row.get("title") == "CES570"
+        for row in stream
+    )
     gdelt_dup = osint_contract._normalize_gdelt(
         {
             "features": [
@@ -280,6 +427,15 @@ def main() -> int:
     payload = json.loads(host.snapshot("SOURCES"))
     assert payload["page"] == "SOURCES"
     assert payload["schema"] == osint_contract.SCHEMA
+    host.saveUi(json.dumps({
+        "navPlaces": ["Gothenburg", "Oslo"],
+        "navMode": True,
+        "page": "MAP",
+    }))
+    ui = json.loads(host.loadUi())
+    assert ui["navPlaces"] == ["Gothenburg", "Oslo"]
+    assert ui["navMode"] is True
+    assert ui["page"] == "MAP"
     host.shutdown()
     app.processEvents()
 
@@ -338,6 +494,18 @@ def main() -> int:
         @Slot(str, result=str)
         def osintPlanRoute(self, spec_json: str = "{}") -> str:
             return json.dumps({"ok": False, "error": "test-skip", "points": []})
+
+        @Slot(str)
+        def osintSaveUi(self, raw: str = "{}") -> None:
+            return None
+
+        @Slot(result=str)
+        def osintLoadUi(self) -> str:
+            return "{}"
+
+        @Slot(str, str, result=str)
+        def osintLookupFlight(self, callsign: str = "", icao: str = "") -> str:
+            return "{}"
 
     engine = QQmlApplicationEngine()
     component = QQmlComponent(

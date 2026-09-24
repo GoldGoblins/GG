@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import pty
 import re
@@ -37,9 +38,10 @@ from backend import libretro_host
 from backend import marketplace_host
 from backend import media_host
 from backend import osint_host
+from backend import research_desk
 from backend import qip_lab
 from backend import tmog_contract
-from backend.grok_wallet import snapshot as grok_wallet_snapshot
+from backend.grok_wallet import latest_session_dir, snapshot as grok_wallet_snapshot
 from backend.codex_wallet import (
     CODEX_SESSIONS,
     DESKTOP_CODEX_HOME,
@@ -170,6 +172,16 @@ class ChatSurfaceHost(QObject):
     mediaSeekChanged = Signal(float)
     terminalScrollChanged = Signal(str, int, int, int)
     osintUpdated = Signal(str)
+    osintFlightLookedUp = Signal(str)
+    # Shared visual commands are emitted as a small JSON envelope.  QML owns
+    # the presentation action; GPTUI, GrokTUI and the normal composer all use
+    # this same ingress.
+    visualCommandRequested = Signal(str)
+    # Built-in workbench contributions use the same small JSON ingress as the
+    # visual registry. The signal lets another QML surface refresh after a
+    # registry change without making the surface host a plugin loader.
+    workbenchExtensionsChanged = Signal(str)
+    flowTuiChanged = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -179,12 +191,23 @@ class ChatSurfaceHost(QObject):
         self._qml_root: QObject | None = None
         self._tui_embed: object | None = None
         self._tui_grid: object | None = None
+        self._flow_listen = False
+        self._flow_paths: dict[str, Path] = {}
+        self._flow_offsets: dict[str, int] = {}
+        self._flow_acc = {"GROK TUI": "", "GPTUI": ""}
+        self._flow_deadline = 0.0
+        self._flow_last_raw = ""
+        self._flow_poll = QTimer(self)
+        self._flow_poll.setInterval(1000)
+        self._flow_poll.timeout.connect(self._flow_tui_poll)
         self._tmog_embed: object | None = None
         self._media_embed: object | None = None
         self._torlink_embed: object | None = None
         self._draw_embed: object | None = None
+        self._external_embed: object | None = None
         self._osint = osint_host.OsintHost(self)
         self._osint.updated.connect(self.osintUpdated)
+        self._osint.flightLookedUp.connect(self.osintFlightLookedUp)
         self._pending_tui_size: tuple[int, int] | None = None
         self._fs: QFileSystemWatcher | None = None
         self._fs_suppress: set[str] = set()
@@ -263,6 +286,17 @@ class ChatSurfaceHost(QObject):
         self._console_sink = None
         self._console_io = None
         self._frame_seq = 0
+        # QML asks for native terrain geometry by cell key.  Keep the latest
+        # compact snapshot cells here so each delegate does not trigger a new
+        # runtime snapshot, and build geometry lazily only for visible cells.
+        self._game_engine_geometry_cells: dict[str, dict[str, Any]] = {}
+        self._game_engine_geometry_cache = None
+        self._game_engine_geometry_revision: int | None = None
+        self._game_engine_character_geometry = None
+        self._game_engine_character_geometry_variants: dict[tuple[str, int], Any] = {}
+        self._game_engine_character_geometry_roles: dict[str, Any] = {}
+        self._game_engine_low_poly_sphere_geometry = None
+        self._game_engine_asset_geometry_cache = None
         self._winch = QTimer(self)
         self._winch.setSingleShot(True)
         self._winch.setInterval(80)
@@ -518,15 +552,16 @@ class ChatSurfaceHost(QObject):
         if "ws.tui.gpt" in self._sessions:
             return True
         grid = getattr(self, "_gpt_grid", None)
-        if grid is None:
-            return False
         binary = shutil.which("codex")
         if not binary:
-            grid.feed_bytes(b"\r\nCodex CLI saknas. Installera Codex och starta om GG AI Desktop.\r\n")
+            if grid is not None:
+                grid.feed_bytes(b"\r\nCodex CLI saknas. Installera Codex och starta om GG AI Desktop.\r\n")
             return False
-        width, height = getattr(self, "_gpt_size", (
-            getattr(grid, "_last_cols", 72) or 72,
-            getattr(grid, "_last_rows", 36) or 36))
+        width, height = getattr(self, "_gpt_size", (72, 36))
+        if grid is not None:
+            width, height = getattr(self, "_gpt_size", (
+                getattr(grid, "_last_cols", 72) or 72,
+                getattr(grid, "_last_rows", 36) or 36))
         master, slave = pty.openpty()
         resume_id = self._gpt_session_id
         if resume_id:
@@ -585,11 +620,11 @@ class ChatSurfaceHost(QObject):
                        LANG="C.UTF-8", LC_ALL="C.UTF-8",
                        LINES=str(height), COLUMNS=str(width),
                        CODEX_HOME=str(self._gpt_codex_home))
+            # YOLO changes Codex's execution boundary for GPTUI only. Keep the
+            # normal CODEX_HOME, AGENTS.md, developer profile, agents, skills,
+            # plugins, and the rest of the Codex configuration intact.
             proc = subprocess.Popen(
-                argv + [
-                    "--sandbox", "workspace-write",
-                    "--ask-for-approval", "on-request",
-                ],
+                argv + ["--dangerously-bypass-approvals-and-sandbox"],
                 stdin=slave, stdout=slave, stderr=slave, cwd=str(GROK_CWD),
                 env=env, start_new_session=True, close_fds=True)
         except OSError as exc:
@@ -1027,6 +1062,19 @@ class ChatSurfaceHost(QObject):
         """Install the Workbench ingress for submitted native TUI lines."""
         self._tui_chat_line_handler = handler
 
+    @Slot(str, result=str)
+    def dispatchVisualCommand(self, text: str) -> str:
+        """Route one finite visual command to the shared QML state layer."""
+        from backend.visual_commands import command_message, parse_visual_command
+
+        parsed = parse_visual_command(text)
+        if parsed is None:
+            return ""
+        self.visualCommandRequested.emit(
+            json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        )
+        return command_message(parsed)
+
     def _scan_tui_input(
         self,
         terminal_id: str,
@@ -1163,6 +1211,75 @@ class ChatSurfaceHost(QObject):
     def osintSnapshot(self, page: str = "OVERVIEW") -> str:
         return self._osint.snapshot(str(page or "OVERVIEW"))
 
+    @Slot(str, result=str)
+    def osintViewportSnapshot(self, view_json: str = "{}") -> str:
+        return self._osint.viewportSnapshot(str(view_json or "{}"))
+
+    @Slot(str, result=str)
+    def researchCommand(self, raw_json: str = "{}") -> str:
+        """Dispatch the finite local Research Desk command set."""
+        try:
+            request = json.loads(raw_json or "{}")
+        except (TypeError, ValueError):
+            request = {}
+        if not isinstance(request, dict):
+            request = {}
+        op = str(request.get("op") or "snapshot").strip().lower()
+        payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+        try:
+            if op == "snapshot":
+                result = research_desk.snapshot()
+            elif op == "create_project":
+                result = research_desk.create_project(str(payload.get("title") or ""))
+            elif op == "add_task":
+                result = research_desk.add_task(
+                    str(payload.get("title") or ""),
+                    str(payload.get("body") or ""),
+                    str(payload.get("project_id") or ""),
+                    str(payload.get("mode") or "SCOUT"),
+                    payload.get("priority", 50),
+                )
+            elif op == "promote_task":
+                result = research_desk.promote_task(
+                    str(payload.get("task_id") or ""), str(payload.get("mode") or "SHIP")
+                )
+            elif op == "add_evidence":
+                result = research_desk.add_evidence(payload)
+            elif op == "ingest_source":
+                result = research_desk.ingest_source(payload)
+            elif op == "add_method":
+                result = research_desk.add_method(payload)
+            elif op == "add_web_skill":
+                result = research_desk.add_web_skill(payload)
+            elif op == "verify_web_skill":
+                result = research_desk.verify_web_skill(str(payload.get("skill_id") or ""))
+            elif op == "sql_preview":
+                result = research_desk.sql_preview(str(payload.get("sql") or ""))
+            elif op == "start_run":
+                result = research_desk.start_run(
+                    str(payload.get("task_id") or ""), str(payload.get("eval_name") or "WORKBENCH")
+                )
+            elif op == "record_event":
+                result = research_desk.record_event(
+                    str(payload.get("run_id") or ""),
+                    str(payload.get("stage") or "UI"),
+                    str(payload.get("status") or "OK"),
+                    payload.get("duration_ms", 0),
+                    payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                )
+            elif op == "finish_run":
+                result = research_desk.finish_run(
+                    str(payload.get("run_id") or ""),
+                    str(payload.get("status") or "PASS"),
+                    payload.get("score"),
+                    payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {},
+                )
+            else:
+                result = {"schema": research_desk.SCHEMA, "status": "UNKNOWN_COMMAND"}
+        except Exception as exc:
+            result = {"schema": research_desk.SCHEMA, "status": "ERROR", "error": type(exc).__name__}
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
     @Slot(str, result=bool)
     def osintRefresh(self, page: str = "OVERVIEW") -> bool:
         return bool(self._osint.refresh(str(page or "OVERVIEW")))
@@ -1170,6 +1287,18 @@ class ChatSurfaceHost(QObject):
     @Slot(str, result=str)
     def osintPlanRoute(self, spec_json: str = "{}") -> str:
         return self._osint.planRoute(str(spec_json or "{}"))
+
+    @Slot(str)
+    def osintSaveUi(self, raw: str = "{}") -> None:
+        self._osint.saveUi(str(raw or "{}"))
+
+    @Slot(result=str)
+    def osintLoadUi(self) -> str:
+        return self._osint.loadUi()
+
+    @Slot(str, str, result=str)
+    def osintLookupFlight(self, callsign: str = "", icao: str = "") -> str:
+        return self._osint.lookupFlight(str(callsign or ""), str(icao or ""))
 
     @Slot(str)
     def osintCopy(self, text: str) -> None:
@@ -1249,6 +1378,53 @@ class ChatSurfaceHost(QObject):
     @Slot()
     def hideDraw(self) -> None:
         embed = self._draw_embed
+        if embed is not None:
+            embed.hide()
+
+    @Slot(result=str)
+    def externalStatus(self) -> str:
+        from backend import blender_contract
+
+        try:
+            payload = blender_contract.status_payload()
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "error": type(exc).__name__,
+                    "schema": blender_contract.SCHEMA,
+                }
+            )
+        embed = self._external_embed
+        payload["attached"] = bool(embed is not None and embed.attached())
+        payload["running"] = bool(embed is not None and embed.running())
+        payload["error"] = str(embed.error()) if embed is not None else ""
+        return json.dumps(payload, separators=(",", ":"))
+
+    @Slot(float, float, float, float)
+    def externalSetHole(self, x: float, y: float, width: float, height: float) -> None:
+        embed = self._external_embed
+        if embed is not None:
+            embed.set_hole_rect(x, y, width, height)
+
+    @Slot(str, str, result=bool)
+    def externalStart(self, app_id: str = "blender", wayland_socket: str = "") -> bool:
+        root = self._qml_root
+        if root is None:
+            return False
+        wanted = str(app_id or "blender").strip().lower() or "blender"
+        if wanted != "blender":
+            return False
+        embed = self._external_embed
+        if embed is None:
+            from backend.blender_embed import BlenderEmbed
+
+            embed = BlenderEmbed(root)
+            self._external_embed = embed
+        return bool(embed.start(str(wayland_socket or "")))
+
+    @Slot()
+    def hideExternal(self) -> None:
+        embed = self._external_embed
         if embed is not None:
             embed.hide()
 
@@ -1966,7 +2142,46 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
+    def _remember_game_engine_terrain(self, value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        terrain_view = value.get("terrain")
+        cells = terrain_view.get("cells") if isinstance(terrain_view, dict) else None
+        if not isinstance(cells, list):
+            return
+        editor_view = value.get("terrain_editor")
+        if not isinstance(editor_view, dict):
+            editor_view = (
+                terrain_view.get("authoring")
+                if isinstance(terrain_view, dict)
+                else None
+            )
+        try:
+            revision: int | None = (
+                int(editor_view.get("revision", 0))
+                if isinstance(editor_view, dict)
+                else None
+            )
+        except (TypeError, ValueError):
+            revision = None
+        revision_changed = revision != self._game_engine_geometry_revision
+        self._game_engine_geometry_revision = revision
+        remembered: dict[str, dict[str, Any]] = {}
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            key = str(cell.get("key", ""))
+            if key:
+                remembered[key] = cell
+        self._game_engine_geometry_cells = remembered
+        cache = self._game_engine_geometry_cache
+        if cache is not None:
+            cache.retain(set(remembered))
+            if revision_changed:
+                cache.update_cells(remembered)
+
     def _game_engine_json(self, value: object) -> str:
+        self._remember_game_engine_terrain(value)
         try:
             return json.dumps(value, separators=(",", ":"))
         except Exception as exc:
@@ -1975,9 +2190,251 @@ class ChatSurfaceHost(QObject):
                 "error": type(exc).__name__ + ":" + str(exc),
             })
 
+    def _keep_game_engine_geometry(self, geometry: QObject | None) -> QObject | None:
+        """Keep native Quick3D geometry alive across QML property changes.
+
+        Custom ``QQuick3DGeometry`` objects cross the Python/QML boundary as
+        QObjects.  If a pose changes while a Model is already in the scene,
+        QML is allowed to treat an unparented returned object as JavaScript
+        owned.  That makes the old IDLE mesh disappear when WALK/SPRINT
+        installs a new geometry, even though the simulation entity is still
+        present.  The host owns every cached geometry and explicitly marks it
+        as C++ owned so the cache and the scene share one stable lifetime.
+        """
+        if geometry is None:
+            return None
+        try:
+            if geometry.parent() is None:
+                geometry.setParent(self)
+        except (AttributeError, RuntimeError, TypeError):
+            # A foreign QObject may reject reparenting; the ownership call
+            # below still protects the normal QQuick3DGeometry path.
+            pass
+        try:
+            from PySide6.QtQml import QQmlEngine
+
+            QQmlEngine.setObjectOwnership(geometry, QQmlEngine.CppOwnership)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return geometry
+
     @Slot(result=str)
     def gameEngineStatus(self) -> str:
         return self._game_engine_json(game_engine_host.status_payload())
+
+    @Slot(result=str)
+    def gameEngineRenderStatus(self) -> str:
+        """Return the compact transform/pose stream used by the 3D surface."""
+        return self._game_engine_json(game_engine_host.render_status_payload())
+
+    @Slot(result=str)
+    def gameEngineUiStatus(self) -> str:
+        """Return the bounded inspector delta over the authoritative full state."""
+        return self._game_engine_json(game_engine_host.ui_status_payload())
+
+    @Slot(str, result=QObject)
+    def gameEngineTerrainGeometry(self, cell_key: str) -> QObject | None:
+        """Return one cached QQuick3D patch for a current loaded cell."""
+        wanted = str(cell_key or "")
+        cell = self._game_engine_geometry_cells.get(wanted)
+        if cell is None:
+            self._remember_game_engine_terrain(game_engine_host.status_payload())
+            cell = self._game_engine_geometry_cells.get(wanted)
+        if cell is None:
+            return None
+        if self._game_engine_geometry_cache is None:
+            from backend.game_engine_geometry import TerrainGeometryCache
+
+            self._game_engine_geometry_cache = TerrainGeometryCache(self)
+        return self._keep_game_engine_geometry(
+            self._game_engine_geometry_cache.geometry_for_cell(cell)
+        )
+
+    @Slot(result=QObject)
+    def gameEngineCharacterGeometry(self) -> QObject | None:
+        """Return the reusable neutral low-poly character body mesh."""
+        if self._game_engine_character_geometry is None:
+            from backend.game_engine_geometry import build_character_geometry
+
+            self._game_engine_character_geometry = self._keep_game_engine_geometry(
+                build_character_geometry()
+            )
+        return self._game_engine_character_geometry
+
+    @Slot(str, result=QObject)
+    def gameEngineCharacterGeometryForRole(self, role: str) -> QObject | None:
+        """Return one stable clay silhouette per cast. Never swap per frame."""
+        from backend.game_engine_geometry import (
+            build_character_geometry,
+            character_variant_key,
+        )
+
+        key = character_variant_key(role)
+        if key == "CROWD":
+            return self.gameEngineCharacterGeometry()
+        geometry = self._game_engine_character_geometry_roles.get(key)
+        if geometry is None:
+            geometry = self._keep_game_engine_geometry(
+                build_character_geometry(variant=key)
+            )
+            self._game_engine_character_geometry_roles[key] = geometry
+        return geometry
+
+    @Slot(result=QObject)
+    def gameEngineLowPolySphereGeometry(self) -> QObject | None:
+        """Return the shared smooth-normal sphere for tiny 3D instances."""
+        if self._game_engine_low_poly_sphere_geometry is None:
+            from backend.game_engine_geometry import build_low_poly_sphere_geometry
+
+            self._game_engine_low_poly_sphere_geometry = self._keep_game_engine_geometry(
+                build_low_poly_sphere_geometry()
+            )
+        return self._game_engine_low_poly_sphere_geometry
+
+    @Slot(str, str, result=QObject)
+    def gameEngineItemGeometry(
+        self,
+        asset_id: str,
+        item_kind: str,
+    ) -> QObject | None:
+        """Return one cached native clay mesh for an item family."""
+        if self._game_engine_asset_geometry_cache is None:
+            from backend.game_engine_geometry import AssetGeometryCache
+
+            self._game_engine_asset_geometry_cache = AssetGeometryCache(self)
+        geometry = self._game_engine_asset_geometry_cache.geometry_for_item(
+            asset_id,
+            item_kind,
+        )
+        return self._keep_game_engine_geometry(geometry)
+
+    @Slot(str, str, result=QObject)
+    def gameEngineWorldPropGeometry(
+        self,
+        entity_kind: str,
+        variant: str,
+    ) -> QObject | None:
+        """Return one of four shared native silhouettes for a world prop."""
+        if self._game_engine_asset_geometry_cache is None:
+            from backend.game_engine_geometry import AssetGeometryCache
+
+            self._game_engine_asset_geometry_cache = AssetGeometryCache(self)
+        geometry = self._game_engine_asset_geometry_cache.geometry_for_world_prop(
+            entity_kind,
+            variant,
+        )
+        return self._keep_game_engine_geometry(geometry)
+
+    @Slot(QObject, str, result=QObject)
+    def gameEngineFindNamedNode(self, loader: QObject, name: str) -> QObject | None:
+        """Find one imported glTF node by object name or Node.name.
+
+        Used to parent equipped items onto the clay-hero SOCKET_* empties
+        when Qt actually publishes those nodes.  Current RuntimeLoader
+        imports expose clip names, not socket empties, so QML keeps the
+        snapshot rest pose until a named node exists.
+        """
+        if not isinstance(loader, QObject):
+            return None
+        wanted = str(name or "").strip()
+        if not wanted:
+            return None
+        wanted_fold = wanted.casefold()
+        try:
+            candidates = [loader, *loader.findChildren(QObject)]
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        for candidate in candidates:
+            try:
+                object_name = str(candidate.objectName() or "")
+                node_name = str(candidate.property("name") or "")
+            except (AttributeError, RuntimeError, TypeError):
+                continue
+            if object_name == wanted or node_name == wanted:
+                return candidate
+            if object_name.casefold() == wanted_fold or node_name.casefold() == wanted_fold:
+                return candidate
+        return None
+
+    @Slot(QObject, str, result=bool)
+    def gameEngineRuntimeClip(self, loader: QObject, clip: str) -> bool:
+        """Select one imported glTF timeline without touching simulation state.
+
+        Some low-poly packs animate separate node transforms instead of using
+        a skin.  Qt imports those clips as ``QQuickTimelineAnimation``
+        children of a ``RuntimeLoader``.  The backend only switches the
+        already-loaded presentation objects; the fixed-step animation state
+        and clip vocabulary still come from the game snapshot.
+        """
+        if not isinstance(loader, QObject):
+            return False
+        wanted = str(clip or "").strip().casefold()
+        try:
+            candidates = [loader, *loader.findChildren(QObject)]
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        animations: list[QObject] = []
+        for candidate in candidates:
+            try:
+                class_name = candidate.metaObject().className()
+            except (AttributeError, RuntimeError):
+                continue
+            if class_name == "QQuickTimelineAnimation":
+                animations.append(candidate)
+
+        # A skinned glTF may expose no QML timeline object.  It remains a
+        # valid RuntimeLoader asset; this adapter is simply not applicable.
+        if not animations:
+            return False
+        target: QObject | None = None
+        for animation in animations:
+            try:
+                animation.setProperty("running", False)
+                parent = animation.parent()
+                if isinstance(parent, QObject):
+                    parent.setProperty("enabled", False)
+                name = animation.objectName().strip().casefold()
+                if wanted and name == wanted:
+                    target = animation
+            except (AttributeError, RuntimeError, TypeError):
+                continue
+        if not wanted:
+            return True
+        if target is None:
+            return False
+        try:
+            parent = target.parent()
+            if isinstance(parent, QObject):
+                parent.setProperty("enabled", True)
+            target.setProperty("running", True)
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        return True
+
+    @Slot(str, float, result=QObject)
+    def gameEngineCharacterGeometryForPose(
+        self,
+        motion_state: str,
+        phase: float,
+    ) -> QObject | None:
+        """Return a bounded, shared body variant for one animation phase."""
+        from backend.game_engine_geometry import (
+            CHARACTER_POSE_BUCKETS,
+            build_character_geometry,
+            character_pose_key,
+        )
+
+        key = character_pose_key(motion_state, phase)
+        geometry = self._game_engine_character_geometry_variants.get(key)
+        if geometry is None:
+            geometry = self._keep_game_engine_geometry(
+                build_character_geometry(
+                    key[0],
+                    key[1] / float(CHARACTER_POSE_BUCKETS) * math.tau,
+                )
+            )
+            self._game_engine_character_geometry_variants[key] = geometry
+        return geometry
 
     @Slot(result=str)
     def gameEngineStart(self) -> str:
@@ -1995,6 +2452,277 @@ class ChatSurfaceHost(QObject):
     def gameEngineStep(self) -> str:
         return self._game_engine_json(game_engine_host.step())
 
+    @Slot(str, result=str)
+    def gameEngineMovementMode(self, mode: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_movement_mode(str(mode or "GROUND"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineAbility(self, ability_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.activate_ability(str(ability_id or "ability.surge"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineAttack(self, target_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.attack(str(target_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineQuestAccept(self, quest_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.accept_quest(str(quest_id or "quest.shoreline-first"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineQuestClaim(self, quest_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.claim_quest(str(quest_id or ""))
+        )
+
+    @Slot(result=str)
+    def gameEngineLoot(self) -> str:
+        return self._game_engine_json(game_engine_host.claim_loot())
+
+    @Slot(str, result=str)
+    def gameEngineCraft(self, recipe_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.craft_recipe(str(recipe_id or "recipe.field_ration"))
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineGearCraft(self, recipe_id: str, station_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.craft_gear(
+                str(recipe_id or "recipe.fiber_rope"),
+                str(station_id or ""),
+            )
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineItemSocket(self, instance_id: str, insertable_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.socket_item(
+                str(instance_id or ""),
+                str(insertable_id or ""),
+            )
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineGearEnchant(self, instance_id: str, enchant_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.enchant_gear(
+                str(instance_id or ""),
+                str(enchant_id or ""),
+            )
+        )
+
+    @Slot(str, result=str)
+    def gameEngineEnchant(self, enchant_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.enchant_last_loot(str(enchant_id or "enchant.wayfinder"))
+        )
+
+    @Slot(result=str)
+    def gameEngineItemInteract(self) -> str:
+        return self._game_engine_json(game_engine_host.interact_item())
+
+    @Slot(str, result=str)
+    def gameEngineItemPickup(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.pickup_item(str(instance_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineContainerOpen(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.open_container(str(instance_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineContainerLoot(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.loot_container(str(instance_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineItemEquip(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.equip_item(str(instance_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineItemDrop(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.drop_item(str(instance_id or ""))
+        )
+
+    @Slot(int, result=str)
+    def gameEngineXp(self, amount: int) -> str:
+        return self._game_engine_json(game_engine_host.grant_experience(int(amount)))
+
+    @Slot(str, result=str)
+    def gameEngineTalent(self, talent_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.add_talent(str(talent_id or "trailblazer"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineRace(self, race: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.select_race(str(race or "ISLANDER"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineSpec(self, spec: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.select_spec(str(spec or "EXPLORER"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineEditorPlace(self, kind: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.editor_place(str(kind or "PROP"))
+        )
+
+    @Slot(result=str)
+    def gameEngineEditorUndo(self) -> str:
+        return self._game_engine_json(game_engine_host.editor_undo())
+
+    @Slot(result=str)
+    def gameEngineNpcInteract(self) -> str:
+        return self._game_engine_json(game_engine_host.npc_interact())
+
+    @Slot(str, str, result=str)
+    def gameEngineNpcTalk(self, npc_id: str, choice_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.talk_npc(
+                str(npc_id or ""),
+                str(choice_id or ""),
+            )
+        )
+
+    @Slot(str, result=str)
+    def gameEngineContentPack(self, pack_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.activate_content_pack(
+                str(pack_id or "pack.tidefall-frontier")
+            )
+        )
+
+    @Slot(str, str, str, result=str)
+    def gameEngineTrade(
+        self,
+        npc_id: str,
+        give_instance_id: str,
+        receive_instance_id: str,
+    ) -> str:
+        return self._game_engine_json(
+            game_engine_host.trade_items(
+                str(npc_id or ""),
+                str(give_instance_id or ""),
+                str(receive_instance_id or ""),
+            )
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineVendorBuy(self, vendor_id: str, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.vendor_buy(
+                str(vendor_id or ""),
+                str(instance_id or ""),
+            )
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineVendorSell(self, vendor_id: str, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.vendor_sell(
+                str(vendor_id or ""),
+                str(instance_id or ""),
+            )
+        )
+
+    @Slot(str, int, int, result=str)
+    def gameEngineTerrainEdit(
+        self,
+        operation: str,
+        cell_x: int | None = None,
+        cell_z: int | None = None,
+    ) -> str:
+        return self._game_engine_json(
+            game_engine_host.terrain_edit(
+                str(operation or "RAISE"),
+                cell_x,
+                cell_z,
+            )
+        )
+
+    @Slot(str, int, int, float, float, float, str, result=str)
+    def gameEngineTerrainBrush(
+        self,
+        operation: str,
+        cell_x: int | None = None,
+        cell_z: int | None = None,
+        center_x_m: float | None = None,
+        center_z_m: float | None = None,
+        radius_m: float = 4.0,
+        falloff: str = "SMOOTH",
+    ) -> str:
+        return self._game_engine_json(
+            game_engine_host.terrain_brush_edit(
+                str(operation or "RAISE"),
+                cell_x,
+                cell_z,
+                center_x_m,
+                center_z_m,
+                radius_m,
+                str(falloff or "SMOOTH"),
+            )
+        )
+
+    @Slot(result=str)
+    def gameEngineTerrainUndo(self) -> str:
+        return self._game_engine_json(game_engine_host.terrain_undo())
+
+    @Slot(result=str)
+    def gameEngineSave(self) -> str:
+        return self._game_engine_json(game_engine_host.save_state())
+
+    @Slot(result=str)
+    def gameEngineLoad(self) -> str:
+        return self._game_engine_json(game_engine_host.load_state())
+
+    @Slot(str, result=str)
+    def gameEngineRenderProfile(self, profile: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_render_profile(str(profile or "BALANCED"))
+        )
+
+    @Slot(str, result=str)
+    def gameEnginePresentationMode(self, mode: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_presentation_mode(str(mode or "RICH_3D"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineGraphicsFailure(self, reason: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.report_graphics_failure(
+                str(reason or "GRAPHICS_STAGE_FAILURE")
+            )
+        )
+
+    @Slot(str, result=str)
+    def gameEngineCinematic(self, preset: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_cinematic_preset(
+                str(preset or "FIRST_ISLAND_DIORAMA")
+            )
+        )
+
     @Slot(result=str)
     def gameEngineBurst(self) -> str:
         return self._game_engine_json(game_engine_host.burst())
@@ -2006,6 +2734,41 @@ class ChatSurfaceHost(QObject):
     @Slot(str, result=str)
     def gameEngineInput(self, raw: str) -> str:
         return self._game_engine_json(game_engine_host.set_input(str(raw or "{}")))
+
+    @Slot(str, result=str)
+    def gameEngineInputRender(self, raw: str) -> str:
+        """Apply movement input and return only the bounded render stream."""
+        return self._game_engine_json(
+            game_engine_host.set_input_render(str(raw or "{}"))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineDosCommand(self, command: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.dos_command(str(command or ""))
+        )
+
+    @Slot(str, str, result=str)
+    def gameEngineKeybinding(self, action: str, key: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_keybinding(
+                str(action or ""),
+                str(key or ""),
+            )
+        )
+
+    @Slot(result=str)
+    def gameEngineKeybindingsReset(self) -> str:
+        return self._game_engine_json(game_engine_host.reset_keybindings())
+
+    @Slot(str, bool, result=str)
+    def gameEngineAddon(self, addon_id: str, enabled: bool) -> str:
+        return self._game_engine_json(
+            game_engine_host.set_addon(
+                str(addon_id or ""),
+                bool(enabled),
+            )
+        )
 
     @Slot(result=str)
     def gameEngineRecordStart(self) -> str:
@@ -2111,17 +2874,195 @@ class ChatSurfaceHost(QObject):
 
     @Slot(result=str)
     def flowTuiReset(self) -> str:
-        return self._flow_tui_json(flow_tui.reset())
+        self._flow_tui_stop()
+        board = flow_tui.reset()
+        return self._flow_tui_emit(board)
+
+    def _flow_role(self, terminal_id: str) -> str:
+        return "GPTUI" if str(terminal_id) == "ws.tui.gpt" else "GROK TUI"
+
+    def _flow_tui_emit(self, board: object) -> str:
+        raw = self._flow_tui_json(board)
+        if raw == self._flow_last_raw:
+            return raw
+        self._flow_last_raw = raw
+        self.flowTuiChanged.emit(raw)
+        return raw
+
+    def _flow_tui_stop(self) -> None:
+        self._flow_listen = False
+        self._flow_deadline = 0.0
+        self._flow_poll.stop()
+
+    def _flow_tui_send(self, terminal_id: str, ask: str) -> None:
+        line = str(ask or "").strip()
+        if not line:
+            return
+        try:
+            self.writeChatTerminal(terminal_id, line + "\n")
+        except Exception:
+            role = self._flow_role(terminal_id)
+            self._flow_tui_emit(
+                flow_tui.set_motor_stream(role, role + " did not take the ask.", done=True)
+            )
+
+    def _flow_log_paths(self) -> dict[str, Path]:
+        paths: dict[str, Path] = {}
+        try:
+            session = self._sessions.get(GROK_TUI_TERMINAL_ID) or {}
+            proc = session.get("proc")
+            pid = None
+            if proc is not None and proc.poll() is None:
+                pid = int(proc.pid)
+            folder = latest_session_dir(tui_pid=pid)
+            if folder is not None:
+                path = folder / "updates.jsonl"
+                if path.is_file():
+                    paths["GROK TUI"] = path
+        except Exception:
+            pass
+        try:
+            sid = str(getattr(self, "_gpt_session_id", "") or "")
+            root = getattr(self, "_gpt_sessions_root", None)
+            if sid and root is not None:
+                path = codex_session_path(sid, root)
+                if path is not None and path.is_file():
+                    paths["GPTUI"] = path
+        except Exception:
+            pass
+        return paths
+
+    def _flow_bind_logs(self) -> None:
+        for role, path in self._flow_log_paths().items():
+            key = str(path)
+            if key not in self._flow_offsets:
+                try:
+                    self._flow_offsets[key] = path.stat().st_size
+                except OSError:
+                    self._flow_offsets[key] = 0
+            self._flow_paths[role] = path
+
+    def _flow_tail(self, path: Path) -> str:
+        key = str(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        offset = int(self._flow_offsets.get(key, size))
+        if size < offset:
+            offset = size
+            self._flow_offsets[key] = size
+        if size <= offset:
+            return ""
+        start = offset
+        if size - offset > 65536:
+            start = size - 65536
+        try:
+            with path.open("rb") as stream:
+                stream.seek(start)
+                data = stream.read(65536)
+        except OSError:
+            return ""
+        self._flow_offsets[key] = size
+        text = data.decode("utf-8", errors="replace")
+        if text and not text.startswith("{") and "\n" in text:
+            text = text.split("\n", 1)[1]
+        return text
+
+    def _flow_tui_poll(self) -> None:
+        if not self._flow_listen:
+            self._flow_poll.stop()
+            return
+        if time.monotonic() >= self._flow_deadline:
+            for role in ("GROK TUI", "GPTUI"):
+                if not str(self._flow_acc.get(role) or "").strip():
+                    flow_tui.set_motor_stream(role, "no reply yet", done=True)
+            self._flow_tui_stop()
+            self._flow_tui_emit(flow_tui.snapshot())
+            return
+        if len(self._flow_paths) < 2:
+            self._flow_bind_logs()
+        changed = False
+        for role, path in list(self._flow_paths.items()):
+            blob = self._flow_tail(path)
+            if not blob:
+                continue
+            piece = flow_tui.extract_assistant_jsonl(blob, role=role)
+            if not piece:
+                continue
+            if role == "GROK TUI":
+                self._flow_acc[role] = (self._flow_acc.get(role) or "") + piece
+            else:
+                self._flow_acc[role] = piece
+            body = str(self._flow_acc.get(role) or "")
+            if not body or flow_tui.is_chrome_reply(body):
+                continue
+            flow_tui.set_motor_stream(role, body, done=False)
+            changed = True
+        if changed:
+            self._flow_tui_emit(flow_tui.snapshot())
+        done = all(str(self._flow_acc.get(role) or "").strip() for role in ("GROK TUI", "GPTUI"))
+        if done:
+            for role, body in self._flow_acc.items():
+                if body:
+                    flow_tui.set_motor_stream(role, body, done=True)
+            self._flow_tui_stop()
+            self._flow_tui_emit(flow_tui.snapshot())
+
+    def _flow_tui_start(self) -> None:
+        self._flow_paths = {}
+        self._flow_offsets = {}
+        self._flow_acc = {"GROK TUI": "", "GPTUI": ""}
+        self._flow_bind_logs()
+        self._flow_listen = True
+        self._flow_deadline = time.monotonic() + 45.0
+        self._flow_poll.start()
 
     @Slot(str, result=str)
     def flowTuiSubmit(self, text: str) -> str:
+        self._flow_tui_stop()
         try:
-            return self._flow_tui_json(flow_tui.submit(text))
+            board = flow_tui.submit(text)
         except Exception as exc:
             return self._flow_tui_json({
                 "schema": flow_tui.SCHEMA,
                 "error": type(exc).__name__ + ":" + str(exc),
             })
+        ask = " ".join(str(text or "").split())
+        if not ask:
+            return self._flow_tui_emit(board)
+        grok_ok = False
+        try:
+            grok_ok = bool(self.startGrokTui(GROK_TUI_TERMINAL_ID))
+        except Exception:
+            grok_ok = False
+        gpt_ok = False
+        try:
+            start = getattr(self, "startGptTui", None)
+            gpt_ok = bool(start()) if callable(start) else False
+        except Exception:
+            gpt_ok = False
+        if not grok_ok:
+            board = flow_tui.set_motor_stream(
+                "GROK TUI", "GROK TUI did not start.", done=True
+            )
+        if not gpt_ok:
+            board = flow_tui.set_motor_stream(
+                "GPTUI", "GPTUI did not start.", done=True
+            )
+        if grok_ok:
+            QTimer.singleShot(
+                520,
+                lambda line=ask: self._flow_tui_send(GROK_TUI_TERMINAL_ID, line),
+            )
+        if gpt_ok:
+            QTimer.singleShot(
+                720,
+                lambda line=ask: self._flow_tui_send("ws.tui.gpt", line),
+            )
+        if grok_ok or gpt_ok:
+            self._flow_tui_start()
+        return self._flow_tui_emit(board)
 
     @Slot(str, str, float, result=str)
     def nodeFlowSetParam(self, node_id: str, key: str, value: float) -> str:
@@ -2369,6 +3310,260 @@ class ChatSurfaceHost(QObject):
         except json.JSONDecodeError:
             return ""
         return save_settings(payload)
+
+    @Slot(result=str)
+    def loadWorkbenchExtensions(self) -> str:
+        """Return code-owned contribution manifests with local enabled state."""
+        from backend.workbench_registry import load_state, rows
+
+        return json.dumps(
+            rows(load_state()),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @Slot(str, str, result=str)
+    def loadWorkbenchExtensionsForProfile(
+        self,
+        theme_id: str,
+        profile_id: str,
+    ) -> str:
+        """Return the effective contribution rows for one visual profile."""
+        from backend.workbench_registry import load_state, rows
+
+        return json.dumps(
+            rows(load_state(), str(theme_id or ""), str(profile_id or "")),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @Slot(str, bool, result=str)
+    def setWorkbenchExtensionEnabled(
+        self,
+        extension_id: str,
+        enabled: bool,
+    ) -> str:
+        """Toggle one built-in contribution; no code is loaded or executed."""
+        from backend.workbench_registry import rows, set_enabled
+
+        try:
+            state = set_enabled(str(extension_id or ""), bool(enabled))
+            payload = json.dumps(
+                rows(state),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(str, bool, str, str, result=str)
+    def setWorkbenchExtensionEnabledForProfile(
+        self,
+        extension_id: str,
+        enabled: bool,
+        theme_id: str,
+        profile_id: str,
+    ) -> str:
+        """Set one contribution override in the active visual profile."""
+        from backend.workbench_registry import rows, set_enabled
+
+        try:
+            state = set_enabled(
+                str(extension_id or ""),
+                bool(enabled),
+                theme_id=str(theme_id or ""),
+                profile_id=str(profile_id or ""),
+            )
+            payload = json.dumps(
+                rows(state, str(theme_id or ""), str(profile_id or "")),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(result=str)
+    def resetWorkbenchExtensions(self) -> str:
+        """Restore all built-in contributions to Standard availability."""
+        from backend.workbench_registry import reset_state, rows
+
+        try:
+            payload = json.dumps(
+                rows(reset_state()),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(str, str, result=str)
+    def resetWorkbenchExtensionsForProfile(
+        self,
+        theme_id: str,
+        profile_id: str,
+    ) -> str:
+        """Remove only the active profile's contribution overrides."""
+        from backend.workbench_registry import reset_profile, rows
+
+        try:
+            state = reset_profile(str(theme_id or ""), str(profile_id or ""))
+            payload = json.dumps(
+                rows(state, str(theme_id or ""), str(profile_id or "")),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(str, str, str, result=str)
+    def copyWorkbenchExtensionsProfile(
+        self,
+        theme_id: str,
+        source_profile_id: str,
+        target_profile_id: str,
+    ) -> str:
+        """Copy built-in contribution overrides with a duplicated profile."""
+        from backend.workbench_registry import copy_profile, rows
+
+        try:
+            state = copy_profile(
+                str(theme_id or ""),
+                str(source_profile_id or ""),
+                str(target_profile_id or ""),
+            )
+            payload = json.dumps(
+                rows(
+                    state,
+                    str(theme_id or ""),
+                    str(target_profile_id or ""),
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(str, str, str, result=str)
+    def copyWorkbenchExtensionsTheme(
+        self,
+        source_theme_id: str,
+        target_theme_id: str,
+        profile_id: str,
+    ) -> str:
+        """Copy contribution overrides when a visual theme is duplicated."""
+        from backend.workbench_registry import copy_theme, rows
+
+        try:
+            state = copy_theme(
+                str(source_theme_id or ""),
+                str(target_theme_id or ""),
+            )
+            payload = json.dumps(
+                rows(
+                    state,
+                    str(target_theme_id or ""),
+                    str(profile_id or ""),
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (OSError, TypeError, ValueError):
+            return ""
+        self.workbenchExtensionsChanged.emit(payload)
+        return payload
+
+    @Slot(result=str)
+    def loadVisualLayoutState(self) -> str:
+        """Return the versioned presentation state used by every UI ingress."""
+        from backend.visual_layout import load_state
+
+        return json.dumps(
+            load_state(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @Slot(str, result=str)
+    def saveVisualLayoutState(self, blob: str) -> str:
+        from backend.visual_layout import normalize_state, save_state
+
+        try:
+            payload = json.loads(blob) if blob else {}
+            data = normalize_state(payload)
+            save_state(data)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return ""
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+    @Slot(result=str)
+    def resetVisualLayoutState(self) -> str:
+        from backend.visual_layout import reset_state
+
+        data = reset_state()
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+    @Slot(str, str, str, result=str)
+    def loadVisualSource(
+        self,
+        surface_id: str,
+        theme_id: str = "",
+        profile_id: str = "",
+    ) -> str:
+        from backend.visual_layout import load_state, source_for_surface
+
+        try:
+            payload = source_for_surface(
+                str(surface_id or "").strip(),
+                load_state(),
+                str(theme_id or "").strip(),
+                str(profile_id or "").strip(),
+            )
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            payload = {
+                "schema": "gg.ai-desktop.visual-source-buffer.v1",
+                "status": "FAIL",
+                "surfaceId": str(surface_id or ""),
+                "message": type(exc).__name__ + ":" + str(exc),
+                "writeAuthority": "NONE",
+            }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @Slot(str, str, str, str, result=str)
+    def saveVisualSourceBuffer(
+        self,
+        surface_id: str,
+        theme_id: str,
+        profile_id: str,
+        source: str,
+    ) -> str:
+        from backend.visual_layout import load_state, save_source_buffer
+
+        try:
+            payload = save_source_buffer(
+                load_state(),
+                str(surface_id or "").strip(),
+                str(source or ""),
+                str(theme_id or "").strip(),
+                str(profile_id or "").strip(),
+            )
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            payload = {
+                "status": "FAIL",
+                "surfaceId": str(surface_id or ""),
+                "message": type(exc).__name__ + ":" + str(exc),
+                "writeAuthority": "NONE",
+            }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @Slot(bool)
     def applyDesktopShell(self, enabled: bool) -> None:
@@ -4084,6 +5279,7 @@ class ChatSurfaceHost(QObject):
         self._tui_focus_timer.stop()
         self._tui_focus_terminal = ""
         self._gpt_capture_timer.stop()
+        self._flow_tui_stop()
         for identity in list(self._sessions):
             self._close(identity)
         self._qml_rebind_timer.stop()

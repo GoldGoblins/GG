@@ -5,8 +5,10 @@ import QtQuick.Dialogs
 Rectangle {
     id: root
     objectName: "walletPopup"
-    width: 328
-    height: Math.min(520, 18 + bodyCol.height + 16)
+    width: root.visualWidth > 0 ? root.visualWidth : 328
+    height: root.visualHeight > 0
+        ? root.visualHeight
+        : Math.min(520, 18 + bodyCol.height + 16)
     color: "#161616"
     border.color: root.frameBorder
     border.width: 1
@@ -14,6 +16,9 @@ Rectangle {
 
     property color frameBorder: "#4a4a4a"
     property int frameRadius: 4
+    property real visualWidth: -1
+    property real visualHeight: -1
+    property bool layoutLocked: true
     property var surfaceHost: null
     property string statusJson: "{}"
     signal requestClose()

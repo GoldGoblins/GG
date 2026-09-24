@@ -182,6 +182,9 @@ Item {
         Text {
             text: "FRONT MAN  " + root.light
                 + "  ·  critic≠dev  ·  brain=" + String(root.status.parallel_agent_brain || "FORBIDDEN")
+                + "  ·  " + String(root.status.parallel_execution || "BOUNDED_ADAPTIVE_DAG")
+                + "  ·  lanes=" + String((root.status.execution || {}).lanes || "—")
+                + "  ·  loops=" + String((root.status.execution || {}).loops || root.status.loops || "—")
             color: root.light === "GO" ? "#8db89a" : (root.light === "HOLD" ? "#c98989" : "#c8a97e")
             font.family: "monospace"
             font.pixelSize: 12

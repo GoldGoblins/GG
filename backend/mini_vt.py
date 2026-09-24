@@ -162,6 +162,13 @@ class MiniVt:
             lines.pop()
         return "\n".join(lines) + "\n"
 
+    def plain_text(self) -> str:
+        rows = list(self.buf) if self.alt_screen else list(self.history) + list(self.buf)
+        lines = ["".join(cell[0] for cell in row).rstrip() for row in rows]
+        while lines and lines[-1] == "":
+            lines.pop()
+        return "\n".join(lines)
+
     def resize(self, rows: int, cols: int) -> None:
         rows = max(2, int(rows))
         cols = max(4, int(cols))

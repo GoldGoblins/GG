@@ -4,7 +4,6 @@ Item {
     id: root
 
     property string text: ""
-    property bool enabled: true
     property bool checkable: false
     property bool checked: false
     signal clicked()

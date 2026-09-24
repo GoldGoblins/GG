@@ -319,8 +319,18 @@ def compile_chat_prompt(
         if not wants_work
         else "CHAT=UNIVERSAL. Användaren vill arbeta. @current är uppdraget.\n"
     )
+    try:
+        from backend.system_one_contract import decide_turn, format_compact
+
+        system_one_block = format_compact(decide_turn(text)) + "\n"
+    except Exception:
+        system_one_block = ""
+    profile_text = str(omni_context or "").strip()
+    if "[GG SYSTEM ONE]" in profile_text:
+        system_one_block = ""
     header_prefix = (
         stance
+        + system_one_block
         + "Task mode: TASK_SCOPED throughout this chat/task. "
         + "If an operation needs approval, ask the user in this same chat "
         + "and accept only a simple ja/yes or nej/no; never ask the user "
@@ -343,7 +353,6 @@ def compile_chat_prompt(
         + "----- END SELECTED WORKSPACE CONTEXT -----\n"
     )
     user = text if text.endswith("\n") else text + "\n"
-    profile_text = str(omni_context or "").strip()
     if profile_text:
         marker_length = len(USER_TURN_MARKER) + 4
         profile_budget = max(

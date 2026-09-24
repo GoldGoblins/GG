@@ -209,7 +209,7 @@ def response_for_task(root, request_task_id: str) -> dict[str, str] | None:
     matches = [
         node
         for node in dump_chat(root)
-        if node.get("nodeKind") == "RESPONSE"
+        if node.get("nodeKind") == "STREAM"
         and node.get("taskId") == request_task_id
     ]
     if len(matches) != 1:
@@ -218,7 +218,7 @@ def response_for_task(root, request_task_id: str) -> dict[str, str] | None:
 
 
 def run_gui() -> int:
-    from PySide6.QtCore import QObject, QTimer, QUrl
+    from PySide6.QtCore import QTimer, QUrl
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
 
@@ -241,7 +241,7 @@ def run_gui() -> int:
     emit("GUI_START", "PASS")
     emit("TITLE", str(root.property("title") or ""))
 
-    workspace = root.findChild(QObject, "workspaceSurface")
+    workspace = desktop.wait_for_workspace_surface(root)
     if workspace is None:
         emit("REASON", "WORKSPACE_SURFACE_MISSING")
         return 72
@@ -250,6 +250,9 @@ def run_gui() -> int:
         emit("REASON", "LIVE_AID_BIND_FAILED")
         return 72
     bridge = desktop.ChatBridge(root, app)
+    if not root.setProperty("engineTarget", "LOCAL_QWEN"):
+        emit("REASON", "LOCAL_QWEN_BIND_FAILED")
+        return 72
     root.bridgeSubmit.connect(bridge.submit)
     root.contextSnapshotSync.connect(bridge.syncContextSnapshot)
     root.bridgeStop.connect(bridge.stopActive)
@@ -271,19 +274,19 @@ def run_gui() -> int:
     preexisting = {
         str(node.get("taskId", ""))
         for node in dump_chat(root)
-        if node.get("nodeKind") == "RESPONSE" and node.get("taskId")
+        if node.get("nodeKind") == "STREAM" and node.get("taskId")
     }
     root.contextSnapshotSync.emit(root.buildContextSnapshotJson())
     root.appendRealNode(
         "YOU",
         "REQUEST",
         USER_TEXT,
-        "@current · ws.file.context-composer",
+        "@current · ws.file.chat-node",
         "SUBMITTED",
         0,
         "",
     )
-    bridge.submit(USER_TEXT, "@current", "ws.file.context-composer")
+    bridge.submit(USER_TEXT, "@current", "ws.file.chat-node")
     emit("SUBMIT", "PASS")
 
     request_task_id = bridge._resident_chat.active_request_id()
@@ -291,7 +294,7 @@ def run_gui() -> int:
         created = [
             str(node.get("taskId", ""))
             for node in dump_chat(root)
-            if node.get("nodeKind") == "RESPONSE"
+            if node.get("nodeKind") == "STREAM"
             and node.get("taskId")
             and node.get("taskId") not in preexisting
         ]

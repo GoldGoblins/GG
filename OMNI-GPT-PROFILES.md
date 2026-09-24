@@ -1,6 +1,6 @@
 # GG OmniGPT – gemensam lokal profilkatalog
 
-GG AI Desktop använder GPT-profilerna i `/home/GG/GG-KNOWLEDGE/web-gpts` som
+GG AI Desktop använder GPT-profilerna i `~/GG-KNOWLEDGE/web-gpts` (eller sökvägen i `GG_GPT_KNOWLEDGE_ROOT`) som
 ett gemensamt kunskaps- och beteendelager för både GROK och GPT. `GG-idekompassen`
 är alltid den första tolkningslinsen. Övriga profiler väljs internt efter
 uppgift; användaren behöver inte byta GPT eller motor.

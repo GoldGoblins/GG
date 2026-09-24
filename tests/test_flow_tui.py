@@ -39,6 +39,49 @@ def main() -> int:
         raise AssertionError("critic must not be the author")
     if board["transcript"][0]["role"] != "YOU":
         raise AssertionError("transcript starts with the user")
+    roles = [str(row.get("role") or "") for row in board["transcript"]]
+    if "GROK TUI" not in roles or "GPTUI" not in roles:
+        raise AssertionError("shared stream must name both motors")
+    joined = "\n".join(str(row.get("text") or "") for row in board["transcript"])
+    if "hold original intent" in joined.lower() or "do not rewrite the house layer" in joined.lower():
+        raise AssertionError("FLOW must not post job lists as chat replies")
+    if flow_tui.dispatch_texts()["grok"] != board["ask"]:
+        raise AssertionError("dispatch must send the real ask, not a job packet")
+
+    flow_tui.reset()
+    talk = flow_tui.submit("hejsan")
+    grok_blob = (
+        '{"params":{"update":{"sessionUpdate":"agent_message_chunk",'
+        '"content":{"type":"text","text":"hej, det är Grok"}}}}\n'
+    )
+    grok_text = flow_tui.extract_assistant_jsonl(grok_blob, role="GROK TUI")
+    if grok_text != "hej, det är Grok":
+        raise AssertionError("FLOW must read Grok assistant jsonl, got " + repr(grok_text))
+    if flow_tui.extract_assistant_jsonl(
+        '{"params":{"update":{"sessionUpdate":"tool_call","title":"todo_write"}}}\n',
+        role="GROK TUI",
+    ):
+        raise AssertionError("FLOW must ignore tool-call jsonl")
+    chrome = "Enter:send Alt+Enter:newline Shift+Tab:mode Ctrl+x:"
+    if not flow_tui.is_chrome_reply(chrome):
+        raise AssertionError("FLOW must drop TUI chrome")
+    gpt_blob = (
+        '{"payload":{"type":"message","role":"assistant","content":'
+        '[{"type":"output_text","text":"hej från GPTUI"}]}}\n'
+    )
+    gpt_text = flow_tui.extract_assistant_jsonl(gpt_blob, role="GPTUI")
+    if gpt_text != "hej från GPTUI":
+        raise AssertionError("FLOW must read GPTUI assistant jsonl, got " + repr(gpt_text))
+    gpt = flow_tui.set_motor_stream("GPTUI", gpt_text, done=True)
+    shown = next(
+        str(row.get("text") or "")
+        for row in gpt["transcript"]
+        if row.get("role") == "GPTUI"
+    )
+    if shown != "hej från GPTUI":
+        raise AssertionError("GPTUI stream missing")
+    if talk["transcript"][0]["text"] != "hejsan":
+        raise AssertionError("talk transcript lost the user ask")
 
     main_qml = (PROJECT / "qml/Main.qml").read_text(encoding="utf-8")
     if 'leftLegend: "CHAT · UNIVERSAL OPERATIONAL STREAM"' not in main_qml:
@@ -50,6 +93,16 @@ def main() -> int:
     hole = (PROJECT / "qml/components/FlowTuiHole.qml").read_text(encoding="utf-8")
     if 'objectName: "flowTuiInputBar"' not in hole or 'anchors.bottom: parent.bottom' not in hole:
         raise AssertionError("FLOW TUI prompt must stay pinned to the bottom")
+    if "ChatNode" not in hole:
+        raise AssertionError("FLOW TUI must use the same chat bubbles as UOS")
+    if "onFlowTuiChanged" not in hole:
+        raise AssertionError("FLOW TUI must live-update when the motors answer")
+    if "interval: 400" in hole:
+        raise AssertionError("FLOW TUI must not poll the board on a hot timer")
+    if "GROK TUI" in hole and 'text: "GROK TUI"' in hole and "ChatNode" in hole:
+        pass
+    if "motorRow" in hole:
+        raise AssertionError("FLOW TUI must not be a two-column job board")
     workspace = (PROJECT / "qml/components/WorkspaceSurface.qml").read_text(
         encoding="utf-8"
     )
@@ -77,9 +130,19 @@ def main() -> int:
         raise AssertionError("settings chat missing FLOW TUI")
 
     host = (PROJECT / "backend/chat_surface_host.py").read_text(encoding="utf-8")
-    for marker in ("def flowTuiSubmit", "def flowTuiStatus", "def flowTuiReset"):
+    for marker in (
+        "def flowTuiSubmit",
+        "def flowTuiStatus",
+        "def flowTuiReset",
+        "def _flow_tui_poll",
+        "flowTuiChanged",
+    ):
         if marker not in host:
             raise AssertionError("host slot missing: " + marker)
+    if "flow_vt.feed" in host or "_flow_vt" in host or "def _flow_tui_ingest" in host:
+        raise AssertionError("FLOW must not parse TUI screens on the PTY read path")
+    if "if grid is None:\n            return False" in host.split("def _start_gpt_tui")[1].split("def ")[0]:
+        raise AssertionError("FLOW must start GPTUI even when the GPT tab is hidden")
     print("test_flow_tui: PASS")
     return 0
 

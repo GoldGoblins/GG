@@ -7,7 +7,7 @@ Item {
     objectName: "workspaceOsintPane"
 
     property var surfaceHost: null
-    property color frameBorder: "#6a6a6a"
+    property color frameBorder: "#4a4a4a"
     property int frameRadius: 4
     readonly property color ink: "#e6edf3"
     readonly property color text: "#c8cdd4"
@@ -30,6 +30,8 @@ Item {
     property string navDraft: ""
     property var navPlaces: []
     property string navMeta: ""
+    property real lastViewportQueryAt: 0
+    property string lastViewportKey: ""
 
     readonly property var nav: [
         "OVERVIEW",
@@ -53,6 +55,11 @@ Item {
             root.statusJson = String(raw)
             root.payload = parsed
             root.fetchBusy = false
+            if (root.selectedEvent && root.selectedEvent.id) {
+                var rebound = root.findById(String(root.selectedEvent.id))
+                if (rebound)
+                    root.selectedEvent = root.mergeKeep(root.selectedEvent, rebound)
+            }
         } catch (err) {
             root.fetchBusy = false
         }
@@ -61,6 +68,7 @@ Item {
     function refresh() {
         if (!root.surfaceHost)
             return
+        root.lastViewportKey = ""
         if (root.surfaceHost.osintSnapshot)
             root.applyRaw(root.surfaceHost.osintSnapshot(root.page))
         if (root.surfaceHost.osintRefresh) {
@@ -68,6 +76,28 @@ Item {
             if (queued)
                 root.fetchBusy = true
         }
+    }
+
+    function viewportKey(view) {
+        if (!view)
+            return ""
+        var bounds = view.bounds || []
+        function q(value) { return Number(value || 0).toFixed(3) }
+        return [q(view.lng), q(view.lat), q(view.zoom), q(view.bearing), q(view.pitch), JSON.stringify(bounds)].join("|")
+    }
+
+    function refreshViewport(view) {
+        if (!root.surfaceHost || !root.surfaceHost.osintViewportSnapshot)
+            return
+        var now = Date.now()
+        if (now - root.lastViewportQueryAt < 220)
+            return
+        var key = root.viewportKey(view)
+        if (!key || key === root.lastViewportKey)
+            return
+        root.lastViewportQueryAt = now
+        root.lastViewportKey = key
+        root.applyRaw(root.surfaceHost.osintViewportSnapshot(JSON.stringify(view || {})))
     }
 
     function rows(name) {
@@ -78,6 +108,14 @@ Item {
     function count(name) {
         var counts = root.payload.counts || {}
         return Number(counts[name] || 0)
+    }
+
+    function renderedPointCount() {
+        var counts = root.payload.render_counts || {}
+        var total = 0
+        for (var key in counts)
+            total += Number(counts[key] || 0)
+        return total
     }
 
     function history(name) {
@@ -97,7 +135,7 @@ Item {
             "SPACE": "Space Weather",
             "NEWS": "News",
             "CONFLICT": "Conflict watch",
-            "CAMERAS": "ALPR pins",
+            "CAMERAS": "Cameras",
             "SOURCES": "Sources",
             "RECON": "Recon boundary"
         }
@@ -182,25 +220,46 @@ Item {
                 if (item.lat === undefined || item.lon === undefined)
                     continue
                 result.push({
+                    id: String(item.id || item.callsign || item.title || item.label || kind),
                     lat: Number(item.lat),
                     lon: Number(item.lon),
                     kind: kind,
                     label: String(item.callsign || item.place || item.title || item.label || kind),
+                    callsign: String(item.callsign || ""),
+                    country: String(item.country || ""),
                     color: root.markerColor(kind),
                     heading: Number(item.heading || 0),
                     speed_mps: Number(item.speed_mps || 0),
                     alt_m: Number(item.alt_m || 0),
                     on_ground: Boolean(item.on_ground),
+                    squawk: String(item.squawk || ""),
                     magnitude: Number(item.magnitude || 0),
-                    severity: Number(item.severity || 0)
+                    severity: Number(item.severity || 0),
+                    camera_count: Number(item.camera_count || 0),
+                    aircraft_count: Number(item.aircraft_count || 0),
+                    event_count: Number(item.event_count || 0),
+                    cluster_count: Number(item.cluster_count || 0),
+                    cluster: Boolean(item.cluster),
+                    summary: String(item.summary || item.category || item.zone || item.city || ""),
+                    place: String(item.place || item.city || ""),
+                    source: String(item.source || kind),
+                    url: String(item.url || ""),
+                    photo: String(item.photo || item.media_url || item.feed_url || ""),
+                    city: String(item.city || ""),
+                    country: String(item.country || ""),
+                    live_video: Boolean(item.live_video),
+                    media_kind: String(item.media_kind || ""),
+                    availability: String(item.availability || "")
                 })
             }
         }
-        add(root.rows("aircraft"), "aircraft", 160)
+        add(root.rows("aircraft"), "aircraft", 10000)
         add(root.rows("earthquakes"), "earthquakes", 80)
         add(root.rows("fires"), "fires", 80)
         add(root.rows("conflicts"), "conflicts", 40)
-        add(root.rows("gdelt"), "gdelt", 40)
+        add(root.rows("gdelt"), "gdelt", 1200)
+        add(root.rows("news"), "news", 1000)
+        add(root.rows("cameras"), "cameras", 2500)
         return result
     }
 
@@ -211,12 +270,264 @@ Item {
         return root.rows("news").slice(0, 7)
     }
 
-    function focusGlobe(item) {
+    function mergeKeep(base, next) {
+        var out = {}
+        var key
+        if (base) {
+            for (key in base)
+                out[key] = base[key]
+        }
+        if (next) {
+            for (key in next) {
+                if (next[key] !== undefined && next[key] !== null && next[key] !== "")
+                    out[key] = next[key]
+            }
+        }
+        return out
+    }
+
+    function asEvent(item, kind) {
+        if (!item)
+            return null
+        var k = String(item.kind || kind || "event")
+        var title = String(item.title || item.callsign || item.place || item.label || k)
+        return root.mergeKeep({
+            "id": String(item.id || item.callsign || title),
+            "kind": k,
+            "title": title,
+            "callsign": String(item.callsign || ""),
+            "country": String(item.country || ""),
+            "summary": String(item.summary || item.category || item.zone || ""),
+            "source": String(item.source || k).toUpperCase(),
+            "time": String(item.time || item.published || item.last_contact || ""),
+            "url": String(item.url || ""),
+            "photo": String(item.photo || ""),
+            "lat": item.lat,
+            "lon": item.lon,
+            "alt_m": item.alt_m,
+            "speed_mps": item.speed_mps,
+            "heading": item.heading,
+            "squawk": item.squawk,
+            "on_ground": item.on_ground,
+            "vert_rate_mps": item.vert_rate_mps,
+            "magnitude": item.magnitude,
+            "depth_km": item.depth_km,
+            "camera_count": item.camera_count,
+            "media_kind": item.media_kind,
+            "availability": item.availability,
+            "place": item.place,
+            "route": item.route,
+            "airline": item.airline,
+            "type": item.type,
+            "registration": item.registration,
+            "owner": item.owner,
+            "origin": item.origin,
+            "destination": item.destination
+        }, item)
+    }
+
+    function findById(id) {
+        var wanted = String(id || "")
+        if (!wanted)
+            return null
+        var names = ["aircraft", "earthquakes", "fires", "conflicts", "news", "gdelt", "cameras"]
+        for (var n = 0; n < names.length; n++) {
+            var rows = root.rows(names[n])
+            for (var i = 0; i < rows.length; i++) {
+                if (String(rows[i].id || "") === wanted)
+                    return root.asEvent(rows[i], names[n])
+            }
+        }
+        var stream = root.streamRows()
+        for (var s = 0; s < stream.length; s++) {
+            if (String(stream[s].id || "") === wanted)
+                return root.asEvent(stream[s], stream[s].kind)
+        }
+        return null
+    }
+
+    function selectEvent(item, fly) {
+        var event = root.asEvent(item, item && item.kind)
+        if (!event)
+            return
         root.navMode = false
         overviewGlobe.setNavOpen(false)
-        root.selectedEvent = item
-        if (item && item.lat !== undefined && item.lon !== undefined)
-            overviewGlobe.focusPoint(item.lat, item.lon, 5.4)
+        root.selectedEvent = event
+        if (fly && event.lat !== undefined && event.lon !== undefined)
+            overviewGlobe.focusPoint(event.lat, event.lon, event.kind === "aircraft" ? 6.2 : 5.4)
+        overviewGlobe.showPopup(event)
+        if (event.kind === "aircraft")
+            root.enrichFlight(event)
+        root.saveUi()
+    }
+
+    function focusGlobe(item) {
+        root.selectEvent(item, true)
+    }
+
+    function enrichFlight(item) {
+        if (!item || !root.surfaceHost || !root.surfaceHost.osintLookupFlight)
+            return
+        var raw = root.surfaceHost.osintLookupFlight(
+            String(item.callsign || ""),
+            String(item.id || "")
+        )
+        root.mergeFlight(raw)
+    }
+
+    function mergeFlight(raw) {
+        if (!raw || !root.selectedEvent)
+            return
+        var extra = {}
+        try {
+            extra = JSON.parse(String(raw))
+        } catch (err) {
+            return
+        }
+        if (!extra || !extra.ok)
+            return
+        var cur = root.selectedEvent
+        var sameCall = extra.callsign && String(extra.callsign) === String(cur.callsign || "")
+        var sameIcao = extra.icao24 && String(extra.icao24) === String(cur.id || "")
+        if (!sameCall && !sameIcao)
+            return
+        root.selectedEvent = root.mergeKeep(cur, extra)
+        overviewGlobe.showPopup(root.selectedEvent)
+    }
+
+    function knots(mps) {
+        var n = Number(mps)
+        if (!isFinite(n))
+            return "—"
+        return Math.round(n * 1.94384) + " kt"
+    }
+
+    function flightLevel(meters) {
+        var n = Number(meters)
+        if (!isFinite(n) || n <= 0)
+            return "—"
+        return "FL " + Math.round(n / 30.48)
+    }
+
+    function airportLabel(row) {
+        if (!row)
+            return ""
+        if (typeof row === "string")
+            return row
+        return String(row.label || row.iata || row.icao || row.name || "")
+    }
+
+    function eventFacts(item) {
+        if (!item)
+            return []
+        var lines = []
+        if (item.kind === "aircraft") {
+            lines.push((item.on_ground ? "GROUND" : "AIRBORNE")
+                + (item.country ? " · " + item.country : ""))
+            lines.push(root.flightLevel(item.alt_m)
+                + " · " + root.number(item.alt_m) + " m"
+                + " · " + root.knots(item.speed_mps)
+                + " · HDG " + root.number(item.heading))
+            if (item.squawk)
+                lines.push("SQUAWK " + String(item.squawk))
+            if (item.route)
+                lines.push(String(item.route))
+            else if (root.airportLabel(item.origin) || root.airportLabel(item.destination))
+                lines.push(root.airportLabel(item.origin) + " → " + root.airportLabel(item.destination))
+            if (item.airline)
+                lines.push(String(item.airline))
+            var airframe = String(item.type || "")
+            if (airframe === "aircraft" || airframe === "alpr" || airframe === "earthquake")
+                airframe = ""
+            if (airframe || item.registration)
+                lines.push([airframe, item.registration].filter(function(v) { return v }).join(" · "))
+            if (item.owner)
+                lines.push(String(item.owner))
+        } else if (item.kind === "earthquakes") {
+            lines.push("M" + root.number(item.magnitude, 1)
+                + (item.depth_km !== undefined ? " · " + root.number(item.depth_km, 0) + " km depth" : ""))
+            if (item.place)
+                lines.push(String(item.place))
+        } else if (item.kind === "fires") {
+            if (item.summary)
+                lines.push(String(item.summary))
+        } else if (item.kind === "cameras") {
+            if (item.media_kind)
+                lines.push(String(item.media_kind).replace(/_/g, " ") + " · " + String(item.source || "CCTV").toUpperCase())
+            else if (item.live_video || item.photo || item.media_url)
+                lines.push("PUBLIC SNAPSHOT · " + String(item.source || "CCTV").toUpperCase())
+            else
+                lines.push("LOCATION PIN · NO LIVE VIDEO")
+            if (item.city || item.country)
+                lines.push([item.city, item.country].filter(function(v) { return v }).join(" · "))
+        }
+        if (item.lat !== undefined)
+            lines.push(root.number(item.lat, 2) + ", " + root.number(item.lon, 2))
+        return lines
+    }
+
+    function uiPayload() {
+        var route = null
+        try {
+            if (overviewGlobe.savedRoute)
+                route = JSON.parse(overviewGlobe.savedRoute)
+        } catch (err) {
+            route = null
+        }
+        return JSON.stringify({
+            "page": root.page,
+            "navMode": root.navMode,
+            "navPlaces": root.navPlaces,
+            "navDraft": root.navDraft,
+            "navMeta": root.navMeta,
+            "route": route,
+            "selected": root.selectedEvent,
+            "view": overviewGlobe.savedView,
+            "sidebarCollapsed": root.sidebarCollapsed
+        })
+    }
+
+    function saveUi() {
+        if (root.surfaceHost && root.surfaceHost.osintSaveUi)
+            root.surfaceHost.osintSaveUi(root.uiPayload())
+    }
+
+    function restoreUi() {
+        if (!root.surfaceHost || !root.surfaceHost.osintLoadUi)
+            return
+        var parsed = {}
+        try {
+            parsed = JSON.parse(String(root.surfaceHost.osintLoadUi() || "{}"))
+        } catch (err) {
+            parsed = {}
+        }
+        if (!parsed || typeof parsed !== "object")
+            return
+        if (parsed.page)
+            root.page = String(parsed.page)
+        if (parsed.navPlaces && parsed.navPlaces.length !== undefined)
+            root.navPlaces = parsed.navPlaces
+        if (parsed.navDraft !== undefined)
+            root.navDraft = String(parsed.navDraft || "")
+        if (parsed.navMeta !== undefined)
+            root.navMeta = String(parsed.navMeta || "")
+        if (parsed.sidebarCollapsed !== undefined)
+            root.sidebarCollapsed = Boolean(parsed.sidebarCollapsed)
+        if (parsed.view)
+            overviewGlobe.savedView = parsed.view
+        if (parsed.route) {
+            var routeRaw = JSON.stringify(parsed.route)
+            overviewGlobe.savedRoute = routeRaw
+            overviewGlobe.applyRoute(routeRaw)
+        }
+        if (parsed.selected)
+            root.selectedEvent = parsed.selected
+        if (parsed.navMode) {
+            root.navMode = true
+            overviewGlobe.setNavOpen(true)
+        } else if (parsed.selected) {
+            overviewGlobe.showPopup(parsed.selected)
+        }
     }
 
     function openNav() {
@@ -294,6 +605,8 @@ Item {
         var min = Math.round(Number(result.duration_s || 0) / 60)
         root.navMeta = km + " km · " + min + " min · " + places.length + " places"
         overviewGlobe.applyRoute(raw)
+        overviewGlobe.savedRoute = raw
+        root.saveUi()
     }
 
     function clearNav() {
@@ -301,6 +614,8 @@ Item {
         root.navPlaces = []
         root.navMeta = ""
         overviewGlobe.clearRoute()
+        overviewGlobe.savedRoute = ""
+        root.saveUi()
     }
 
     function paintMap(ctx, width, height) {
@@ -369,11 +684,14 @@ Item {
     onPageChanged: {
         if (root.visible)
             root.refresh()
+        root.saveUi()
     }
 
     onVisibleChanged: {
         if (visible)
             root.refresh()
+        else
+            root.saveUi()
     }
 
     Connections {
@@ -381,6 +699,9 @@ Item {
         ignoreUnknownSignals: true
         function onOsintUpdated(raw) {
             root.applyRaw(raw)
+        }
+        function onOsintFlightLookedUp(raw) {
+            root.mergeFlight(raw)
         }
     }
 
@@ -394,8 +715,8 @@ Item {
                 root.navMode = false
         }
         function onLastPickChanged() {
-            if (overviewGlobe.lastPick)
-                root.focusGlobe(overviewGlobe.lastPick)
+            if (overviewGlobe.lastPick && !root.navMode)
+                root.selectEvent(overviewGlobe.lastPick, false)
         }
         function onRouteMetaChanged() {
             if (overviewGlobe.routeMeta)
@@ -404,6 +725,14 @@ Item {
         function onGpsFixChanged() {
             if (overviewGlobe.gpsFix)
                 root.navMeta = overviewGlobe.routeMeta
+        }
+        function onMapReadyChanged() {
+            if (!overviewGlobe.mapReady)
+                return
+            if (overviewGlobe.savedRoute)
+                overviewGlobe.applyRoute(overviewGlobe.savedRoute)
+            if (root.selectedEvent && !root.navMode)
+                overviewGlobe.showPopup(root.selectedEvent)
         }
     }
 
@@ -414,35 +743,34 @@ Item {
         onTriggered: root.refresh()
     }
 
-    Component.onCompleted: root.refresh()
+    Component.onCompleted: {
+        root.restoreUi()
+        root.refresh()
+    }
+    Component.onDestruction: root.saveUi()
 
-    Rectangle {
+    OsintGlobe {
+        id: overviewGlobe
         anchors.fill: parent
-        anchors.leftMargin: 8
-        anchors.rightMargin: 12
-        anchors.topMargin: 8
-        anchors.bottomMargin: 10
-        color: "#161616"
-        border.color: "#4a4a4a"
-        border.width: 1
-        radius: 4
-        antialiasing: true
+        z: 0
+        points: root.mapPoints()
+        catalogCounts: root.payload.catalog_counts || root.payload.counts || ({})
+        muted: root.muted
+        signalBlue: root.signalBlue
+        ledgerGold: root.ledgerGold
+        panel: "#05070c"
+        onViewportChanged: function(view) { root.refreshViewport(view) }
     }
 
     Rectangle {
         id: sidebar
+        z: 3
         anchors.left: parent.left
-        anchors.leftMargin: 8
         anchors.top: parent.top
-        anchors.topMargin: 8
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 10
-        width: root.sidebarCollapsed ? 48 : Math.max(168, Math.min(205, parent.width * 0.18))
-        color: root.panel
-        border.color: "#4a4a4a"
-        border.width: 1
-        radius: 4
-        antialiasing: true
+        width: root.sidebarCollapsed ? 44 : 168
+        color: "transparent"
+        border.width: 0
 
         Behavior on width {
             NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
@@ -509,6 +837,8 @@ Item {
                         font.pixelSize: 12
                         font.bold: root.page === modelData
                         elide: Text.ElideRight
+                        style: Text.Outline
+                        styleColor: "#05070c"
                     }
                     Text {
                         visible: root.sidebarCollapsed
@@ -535,13 +865,6 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             height: root.sidebarCollapsed ? 50 : 82
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 1
-                color: "#3a3a3a"
-            }
             Text {
                 visible: !root.sidebarCollapsed
                 anchors.left: parent.left
@@ -554,6 +877,8 @@ Item {
                 font.pixelSize: 17
                 font.bold: true
                 font.letterSpacing: 1.1
+                style: Text.Outline
+                styleColor: "#05070c"
             }
             Text {
                 visible: !root.sidebarCollapsed
@@ -565,6 +890,8 @@ Item {
                 color: root.muted
                 font.family: "monospace"
                 font.pixelSize: 10
+                style: Text.Outline
+                styleColor: "#05070c"
             }
             Text {
                 visible: root.sidebarCollapsed
@@ -576,549 +903,519 @@ Item {
         }
     }
 
-    Rectangle {
-        id: navSeparator
-        anchors.left: sidebar.right
-        anchors.leftMargin: 12
-        anchors.top: sidebar.top
-        anchors.bottom: sidebar.bottom
-        width: 1
-        color: "#3a3a3a"
-    }
-
     Item {
         id: mainArea
-        anchors.left: navSeparator.right
-        anchors.leftMargin: 18
+        z: 2
+        anchors.left: sidebar.right
+        anchors.leftMargin: 4
         anchors.right: parent.right
-        anchors.rightMargin: 12
+        anchors.rightMargin: 10
         anchors.top: parent.top
         anchors.topMargin: 8
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 10
+        anchors.bottomMargin: 8
+
+        Row {
+            id: metricRow
+            visible: root.page === "OVERVIEW"
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.topMargin: 36
+            height: 44
+            spacing: 22
+            Repeater {
+                model: [
+                    {key: "aircraft", label: "AIRCRAFT", color: root.signalBlue},
+                    {key: "earthquakes", label: "EARTHQUAKES", color: root.ledgerGold},
+                    {key: "fires", label: "FIRES", color: root.signalRed},
+                    {key: "cameras", label: "CCTV", color: "#6ec4d8"},
+                    {key: "news", label: "NEWS", color: root.text}
+                ]
+                delegate: Item {
+                    required property var modelData
+                    width: Math.max(metricLegend.implicitWidth, metricCount.implicitWidth)
+                    height: 44
+                    Text {
+                        id: metricLegend
+                        anchors.top: parent.top
+                        text: String(modelData.label)
+                        color: root.muted
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                        font.bold: true
+                        style: Text.Outline
+                        styleColor: "#05070c"
+                    }
+                    Text {
+                        id: metricCount
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        text: root.number(root.count(String(modelData.key)))
+                        color: modelData.color
+                        font.family: "monospace"
+                        font.pixelSize: 20
+                        style: Text.Outline
+                        styleColor: "#05070c"
+                    }
+                }
+            }
+        }
 
         Item {
-            id: header
-            anchors.left: parent.left
+            id: intelCard
+            visible: root.page === "OVERVIEW" || root.page === "MAP"
             anchors.right: parent.right
             anchors.top: parent.top
-            height: 54
+            anchors.topMargin: 8
+            anchors.bottom: detailCard.visible ? detailCard.top : parent.bottom
+            anchors.bottomMargin: detailCard.visible ? 8 : 0
+            width: Math.min(300, parent.width * 0.28)
 
-            Text {
+            Item {
+                id: intelHeader
                 anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.topMargin: 4
-                text: "GG / OSIRIS · NATIVE · PUBLIC READ ONLY"
-                color: root.muted
-                font.family: "monospace"
-                font.pixelSize: 9
-            }
-            Text {
-                anchors.left: parent.left
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 5
-                text: root.navLabel(root.page).toUpperCase()
-                color: root.ink
-                font.family: "monospace"
-                font.pixelSize: 18
-            }
-
-            Rectangle {
-                id: sourceStatus
-                anchors.right: refreshButton.left
-                anchors.rightMargin: 14
-                anchors.verticalCenter: parent.verticalCenter
-                width: sourceStatusLabel.implicitWidth + 22
-                height: 27
-                color: "#181b1f"
-                border.color: "#3c444d"
-                border.width: 1
-                radius: 3
-                Text {
-                    id: sourceStatusLabel
-                    anchors.centerIn: parent
-                    text: root.statusText()
-                        + " · "
-                        + String(root.payload.healthy_sources || 0)
-                        + "/"
-                        + String(root.payload.source_count || 0)
-                    color: root.statusColor()
-                    font.family: "monospace"
-                    font.pixelSize: 10
-                }
-            }
-
-            Rectangle {
-                id: refreshButton
                 anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                width: refreshLabel.implicitWidth + 24
-                height: 27
-                color: refreshHit.pressed ? "#20262d" : "#181b1f"
-                border.color: refreshHit.containsMouse ? root.ledgerGold : "#3c444d"
-                border.width: 1
-                radius: 3
+                anchors.top: parent.top
+                height: 22
                 Text {
-                    id: refreshLabel
-                    anchors.centerIn: parent
-                    text: root.fetchBusy ? "…  FETCHING" : "↻  REFRESH"
-                    color: root.text
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "INTELLIGENCE STREAM"
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    font.bold: true
+                    style: Text.Outline
+                    styleColor: "#05070c"
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.fetchBusy ? "FETCHING" : (root.statusText() + "  ↻")
+                    color: refreshHit.containsMouse ? root.ledgerGold : root.statusColor()
                     font.family: "monospace"
                     font.pixelSize: 10
+                    style: Text.Outline
+                    styleColor: "#05070c"
+                    MouseArea {
+                        id: refreshHit
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.refresh()
+                    }
                 }
-                MouseArea {
-                    id: refreshHit
+            }
+
+            ListView {
+                id: overviewNewsList
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: intelHeader.bottom
+                anchors.topMargin: 4
+                anchors.bottom: parent.bottom
+                clip: true
+                spacing: 1
+                model: root.streamRows()
+                delegate: Item {
+                    required property var modelData
+                    width: overviewNewsList.width
+                    height: 40
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 3
+                        color: root.selectedEvent && root.selectedEvent.id === modelData.id
+                            ? root.selectedPanel
+                            : (newsHit.containsMouse ? "#2a2a2a" : "transparent")
+                    }
+                    Text {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        anchors.topMargin: 5
+                        text: String(modelData.title || "UNTITLED")
+                        color: root.selectedEvent && root.selectedEvent.id === modelData.id
+                            ? root.ink : root.text
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        font.bold: root.selectedEvent && root.selectedEvent.id === modelData.id
+                        elide: Text.ElideRight
+                        style: Text.Outline
+                        styleColor: "#05070c"
+                    }
+                    Text {
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: 8
+                        anchors.bottomMargin: 4
+                        text: String(modelData.kind || "news").toUpperCase()
+                            + " · "
+                            + root.shortTime(modelData.time || modelData.published)
+                        color: Number(modelData.risk_score || 0) >= 7 ? root.signalRed : root.muted
+                        font.family: "monospace"
+                        font.pixelSize: 9
+                        style: Text.Outline
+                        styleColor: "#05070c"
+                    }
+                    MouseArea {
+                        id: newsHit
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.focusGlobe(modelData)
+                    }
+                }
+            }
+        }
+
+        Item {
+            id: detailCard
+            visible: (root.page === "OVERVIEW" || root.page === "MAP")
+                     && (root.navMode || root.selectedEvent)
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: Math.min(300, parent.width * 0.28)
+            height: root.navMode
+                ? Math.min(360, parent.height * 0.58)
+                : Math.min(Math.max(168, detailColumn.height + 28), parent.height * 0.48)
+            Rectangle {
+                anchors.fill: parent
+                color: root.navMode ? "#1a1a1a" : "#181818"
+                opacity: 0
+            }
+            Item {
+                id: detailPane
+                objectName: "osintSharedPane"
+                anchors.fill: parent
+                Column {
+                    visible: root.navMode
                     anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.refresh()
+                    spacing: 5
+                    Text {
+                        width: parent.width
+                        text: root.navMeta !== ""
+                            ? root.navMeta
+                            : "TYPE A PLACE + ENTER · FIRST START · LAST END · DRAG TO REORDER"
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        font.family: "monospace"
+                        font.pixelSize: 9
+                    }
+                    ListView {
+                        id: navPlaceList
+                        width: parent.width
+                        height: Math.min(25 * Math.max(root.navPlaces.length, 0), 140)
+                        clip: true
+                        visible: root.navPlaces.length > 0
+                        model: root.navPlaces
+                        spacing: 3
+                        delegate: Item {
+                            id: placeRow
+                            required property string modelData
+                            required property int index
+                            width: navPlaceList.width
+                            height: 22
+                            z: placeDrag.drag.active ? 2 : 0
+                            Rectangle {
+                                id: placeChip
+                                width: parent.width
+                                height: 22
+                                color: placeDrag.drag.active ? "#2a2a2a" : "#202020"
+                                border.color: root.frameBorder
+                                border.width: 1
+                                radius: 4
+                                antialiasing: true
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "⋮⋮  " + placeRow.modelData
+                                    color: root.text
+                                    font.family: "monospace"
+                                    font.pixelSize: 10
+                                }
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "✕"
+                                    color: root.muted
+                                    font.family: "monospace"
+                                    font.pixelSize: 10
+                                }
+                                MouseArea {
+                                    id: placeDrag
+                                    anchors.fill: parent
+                                    anchors.rightMargin: 22
+                                    hoverEnabled: true
+                                    cursorShape: Qt.OpenHandCursor
+                                    drag.target: placeChip
+                                    drag.axis: Drag.YAxis
+                                    onReleased: {
+                                        var localY = placeChip.mapToItem(navPlaceList.contentItem, 0, placeChip.height / 2).y
+                                        var target = Math.round(localY / 25)
+                                        if (target < 0)
+                                            target = 0
+                                        if (target > root.navPlaces.length - 1)
+                                            target = root.navPlaces.length - 1
+                                        root.moveNavPlace(placeRow.index, target)
+                                        placeChip.x = 0
+                                        placeChip.y = 0
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.right: parent.right
+                                    width: 22
+                                    height: parent.height
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.removeNavPlace(placeRow.index)
+                                }
+                            }
+                        }
+                    }
+                    GgField {
+                        id: navDraftField
+                        width: parent.width
+                        placeholderText: root.navPlaces.length < 1
+                            ? "START  (enter)"
+                            : (root.navPlaces.length === 1 ? "END  (enter)" : "NEXT PLACE  (enter · goes between)")
+                        text: root.navDraft
+                        onTextChanged: root.navDraft = text
+                        Keys.onReturnPressed: root.commitNavPlace()
+                        Keys.onEnterPressed: root.commitNavPlace()
+                    }
+                    Row {
+                        spacing: 6
+                        Repeater {
+                            model: [
+                                {label: "GPS", action: "gps"},
+                                {label: "ADD", action: "stop"},
+                                {label: "ROUTE", action: "route"},
+                                {label: "CLEAR", action: "clear"}
+                            ]
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: navBtnLabel.implicitWidth + 12
+                                height: 22
+                                color: navBtnHit.containsMouse ? "#2a2a2a" : "#202020"
+                                border.color: navBtnHit.containsMouse ? "#8a8a8a" : root.frameBorder
+                                border.width: 1
+                                radius: 4
+                                antialiasing: true
+                                Text {
+                                    id: navBtnLabel
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    color: root.text
+                                    font.family: "monospace"
+                                    font.pixelSize: 9
+                                }
+                                MouseArea {
+                                    id: navBtnHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (modelData.action === "gps") {
+                                            if (root.navPlaces.length === 0
+                                                    || String(root.navPlaces[0]).toLowerCase() !== "gps")
+                                                root.navPlaces = ["GPS"].concat(root.navPlaces)
+                                            overviewGlobe.locateGps()
+                                        } else if (modelData.action === "stop") {
+                                            root.commitNavPlace()
+                                        } else if (modelData.action === "route") {
+                                            root.runNavRoute()
+                                        } else {
+                                            root.clearNav()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Flickable {
+                    visible: !root.navMode && root.selectedEvent
+                    anchors.fill: parent
+                    clip: true
+                    contentWidth: width
+                    contentHeight: detailColumn.height
+                    Column {
+                        id: detailColumn
+                        width: parent.width
+                        spacing: 5
+                        Text {
+                            width: parent.width
+                            text: root.selectedEvent ? String(root.selectedEvent.title || "") : ""
+                            color: root.ink
+                            wrapMode: Text.WordWrap
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                            style: Text.Outline
+                            styleColor: "#05070c"
+                        }
+                        Text {
+                            width: parent.width
+                            text: root.selectedEvent
+                                ? String(root.selectedEvent.source || "")
+                                    + " · "
+                                    + String(root.selectedEvent.kind || "").toUpperCase()
+                                : ""
+                            color: root.ledgerGold
+                            font.family: "monospace"
+                            font.pixelSize: 9
+                            style: Text.Outline
+                            styleColor: "#05070c"
+                        }
+                        Image {
+                            visible: root.selectedEvent && (root.selectedEvent.photo || root.selectedEvent.media_url)
+                            width: parent.width
+                            height: visible ? 132 : 0
+                            source: root.selectedEvent
+                                ? String(root.selectedEvent.photo || root.selectedEvent.media_url || "")
+                                : ""
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                        }
+                        Repeater {
+                            model: root.eventFacts(root.selectedEvent)
+                            Text {
+                                required property string modelData
+                                width: detailColumn.width
+                                text: modelData
+                                color: root.text
+                                wrapMode: Text.WordWrap
+                                font.family: "monospace"
+                                font.pixelSize: 10
+                            }
+                        }
+                        Text {
+                            width: parent.width
+                            visible: root.selectedEvent
+                                && root.selectedEvent.kind !== "aircraft"
+                                && root.selectedEvent.kind !== "cameras"
+                                && String(root.selectedEvent.summary || "") !== ""
+                            text: root.selectedEvent ? String(root.selectedEvent.summary || "") : ""
+                            color: root.text
+                            wrapMode: Text.WordWrap
+                            font.family: "monospace"
+                            font.pixelSize: 10
+                        }
+                    }
+                }
+            }
+        }
+
+        Item {
+            id: globeHud
+            visible: root.page === "OVERVIEW" || root.page === "MAP"
+            anchors.left: parent.left
+            anchors.bottom: parent.bottom
+            width: 280
+            height: 52
+            Column {
+                spacing: 4
+                Row {
+                    spacing: 6
+                    Repeater {
+                        model: [
+                            {label: "3D", mode: "globe"},
+                            {label: "2D", mode: "mercator"},
+                            {label: "RESET", mode: "reset"},
+                            {label: "NAV", mode: "nav"}
+                        ]
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: hudBtnText.implicitWidth + 16
+                            height: 24
+                            color: hudBtnHit.containsMouse ? "#202020" : "#181818cc"
+                            border.color: (
+                                (modelData.mode === "globe" && !(overviewGlobe.savedView && overviewGlobe.savedView.projection === "mercator"))
+                                || (modelData.mode === "mercator" && overviewGlobe.savedView && overviewGlobe.savedView.projection === "mercator")
+                                || (modelData.mode === "nav" && root.navMode)
+                            ) ? root.ledgerGold : root.frameBorder
+                            border.width: 1
+                            radius: 4
+                            antialiasing: true
+                            Text {
+                                id: hudBtnText
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                color: parent.border.color === root.ledgerGold ? root.ledgerGold : root.text
+                                font.family: "monospace"
+                                font.pixelSize: 10
+                            }
+                            MouseArea {
+                                id: hudBtnHit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (modelData.mode === "reset")
+                                        overviewGlobe.resetView()
+                                    else if (modelData.mode === "nav")
+                                        root.openNav()
+                                    else
+                                        overviewGlobe.setProjection(modelData.mode)
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: (
+                        overviewGlobe.savedView && overviewGlobe.savedView.projection === "mercator"
+                            ? "2D MAP"
+                            : "3D GLOBE"
+                    )
+                    + " · "
+                    + root.number(overviewGlobe.pointCount)
+                    + " EVENTS · ZOOM "
+                    + (overviewGlobe.savedView && overviewGlobe.savedView.zoom !== undefined
+                        ? Number(overviewGlobe.savedView.zoom).toFixed(1)
+                        : "—")
+                    color: root.muted
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                    style: Text.Outline
+                    styleColor: "#05070c"
                 }
             }
         }
 
         StackLayout {
             id: pages
+            visible: root.page !== "OVERVIEW" && root.page !== "MAP"
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: header.bottom
+            anchors.top: parent.top
             anchors.bottom: parent.bottom
             currentIndex: Math.max(0, root.nav.indexOf(root.page))
 
             Item {
                 id: overviewPage
                 objectName: "osintOverviewPage"
-
-                Row {
-                    id: metricRow
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    height: 78
-                    spacing: 8
-
-                    Repeater {
-                        model: [
-                            {key: "aircraft", label: "AIRCRAFT", color: root.signalBlue},
-                            {key: "earthquakes", label: "EARTHQUAKES", color: root.ledgerGold},
-                            {key: "fires", label: "FIRES", color: root.signalRed},
-                            {key: "satellites", label: "SATELLITES", color: root.signalViolet},
-                            {key: "news", label: "NEWS", color: root.text}
-                        ]
-                        delegate: TmogCard {
-                            required property var modelData
-                            width: (metricRow.width - 32) / 5
-                            height: metricRow.height
-                            leftLegend: String(modelData.label)
-                            borderColor: root.frameBorder
-                            fill: root.panel
-                            Text {
-                                anchors.left: parent.left
-                                anchors.leftMargin: 5
-                                anchors.bottom: parent.bottom
-                                anchors.bottomMargin: 5
-                                text: root.number(root.count(String(modelData.key)))
-                                color: modelData.color
-                                font.family: "monospace"
-                                font.pixelSize: 22
-                            }
-                            Text {
-                                anchors.right: parent.right
-                                anchors.rightMargin: 5
-                                anchors.bottom: parent.bottom
-                                anchors.bottomMargin: 7
-                                text: root.statusText()
-                                color: root.muted
-                                font.family: "monospace"
-                                font.pixelSize: 9
-                            }
-                        }
-                    }
-                }
-
-                Row {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: metricRow.bottom
-                    anchors.topMargin: 10
-                    anchors.bottom: parent.bottom
-                    spacing: 10
-
-                    TmogCard {
-                        id: overviewMapCard
-                        width: parent.width * 0.66
-                        height: parent.height
-                        leftLegend: "MAP · GLOBAL POINTS"
-                        rightLegend: String(root.payload.focus && root.payload.focus.label || "GLOBAL")
-                        borderColor: root.frameBorder
-                        fill: root.panel
-                        Item {
-                            id: overviewGlobeSlot
-                            anchors.fill: parent
-                            OsintGlobe {
-                                id: overviewGlobe
-                                parent: root.page === "MAP" ? mapGlobeSlot : overviewGlobeSlot
-                                anchors.fill: parent
-                                visible: root.page === "OVERVIEW" || root.page === "MAP"
-                                points: root.mapPoints()
-                                muted: root.muted
-                                signalBlue: root.signalBlue
-                                ledgerGold: root.ledgerGold
-                                panel: root.panel
-                            }
-                        }
-                    }
-
-                    TmogCard {
-                        id: intelCard
-                        width: parent.width * 0.34 - 10
-                        height: parent.height
-                        leftLegend: "INTELLIGENCE STREAM"
-                        rightLegend: root.navMode ? "NAV" : (root.selectedEvent ? "DETAIL" : "SELECT")
-                        borderColor: root.frameBorder
-                        fill: root.panel
-                        ListView {
-                            id: overviewNewsList
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            anchors.bottom: detailPane.top
-                            clip: true
-                            spacing: 4
-                            model: root.streamRows()
-                            delegate: Item {
-                                required property var modelData
-                                width: overviewNewsList.width
-                                height: 50
-                                Rectangle {
-                                    anchors.fill: parent
-                                    color: root.selectedEvent && root.selectedEvent.id === modelData.id
-                                        ? "#2a323c"
-                                        : (newsHit.containsMouse ? "#20262d" : "transparent")
-                                    border.color: "#2c3035"
-                                    border.width: 1
-                                }
-                                Text {
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.leftMargin: 7
-                                    anchors.rightMargin: 7
-                                    anchors.topMargin: 5
-                                    text: String(modelData.title || "UNTITLED")
-                                    color: root.text
-                                    font.family: "monospace"
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                }
-                                Text {
-                                    anchors.left: parent.left
-                                    anchors.bottom: parent.bottom
-                                    anchors.leftMargin: 7
-                                    anchors.bottomMargin: 5
-                                    text: String(modelData.kind || "news").toUpperCase()
-                                        + " · "
-                                        + (modelData.lat !== undefined ? "MAP PIN" : "NO GEO")
-                                        + " · "
-                                        + root.shortTime(modelData.time || modelData.published)
-                                    color: Number(modelData.risk_score || 0) >= 7 ? root.signalRed : root.muted
-                                    font.family: "monospace"
-                                    font.pixelSize: 9
-                                }
-                                MouseArea {
-                                    id: newsHit
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.focusGlobe(modelData)
-                                }
-                            }
-                        }
-                        Item {
-                            id: detailPane
-                            objectName: "osintSharedPane"
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: (root.navMode || root.selectedEvent)
-                                ? Math.min(root.navMode ? 360 : 248, parent.height * 0.72)
-                                : 36
-                            Rectangle {
-                                anchors.fill: parent
-                                color: root.navMode ? "#1a1a1a" : "#181818"
-                                border.color: "#4a4a4a"
-                                border.width: 1
-                            }
-                            Text {
-                                visible: !root.navMode && !root.selectedEvent
-                                anchors.centerIn: parent
-                                text: "SELECT A ROW  ·  OR NAV"
-                                color: root.muted
-                                font.family: "monospace"
-                                font.pixelSize: 9
-                            }
-                            Column {
-                                visible: root.navMode
-                                anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 5
-                                Text {
-                                    width: parent.width
-                                    text: root.navMeta !== ""
-                                        ? root.navMeta
-                                        : "TYPE A PLACE + ENTER · FIRST START · LAST END · DRAG TO REORDER"
-                                    color: root.muted
-                                    wrapMode: Text.WordWrap
-                                    font.family: "monospace"
-                                    font.pixelSize: 9
-                                }
-                                ListView {
-                                    id: navPlaceList
-                                    width: parent.width
-                                    height: Math.min(25 * Math.max(root.navPlaces.length, 0), 175)
-                                    clip: true
-                                    visible: root.navPlaces.length > 0
-                                    model: root.navPlaces
-                                    spacing: 3
-                                    delegate: Item {
-                                        id: placeRow
-                                        required property string modelData
-                                        required property int index
-                                        width: navPlaceList.width
-                                        height: 22
-                                        z: placeDrag.drag.active ? 2 : 0
-                                        Rectangle {
-                                            id: placeChip
-                                            width: parent.width
-                                            height: 22
-                                            color: placeDrag.drag.active ? "#2a2a2a" : "#202020"
-                                            border.color: "#5a5a5a"
-                                            border.width: 1
-                                            Text {
-                                                anchors.left: parent.left
-                                                anchors.leftMargin: 8
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                text: "⋮⋮  " + placeRow.modelData
-                                                color: root.text
-                                                font.family: "monospace"
-                                                font.pixelSize: 10
-                                            }
-                                            Text {
-                                                anchors.right: parent.right
-                                                anchors.rightMargin: 8
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                text: "✕"
-                                                color: root.muted
-                                                font.family: "monospace"
-                                                font.pixelSize: 10
-                                            }
-                                            MouseArea {
-                                                id: placeDrag
-                                                anchors.fill: parent
-                                                anchors.rightMargin: 22
-                                                hoverEnabled: true
-                                                cursorShape: Qt.OpenHandCursor
-                                                drag.target: placeChip
-                                                drag.axis: Drag.YAxis
-                                                onReleased: {
-                                                    var localY = placeChip.mapToItem(navPlaceList.contentItem, 0, placeChip.height / 2).y
-                                                    var target = Math.round(localY / 25)
-                                                    if (target < 0)
-                                                        target = 0
-                                                    if (target > root.navPlaces.length - 1)
-                                                        target = root.navPlaces.length - 1
-                                                    root.moveNavPlace(placeRow.index, target)
-                                                    placeChip.x = 0
-                                                    placeChip.y = 0
-                                                }
-                                            }
-                                            MouseArea {
-                                                anchors.right: parent.right
-                                                width: 22
-                                                height: parent.height
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.removeNavPlace(placeRow.index)
-                                            }
-                                        }
-                                    }
-                                }
-                                GgField {
-                                    id: navDraftField
-                                    width: parent.width
-                                    placeholderText: root.navPlaces.length < 1
-                                        ? "START  (enter)"
-                                        : (root.navPlaces.length === 1 ? "END  (enter)" : "NEXT PLACE  (enter · goes between)")
-                                    text: root.navDraft
-                                    onTextChanged: root.navDraft = text
-                                    Keys.onReturnPressed: root.commitNavPlace()
-                                    Keys.onEnterPressed: root.commitNavPlace()
-                                }
-                                Row {
-                                    spacing: 6
-                                    Repeater {
-                                        model: [
-                                            {label: "GPS", action: "gps"},
-                                            {label: "ADD", action: "stop"},
-                                            {label: "ROUTE", action: "route"},
-                                            {label: "CLEAR", action: "clear"}
-                                        ]
-                                        delegate: Rectangle {
-                                            required property var modelData
-                                            width: navBtnLabel.implicitWidth + 12
-                                            height: 22
-                                            color: navBtnHit.containsMouse ? "#2a2a2a" : "#202020"
-                                            border.color: navBtnHit.containsMouse ? "#8a8a8a" : "#5a5a5a"
-                                            border.width: 1
-                                            Text {
-                                                id: navBtnLabel
-                                                anchors.centerIn: parent
-                                                text: modelData.label
-                                                color: root.text
-                                                font.family: "monospace"
-                                                font.pixelSize: 9
-                                            }
-                                            MouseArea {
-                                                id: navBtnHit
-                                                anchors.fill: parent
-                                                hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    if (modelData.action === "gps") {
-                                                        if (root.navPlaces.length === 0
-                                                                || String(root.navPlaces[0]).toLowerCase() !== "gps")
-                                                            root.navPlaces = ["GPS"].concat(root.navPlaces)
-                                                        overviewGlobe.locateGps()
-                                                    } else if (modelData.action === "stop") {
-                                                        root.commitNavPlace()
-                                                    } else if (modelData.action === "route") {
-                                                        root.runNavRoute()
-                                                    } else {
-                                                        root.clearNav()
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Column {
-                                visible: !root.navMode && root.selectedEvent
-                                anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 5
-                                Text {
-                                    width: parent.width
-                                    text: root.selectedEvent ? String(root.selectedEvent.title || "") : ""
-                                    color: root.ink
-                                    wrapMode: Text.WordWrap
-                                    font.family: "monospace"
-                                    font.pixelSize: 11
-                                }
-                                Text {
-                                    width: parent.width
-                                    text: root.selectedEvent
-                                        ? String(root.selectedEvent.source || "")
-                                            + " · "
-                                            + String(root.selectedEvent.kind || "")
-                                            + (root.selectedEvent.lat !== undefined
-                                                ? " · " + root.number(root.selectedEvent.lat, 2)
-                                                    + ", " + root.number(root.selectedEvent.lon, 2)
-                                                : "")
-                                        : ""
-                                    color: root.ledgerGold
-                                    font.family: "monospace"
-                                    font.pixelSize: 9
-                                }
-                                Text {
-                                    width: parent.width
-                                    text: root.selectedEvent ? String(root.selectedEvent.summary || "") : ""
-                                    color: root.text
-                                    wrapMode: Text.WordWrap
-                                    font.family: "monospace"
-                                    font.pixelSize: 10
-                                }
-                                Text {
-                                    width: parent.width
-                                    text: root.selectedEvent && root.selectedEvent.url
-                                        ? "CLICK COPIES SOURCE URL"
-                                        : ""
-                                    color: root.muted
-                                    font.family: "monospace"
-                                    font.pixelSize: 9
-                                }
-                            }
-                            MouseArea {
-                                visible: !root.navMode && root.selectedEvent
-                                anchors.fill: parent
-                                onClicked: {
-                                    if (root.selectedEvent && root.selectedEvent.url)
-                                        root.copyText(root.selectedEvent.url)
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             Item {
                 id: mapPage
                 objectName: "osintMapPage"
-                Row {
-                    anchors.fill: parent
-                    spacing: 10
-                    TmogCard {
-                        width: parent.width * 0.75
-                        height: parent.height
-                        leftLegend: "EVENT MAP"
-                        rightLegend: root.number(root.mapPoints().length) + " POINTS"
-                        borderColor: root.frameBorder
-                        fill: root.panel
-                        Item {
-                            id: mapGlobeSlot
-                            anchors.fill: parent
-                        }
-                        Item {
-                            anchors.fill: parent
-                            Row {
-                                anchors.left: parent.left
-                                anchors.bottom: parent.bottom
-                                anchors.bottomMargin: 10
-                                anchors.leftMargin: 10
-                                spacing: 12
-                                Repeater {
-                                    model: [
-                                        {label: "AIRCRAFT", color: root.signalBlue},
-                                        {label: "SEISMIC", color: root.ledgerGold},
-                                        {label: "FIRES", color: root.signalRed},
-                                        {label: "WATCHLIST", color: root.signalViolet},
-                                        {label: "ALPR PINS", color: "#6ec4d8"}
-                                    ]
-                                    delegate: Row {
-                                        required property var modelData
-                                        spacing: 5
-                                        Rectangle {
-                                            width: 7
-                                            height: 7
-                                            radius: 4
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            color: modelData.color
-                                        }
-                                        Text {
-                                            text: modelData.label
-                                            color: root.muted
-                                            font.family: "monospace"
-                                            font.pixelSize: 9
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    TmogCard {
-                        width: parent.width * 0.25 - 10
-                        height: parent.height
-                        leftLegend: "LAYER COUNTS"
-                        borderColor: root.frameBorder
-                        fill: root.panel
+                TmogCard {
+                    visible: false
+                    leftLegend: "EVENT MAP"
+                    rightLegend: root.number(root.renderedPointCount()) + " POINTS"
+                    borderColor: root.frameBorder
+                    fill: root.panel
+                }
+                TmogCard {
+                    visible: false
+                    leftLegend: "LAYER COUNTS"
+                    borderColor: root.frameBorder
+                    fill: root.panel
                         Column {
                             anchors.fill: parent
                             spacing: 8
@@ -1150,13 +1447,6 @@ Item {
                                         font.family: "monospace"
                                         font.pixelSize: 11
                                     }
-                                    Rectangle {
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.bottom: parent.bottom
-                                        height: 1
-                                        color: "#2c3035"
-                                    }
                                 }
                             }
                             Text {
@@ -1169,7 +1459,6 @@ Item {
                             }
                         }
                     }
-                }
             }
 
             Item {
@@ -1292,7 +1581,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.copyText(modelData.callsign || modelData.id)
+                                    onClicked: {
+                                        root.page = "OVERVIEW"
+                                        root.selectEvent(root.asEvent(modelData, "aircraft"), true)
+                                    }
                                 }
                             }
                         }
@@ -1353,8 +1645,6 @@ Item {
                                 Rectangle {
                                     anchors.fill: parent
                                     color: quakeHit.containsMouse ? "#20262d" : "transparent"
-                                    border.color: "#2c3035"
-                                    border.width: 1
                                 }
                                 Text {
                                     anchors.left: parent.left
@@ -1391,7 +1681,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.copyText(modelData.url)
+                                    onClicked: {
+                                        root.page = "OVERVIEW"
+                                        root.selectEvent(root.asEvent(modelData, "earthquakes"), true)
+                                    }
                                 }
                             }
                         }
@@ -1455,8 +1748,6 @@ Item {
                                 Rectangle {
                                     anchors.fill: parent
                                     color: fireHit.containsMouse ? "#20262d" : "transparent"
-                                    border.color: "#2c3035"
-                                    border.width: 1
                                 }
                                 Text {
                                     anchors.left: parent.left
@@ -1485,7 +1776,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.copyText(modelData.url)
+                                    onClicked: {
+                                        root.page = "OVERVIEW"
+                                        root.selectEvent(root.asEvent(modelData, "fires"), true)
+                                    }
                                 }
                             }
                         }
@@ -1625,9 +1919,8 @@ Item {
                             height: 58
                             Rectangle {
                                 anchors.fill: parent
-                                color: newsPageHit.containsMouse ? "#20262d" : "#171717"
-                                border.color: "#2c3035"
-                                border.width: 1
+                                color: newsPageHit.containsMouse ? "#20262d" : "transparent"
+                                radius: 3
                             }
                             Text {
                                 anchors.left: parent.left
@@ -1671,7 +1964,10 @@ Item {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.copyText(modelData.url)
+                                onClicked: {
+                                    root.page = "OVERVIEW"
+                                    root.selectEvent(root.asEvent(modelData, "news"), true)
+                                }
                             }
                         }
                     }
@@ -1736,7 +2032,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.copyText(modelData.label)
+                                    onClicked: {
+                                        root.page = "OVERVIEW"
+                                        root.selectEvent(root.asEvent(modelData, "conflicts"), true)
+                                    }
                                 }
                             }
                         }
@@ -1791,8 +2090,8 @@ Item {
                     TmogCard {
                         width: parent.width
                         height: 78
-                        leftLegend: "ALPR LOCATION PINS"
-                        rightLegend: "OSM / DEFLOCK SAMPLE"
+                        leftLegend: "PUBLIC CCTV"
+                        rightLegend: "SNAPSHOT FEEDS"
                         borderColor: root.frameBorder
                         fill: root.panel
                         Text {
@@ -1800,7 +2099,7 @@ Item {
                             anchors.leftMargin: 6
                             anchors.bottom: parent.bottom
                             anchors.bottomMargin: 8
-                            text: root.number(root.count("cameras")) + " sampled pins · locations only · no live video"
+                            text: root.number(root.count("cameras")) + " public cameras · snapshot on click"
                             color: "#6ec4d8"
                             font.family: "monospace"
                             font.pixelSize: 13
@@ -1861,7 +2160,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.copyText(modelData.url)
+                                    onClicked: {
+                                        root.page = "OVERVIEW"
+                                        root.selectEvent(root.asEvent(modelData, "cameras"), true)
+                                    }
                                 }
                             }
                         }
@@ -1889,9 +2191,8 @@ Item {
                                 height: 44
                                 Rectangle {
                                     anchors.fill: parent
-                                    color: sourceHit.containsMouse ? "#20262d" : "#171717"
-                                    border.color: "#2c3035"
-                                    border.width: 1
+                                    color: sourceHit.containsMouse ? "#20262d" : "transparent"
+                                    radius: 3
                                 }
                                 Rectangle {
                                     anchors.left: parent.left
@@ -2019,13 +2320,6 @@ Item {
                                         color: root.muted
                                         font.family: "monospace"
                                         font.pixelSize: 10
-                                    }
-                                    Rectangle {
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.bottom: parent.bottom
-                                        height: 1
-                                        color: "#2c3035"
                                     }
                                 }
                             }

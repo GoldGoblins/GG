@@ -28,6 +28,16 @@ def main() -> int:
 
     app = QCoreApplication.instance() or QCoreApplication([])
     host = ChatSurfaceHost()
+    for game_slot in (
+        "gameEnginePresentationMode",
+        "gameEngineGraphicsFailure",
+        "gameEngineDosCommand",
+        "gameEngineTrade",
+        "gameEngineVendorBuy",
+        "gameEngineVendorSell",
+    ):
+        if not hasattr(host, game_slot):
+            raise AssertionError("GAME ENGINE presentation slot missing: " + game_slot)
     chunks: list[str] = []
     host.chatTerminalOutput.connect(lambda _i, text: chunks.append(text))
     if not host.startChatTerminal("gg-term-contract"):
@@ -264,6 +274,10 @@ def main() -> int:
         raise AssertionError("tmog host slots missing")
     if "osintSnapshot" not in src or "osintRefresh" not in src:
         raise AssertionError("osint host slots missing")
+    if "osintSaveUi" not in src or "osintLoadUi" not in src:
+        raise AssertionError("osint ui persist slots missing")
+    if "osintLookupFlight" not in src:
+        raise AssertionError("osint flight lookup slot missing")
     if "marketplaceStatus" not in src or "marketplaceList" not in src:
         raise AssertionError("marketplace host slots missing")
     if "marketplacePaperBuy" not in src or "marketplaceDelist" not in src:
@@ -288,8 +302,15 @@ def main() -> int:
         raise AssertionError("host queue drifted from walker")
     if "qmlLiveReload" not in src:
         raise AssertionError("QML live reload missing")
-    if "clearComponentCache" not in src:
-        raise AssertionError("QML cache clear missing")
+    reload_fn = src[
+        src.index("def _emit_qml_reload") : src.index(
+            "def _qml_reload_safety_barrier"
+        )
+    ]
+    if "self._qml_reload_safety_barrier()" not in reload_fn:
+        raise AssertionError("QML reload safety barrier missing")
+    if "qmlLiveReload.emit()" not in reload_fn:
+        raise AssertionError("QML live reload signal missing")
     if "restartDesktop" not in src:
         raise AssertionError("manual desktop restart missing")
     if "os.execv" in src or "_reexec_desktop" in src:

@@ -21,9 +21,9 @@ SCHEMA = "gg.ai-desktop.omni-gpt-profiles.v1"
 DEFAULT_ROOT = Path(
     os.environ.get(
         "GG_GPT_KNOWLEDGE_ROOT",
-        "/home/GG/GG-KNOWLEDGE/web-gpts",
+        str(Path.home() / "GG-KNOWLEDGE" / "web-gpts"),
     )
-)
+).expanduser()
 PROJECT_INDEX = Path(__file__).resolve().parents[1] / "OMNI-GPT-PROFILES.md"
 MAX_SOURCE_BYTES = 1_048_576
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ-]{3,}", re.UNICODE)
@@ -305,11 +305,19 @@ def build_context(
         + "]"
         for record in available
     )
+    try:
+        from backend.system_one_contract import decide_turn, format_compact
+
+        system_one_block = format_compact(decide_turn(user_text))
+    except Exception:
+        system_one_block = ""
     chunks = [
         "[GG OMNIGPT PROFILE LAYER]",
         "schema=" + SCHEMA,
         "default_lens=GG Idékompassen (always active)",
     ]
+    if include_registry and system_one_block:
+        chunks.append(system_one_block)
     if include_registry:
         chunks.extend(
             [
@@ -348,6 +356,7 @@ def build_context(
     except Exception:
         desk_text = (
             "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
+            "parallel_execution=BOUNDED_ADAPTIVE_DAG\n"
             "Apply every live seat to this same task now.\n[/SAME_TASK_DESK]"
         )
     try:
@@ -396,6 +405,8 @@ def build_context(
         )
         chunks.append(block)
         remaining -= len(block) + 1
+    if system_one_block and not include_registry:
+        chunks.append(system_one_block)
 
     def _join(desk: str, memory: str) -> str:
         parts = list(chunks) + [apply_line, desk]
@@ -422,6 +433,7 @@ def build_context(
             if keep < 80:
                 desk_text = (
                     "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
+                    "parallel_execution=BOUNDED_ADAPTIVE_DAG\n"
                     "[/SAME_TASK_DESK]"
                 )
             else:

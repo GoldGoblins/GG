@@ -1,0 +1,8 @@
+{
+  "schema": "gg.authored.world-kit.v1",
+  "asset_id": "gg-clay-mangrove",
+  "kind": "MANGROVE",
+  "style_id": "GG_CLAY_LOW_POLY",
+  "source_policy": "ORIGINAL_GEOMETRY_REFERENCE_INSPIRED_NO_SOURCE_COPY",
+  "mesh_objects": 8
+}

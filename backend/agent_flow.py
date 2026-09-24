@@ -21,6 +21,7 @@ SCHEMA = "gg.agent-flow.v1"
 ACTION_AUTHORITY = "NONE"
 PARALLEL_AGENT_BRAIN = "FORBIDDEN"
 FLAT_MODEL_COMMAND_LOOP = "FORBIDDEN"
+PARALLEL_EXECUTION = "BOUNDED_ADAPTIVE_DAG"
 
 STAGES = ("ASK", "PLAN", "TOOLS", "BUILD", "REFLECT", "GATE")
 ROLES = {
@@ -73,6 +74,15 @@ def empty() -> dict[str, Any]:
         },
         "user_gates": [],
         "parallel_agent_brain": PARALLEL_AGENT_BRAIN,
+        "diamond": {
+            "fan_out": "INDEPENDENT_JOBS",
+            "reduce": "CODE",
+            "verify": "TEST",
+            "synthesize": "ONE_MOTOR",
+        },
+        "verifier_context": "FRESH",
+        "fake_edge_test": "Does the next step actually read the previous output?",
+        "parallel_execution": PARALLEL_EXECUTION,
         "flat_model_command_loop": FLAT_MODEL_COMMAND_LOOP,
         "model_agents": False,
         "action_authority": ACTION_AUTHORITY,
@@ -183,6 +193,8 @@ def run(text: str) -> dict[str, Any]:
         "user_gates": user_gates,
         "reviewer_is_author": False,
         "parallel_agent_brain": PARALLEL_AGENT_BRAIN,
+        "parallel_execution": PARALLEL_EXECUTION,
+        "execution": dict(board.get("execution") or {}),
         "flat_model_command_loop": FLAT_MODEL_COMMAND_LOOP,
         "model_agents": False,
         "action_authority": ACTION_AUTHORITY,

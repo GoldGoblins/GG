@@ -214,6 +214,9 @@ with tempfile.TemporaryDirectory() as d:
   host._gpt_session_id = ''
   host._start_gpt_tui();proc=host._sessions['ws.tui.gpt']['proc']
   assert 'developer_instructions="hidden profile"' in proc.args
+  assert '--dangerously-bypass-approvals-and-sandbox' in proc.args
+  assert '--sandbox' not in proc.args
+  assert '--ask-for-approval' not in proc.args
   assert host._gpt_sessions_root == DESKTOP_CODEX_SESSIONS
   assert host._gpt_capture_roots == (DESKTOP_CODEX_SESSIONS, CODEX_SESSIONS)
   host._start_gpt_tui();assert host._sessions['ws.tui.gpt']['proc'] is proc
@@ -253,6 +256,9 @@ with tempfile.TemporaryDirectory() as d:
   assert resume_host._gpt_capture_roots == (shared_root,)
   assert existing in resume_host._gpt_capture_before
   resume_proc=resume_host._sessions['ws.tui.gpt']['proc']
+  assert '--dangerously-bypass-approvals-and-sandbox' in resume_proc.args
+  assert '--sandbox' not in resume_proc.args
+  assert '--ask-for-approval' not in resume_proc.args
   resume_host._close('ws.tui.gpt')
   resume_proc.wait(timeout=3)
  resume_host._gpt_grid=None;resume_host.shutdown()

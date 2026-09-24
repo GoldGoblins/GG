@@ -18,6 +18,24 @@ Item {
     property string editorSourceName: ""
     property string editorLanguage: ""
     property string editorBaseSha256: ""
+    property bool liveFeedbackEnabled: true
+    property string liveAidAnalysisSourceText: ""
+    property int editorRevision: 0
+    property int editorLine: 1
+    property int editorColumn: 1
+    property string editorFeedbackState: "IDLE"
+    property string lastEditorCheck: "NOT RUN"
+    property bool externalChangePending: false
+    property string externalChangePath: ""
+    property string externalChangeText: ""
+    property string externalChangeKind: ""
+    readonly property bool codeAuthoringActive:
+        root.editorLoaded
+        && root.currentObjectType === "CODE_FILE"
+        && root.currentObjectProvenance !== "SYNTHETIC_UI_FIXTURE"
+    readonly property bool codeSaveAvailable:
+        root.currentObjectType === "CODE_FILE"
+        && root.currentObjectProvenance === "REAL_UI_STATE"
     readonly property string editorText: codeEditor.text
     property string liveAidState: "IDLE"
     property var liveAidDiagnostics: []
@@ -82,6 +100,11 @@ Item {
         + "//** /multiline    Toggle multiline input. **//\n"
         + "//** /feedback X   Send feedback to the active motor. **//\n"
         + "//** /exit         Close the active TUI session. **//\n"
+        + "//** /view X       Open a named GG workbench surface. **//\n"
+        + "//** /engine X     Select the active chat motor. **//\n"
+        + "//** /settings X   Open a settings module. **//\n"
+        + "//** /extension X  List, enable or disable a built-in contribution. **//\n"
+        + "//** /quickopen    Search workspace objects and settings. **//\n"
         + "//** This is helper text. It is stripped when a scratch file is saved. **//\n\n"
 
     function stripSlashCommandTemplate(body) {
@@ -89,6 +112,166 @@ Item {
         return text.indexOf(root.slashCommandTemplate) === 0
             ? text.slice(root.slashCommandTemplate.length)
             : text
+    }
+
+    function updateEditorCursor() {
+        if (!codeEditor)
+            return
+
+        var position = Math.max(
+            0,
+            Math.min(codeEditor.cursorPosition, codeEditor.text.length)
+        )
+        var before = codeEditor.text.slice(0, position)
+        var lastBreak = before.lastIndexOf("\n")
+        root.editorLine = before.split("\n").length
+        root.editorColumn = position - lastBreak
+    }
+
+    function scheduleLiveAidAnalysis() {
+        if (!root.liveFeedbackEnabled)
+            return
+        if (!root.editorLoaded)
+            return
+        if (root.liveAidBackend === null)
+            return
+        if (root.currentObjectProvenance !== "REAL_LOCAL_FILE")
+            return
+        root.editorFeedbackState = "QUEUED"
+        analysisTimer.restart()
+    }
+
+    function runCodeCheck() {
+        if (!root.codeAuthoringActive)
+            return
+
+        root.lastEditorCheck = "RUNNING"
+        root.editorFeedbackState = "CHECKING"
+
+        if (root.editorLanguage === "qml") {
+            root.requestLiveAidPreflight()
+            return
+        }
+
+        if (root.currentObjectProvenance !== "REAL_LOCAL_FILE") {
+            root.lastEditorCheck = "BUFFER"
+            root.editorFeedbackState = "BUFFER"
+            root.liveAidEvidenceSummary =
+                "SAFE CODE RUNNER · SAVE BUFFER OR OPEN A REAL SOURCE FILE"
+            return
+        }
+
+        root.liveAidEvidenceSummary =
+            "SAFE CODE RUNNER · LIVE AID ANALYSIS · NO EXECUTION"
+        root.requestLiveAidAnalysis()
+    }
+
+    function saveCodeBuffer() {
+        if (!root.codeSaveAvailable) {
+            root.liveAidEvidenceSummary =
+                "LOCAL FILE BUFFER · SAVE THROUGH CODEX OR TERMINAL"
+            return false
+        }
+        return root.saveScratchBuffer()
+    }
+
+    function clearExternalChange() {
+        root.externalChangePending = false
+        root.externalChangePath = ""
+        root.externalChangeText = ""
+        root.externalChangeKind = ""
+    }
+
+    function externalChangeMatchesCurrent(path, kind) {
+        var p = String(path || "")
+        var k = String(kind || "")
+
+        if (k === "site") {
+            return root.currentObjectType === "CODE_FILE"
+                && String(root.currentObjectId).indexOf(
+                    "ws.site.file."
+                ) === 0
+                && root.siteRelativePath.length > 0
+                && p.indexOf(root.siteRelativePath) >= 0
+        }
+
+        if (k === "scratch") {
+            return root.currentObjectType === "CODE_FILE"
+                && String(root.currentObjectId).indexOf(
+                    "ws.file.scratch."
+                ) === 0
+                && (
+                    p.indexOf(root.scratchFileName()) >= 0
+                    || p.indexOf("untitled.txt") >= 0
+                )
+        }
+
+        return false
+    }
+
+    function queueExternalFile(path, text, kind) {
+        var p = String(path || "")
+        var body = String(text || "")
+        var k = String(kind || "")
+
+        if (k.endsWith("-dir")) {
+            var currentDir =
+                (k === "site-dir" && root.hostKind === "SITE")
+                || (
+                    k === "scratch-dir"
+                    && String(root.currentObjectId).indexOf(
+                        "ws.file.scratch."
+                    ) === 0
+                )
+            if (!currentDir)
+                return root.applyExternalFile(p, body, k)
+            if (root.editorDirty) {
+                root.externalChangePending = true
+                root.externalChangePath = p
+                root.externalChangeText = body
+                root.externalChangeKind = k
+                root.liveAidEvidenceSummary =
+                    "EXTERNAL DIRECTORY CHANGE · BUFFER UNSAVED · "
+                    + "SYNC OR KEEP"
+                return
+            }
+            return root.applyExternalFile(p, body, k)
+        }
+
+        if (!root.externalChangeMatchesCurrent(p, k))
+            return root.applyExternalFile(p, body, k)
+
+        root.externalChangePath = p
+        root.externalChangeText = body
+        root.externalChangeKind = k
+        root.externalChangePending = true
+
+        if (!root.editorDirty)
+            externalChangeTimer.restart()
+        else
+            root.liveAidEvidenceSummary =
+                "EXTERNAL CHANGE · BUFFER UNSAVED · "
+                + "SYNC OR KEEP"
+    }
+
+    function applyQueuedExternalChange() {
+        if (!root.externalChangePending)
+            return false
+
+        var path = root.externalChangePath
+        var body = root.externalChangeText
+        var kind = root.externalChangeKind
+        root.clearExternalChange()
+        root.applyExternalFile(path, body, kind)
+        return true
+    }
+
+    function keepExternalBuffer() {
+        if (!root.externalChangePending)
+            return
+        root.clearExternalChange()
+        root.liveAidEvidenceSummary =
+            "EXTERNAL CHANGE · BUFFER KEPT · DISK VERSION IGNORED"
     }
 
     function contextSnapshot(maximumObjects) {
@@ -122,6 +305,23 @@ Item {
             "currentObjectId": workspaceObjects.count > 0
                 ? root.currentObjectId
                 : "",
+            "activeEditor": {
+                "title": String(root.currentObjectTitle || ""),
+                "sourcePath": String(root.currentObjectSourcePath || ""),
+                "sourceName": String(root.editorSourceName || ""),
+                "language": String(root.editorLanguage || ""),
+                "loaded": root.editorLoaded,
+                "dirty": root.editorDirty,
+                "revision": root.editorRevision,
+                "line": root.editorLine,
+                "column": root.editorColumn,
+                "selectedText": String(codeEditor.selectedText || ""),
+                "liveFeedback": root.liveFeedbackEnabled,
+                "liveAidState": String(root.liveAidState || ""),
+                "preflightState": String(root.preflightState || ""),
+                "diagnosticCount": root.liveAidDiagnostics.length,
+                "externalChangePending": root.externalChangePending
+            },
             "objects": objects
         }
     }
@@ -133,6 +333,13 @@ Item {
         root.editorSourceName = ""
         root.editorLanguage = ""
         root.editorBaseSha256 = ""
+        root.liveAidAnalysisSourceText = ""
+        root.editorRevision = 0
+        root.editorLine = 1
+        root.editorColumn = 1
+        root.editorFeedbackState = "IDLE"
+        root.lastEditorCheck = "NOT RUN"
+        root.clearExternalChange()
         root.liveAidState = "IDLE"
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary = ""
@@ -180,6 +387,7 @@ Item {
         root.editorDirty = false
         root.editorLoaded = true
         root.liveAidState = "QUEUED"
+        root.editorFeedbackState = "QUEUED"
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary =
             "DISK SHA · " + payload.source_sha256
@@ -195,7 +403,8 @@ Item {
         root.postDraftSourceText = ""
         root.postDraftGateReportSha256 = ""
         root.postDraftApplyingCandidate = false
-        analysisTimer.restart()
+        root.updateEditorCursor()
+        root.scheduleLiveAidAnalysis()
     }
 
     function requestLiveAidAnalysis() {
@@ -205,7 +414,12 @@ Item {
         if (root.liveAidBackend === null)
             return
 
+        if (root.currentObjectProvenance !== "REAL_LOCAL_FILE")
+            return
+
+        root.liveAidAnalysisSourceText = codeEditor.text
         root.liveAidState = "RUNNING"
+        root.editorFeedbackState = "RUNNING"
         root.liveAidBackend.analyze(
             root.currentObjectId,
             root.editorSourceName,
@@ -228,6 +442,8 @@ Item {
         root.preflightSourceText = codeEditor.text
         root.preflightState = "RUNNING"
         root.liveAidState = "PREFLIGHT"
+        root.editorFeedbackState = "CHECKING"
+        root.lastEditorCheck = "RUNNING"
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary =
             "QML GATE PREFLIGHT · RUNNING · "
@@ -348,6 +564,14 @@ Item {
     property bool chatBusy: false
     property string engineTarget: "GROK_TUI"
     property string hostKind: "CODE"
+    property bool keepGameEngine: false
+    onHostKindChanged: {
+        if (hostKind === "GAME_ENGINE")
+            keepGameEngine = true
+        if (root.hostKind !== "SITE")
+            root.sitePreviewFullscreen = false
+    }
+    property string workbenchExtensionsJson: "[]"
     property int shellNonce: 0
     property var pendingAdoptedView: null
     readonly property string webPaneSource:
@@ -519,6 +743,24 @@ Item {
         return false
     }
 
+    function quickOpenRows() {
+        var rows = []
+        for (var i = 0; i < workspaceObjects.count; ++i) {
+            var item = workspaceObjects.get(i)
+            if (!item || item.provenanceClass === "SYNTHETIC_UI_FIXTURE")
+                continue
+            var title = String(item.title || item.objectId || "OBJECT")
+            var path = String(item.sourcePath || "")
+            rows.push({
+                "id": "quick.object." + String(item.objectId || ""),
+                "label": title,
+                "category": String(item.objectType || "WORKSPACE"),
+                "description": path.length > 0 ? path : "@current workspace object"
+            })
+        }
+        return rows
+    }
+
     function boundObjectActivityState() {
         if (root.currentObjectProvenance === "SYNTHETIC_UI_FIXTURE")
             return "IDLE"
@@ -635,7 +877,35 @@ Item {
         return true
     }
 
+    function hostKindEnabled(kind) {
+        var wanted = String(kind || "").toUpperCase()
+        if (!wanted.length)
+            return true
+        var rows = []
+        try {
+            var parsed = JSON.parse(root.workbenchExtensionsJson || "[]")
+            rows = parsed instanceof Array ? parsed : []
+        } catch (err) {
+            rows = []
+        }
+        if (rows.length === 0)
+            return true
+        for (var i = 0; i < rows.length; ++i) {
+            var row = rows[i] || {}
+            if (String(row.hostKind || "").toUpperCase() === wanted)
+                return row.enabled !== false
+        }
+        return true
+    }
+
     function setHostKind(kind) {
+        var requestedKind = String(kind || "").toUpperCase()
+        if (!root.hostKindEnabled(requestedKind)) {
+            if (requestedKind !== "CODE")
+                root.setHostKind("CODE")
+            return
+        }
+        kind = requestedKind
         if (
             (kind === "WEB" || kind === "SITE")
             && root.scratchHost()
@@ -643,7 +913,9 @@ Item {
         )
             root.scratchHost().ensureWebEngine()
         root.hostKind = kind
-        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "OSINT" || kind === "QIP" || kind === "MEDIA" || kind === "DRAW" || kind === "GAME_ENGINE" || kind === "NODES" || kind === "FLOW")
+        if (kind === "GAME_ENGINE")
+            root.keepGameEngine = true
+        if (kind === "CRYPTO" || kind === "MARKETPLACE" || kind === "TMOG" || kind === "OSINT" || kind === "QIP" || kind === "MEDIA" || kind === "DRAW" || kind === "GAME_ENGINE" || kind === "NODES" || kind === "FLOW" || kind === "RESEARCH")
             return
         if (
             kind === "CODE"
@@ -762,6 +1034,8 @@ Item {
         root.editorSourceName = name
         root.editorBaseText = codeEditor.text
         root.editorDirty = false
+        root.clearExternalChange()
+        root.editorFeedbackState = "SAVED"
         root.liveAidEvidenceSummary = "SAVED · " + String(saved)
         return true
     }
@@ -812,6 +1086,8 @@ Item {
                     return false
                 root.editorBaseText = codeEditor.text
                 root.editorDirty = false
+                root.clearExternalChange()
+                root.editorFeedbackState = "SAVED"
                 root.liveAidEvidenceSummary = "SAVED AS · site:" + rel
                 return true
             }
@@ -1019,6 +1295,9 @@ Item {
         codeEditor.text = body
         root.editorDirty = false
         root.editorLoaded = true
+        root.editorFeedbackState = "SYNCED"
+        root.lastEditorCheck = "NOT RUN"
+        root.updateEditorCursor()
         root.webPageUrl = host.siteFileUrl(relative)
         if (root.sitePreviewRunning)
             root.applySitePreviewUrl()
@@ -1518,6 +1797,8 @@ Item {
             return false
         root.editorBaseText = codeEditor.text
         root.editorDirty = false
+        root.clearExternalChange()
+        root.editorFeedbackState = "SAVED"
         root.liveAidEvidenceSummary = "SAVED · site:" + root.siteRelativePath
         if (root.sitePreviewRunning) {
             root.sitePreviewNonce = root.sitePreviewNonce + 1
@@ -1559,6 +1840,9 @@ Item {
         codeEditor.text = body
         root.editorDirty = false
         root.editorLoaded = true
+        root.editorFeedbackState = "SYNCED"
+        root.lastEditorCheck = "NOT RUN"
+        root.updateEditorCursor()
         root.liveAidState = "IDLE"
         root.liveAidDiagnostics = []
         root.liveAidEvidenceSummary = "SCRATCH · " + name
@@ -1605,6 +1889,9 @@ Item {
             root.editorBaseText = body
             root.editorDirty = false
             root._applyingExternal = false
+            root.editorFeedbackState = "SYNCED"
+            root.lastEditorCheck = "STALE"
+            root.updateEditorCursor()
             if (root.sitePreviewRunning)
                 root.sitePreviewNonce = root.sitePreviewNonce + 1
             return
@@ -1624,6 +1911,9 @@ Item {
             root.editorBaseText = body
             root.editorDirty = false
             root._applyingExternal = false
+            root.editorFeedbackState = "SYNCED"
+            root.lastEditorCheck = "STALE"
+            root.updateEditorCursor()
         }
     }
 
@@ -1719,10 +2009,6 @@ Item {
     onCurrentObjectIdChanged: root.syncObjectActivities()
     onChatBusyChanged: root.syncObjectActivities()
     onEngineTargetChanged: root.syncObjectActivities()
-    onHostKindChanged: {
-        if (root.hostKind !== "SITE")
-            root.sitePreviewFullscreen = false
-    }
     onSettingsOpenChanged: {
         if (root.settingsOpen)
             root.sitePreviewFullscreen = false
@@ -1744,7 +2030,52 @@ Item {
         id: analysisTimer
         interval: 280
         repeat: false
-        onTriggered: root.requestLiveAidAnalysis()
+        onTriggered: {
+            if (root.liveFeedbackEnabled)
+                root.requestLiveAidAnalysis()
+        }
+    }
+
+    // Lightweight editor state stays responsive at the display cadence. The
+    // compiler/model work remains debounced in analysisTimer above.
+    Timer {
+        id: editorFrameTimer
+        interval: 16
+        repeat: true
+        running: root.editorLoaded
+        onTriggered: root.updateEditorCursor()
+    }
+
+    Timer {
+        id: externalChangeTimer
+        interval: 16
+        repeat: false
+        onTriggered: {
+            if (root.externalChangePending && !root.editorDirty)
+                root.applyQueuedExternalChange()
+        }
+    }
+
+    Shortcut {
+        sequence: "F5"
+        enabled: root.codeAuthoringActive
+        onActivated: root.runCodeCheck()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+S"
+        enabled: root.codeAuthoringActive && root.codeSaveAvailable
+        onActivated: root.saveCodeBuffer()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Shift+L"
+        enabled: root.codeAuthoringActive
+        onActivated: {
+            root.liveFeedbackEnabled = !root.liveFeedbackEnabled
+            if (root.liveFeedbackEnabled)
+                root.scheduleLiveAidAnalysis()
+        }
     }
 
     Timer {
@@ -1867,7 +2198,7 @@ Item {
         ignoreUnknownSignals: true
 
         function onWorkspaceFileChanged(path, text, kind) {
-            root.applyExternalFile(path, text, kind)
+            root.queueExternalFile(path, text, kind)
         }
     }
 
@@ -1884,8 +2215,23 @@ Item {
                 return
 
             var result = JSON.parse(payloadJson)
+
+            if (
+                root.liveAidAnalysisSourceText.length > 0
+                && codeEditor.text !== root.liveAidAnalysisSourceText
+            ) {
+                root.liveAidState = "QUEUED"
+                root.editorFeedbackState = "QUEUED"
+                root.liveAidEvidenceSummary =
+                    "LIVE AID RESULT STALE · BUFFER CHANGED"
+                root.scheduleLiveAidAnalysis()
+                return
+            }
+
             root.liveAidState = result.status || "UNKNOWN"
             root.liveAidDiagnostics = result.diagnostics || []
+            root.lastEditorCheck = "LIVE"
+            root.editorFeedbackState = result.status || "UNKNOWN"
             root.liveAidEvidenceSummary =
                 "EXECUTION READY · "
                 + String(result.execution_ready).toUpperCase()
@@ -1897,6 +2243,8 @@ Item {
                 return
 
             root.liveAidState = "BLOCKED"
+            root.editorFeedbackState = "BLOCKED"
+            root.lastEditorCheck = "ERROR"
             root.liveAidDiagnostics = []
             root.liveAidEvidenceSummary =
                 "LIVE AID BRIDGE ERROR · " + message
@@ -1916,11 +2264,12 @@ Item {
                 root.repairOldText = ""
                 root.repairNewText = ""
                 root.liveAidState = "QUEUED"
+                root.editorFeedbackState = "QUEUED"
                 root.liveAidDiagnostics = []
                 root.liveAidEvidenceSummary =
                     "PREFLIGHT RESULT STALE · "
                     + "BUFFER CHANGED DURING CHECK"
-                analysisTimer.restart()
+                root.scheduleLiveAidAnalysis()
                 return
             }
 
@@ -1940,6 +2289,8 @@ Item {
             root.liveAidState = result.status
             root.liveAidDiagnostics =
                 result.diagnostics || []
+            root.lastEditorCheck = result.gate_status
+            root.editorFeedbackState = result.gate_status
             root.liveAidEvidenceSummary =
                 "QML GATE " + result.gate_status
                 + " · PROFILE BOUND · REPORT "
@@ -1959,10 +2310,11 @@ Item {
                 root.repairOldText = ""
                 root.repairNewText = ""
                 root.liveAidState = "QUEUED"
+                root.editorFeedbackState = "QUEUED"
                 root.liveAidEvidenceSummary =
                     "PREFLIGHT FAILURE STALE · "
                     + "BUFFER CHANGED DURING CHECK"
-                analysisTimer.restart()
+                root.scheduleLiveAidAnalysis()
                 return
             }
 
@@ -1973,6 +2325,8 @@ Item {
             root.repairOldText = ""
             root.repairNewText = ""
             root.liveAidState = "BLOCKED"
+            root.editorFeedbackState = "BLOCKED"
+            root.lastEditorCheck = "ERROR"
             root.liveAidDiagnostics = []
             root.liveAidEvidenceSummary =
                 "QML PREFLIGHT HARNESS ERROR · " + message
@@ -1993,7 +2347,7 @@ Item {
                 root.liveAidEvidenceSummary =
                     "AI REPAIR PROPOSAL STALE · "
                     + "BUFFER CHANGED DURING MODEL RUN"
-                analysisTimer.restart()
+                root.scheduleLiveAidAnalysis()
                 return
             }
 
@@ -2043,12 +2397,13 @@ Item {
             root.preflightState = "STALE"
             root.preflightReportSha256 = ""
             root.liveAidState = "QUEUED"
+            root.editorFeedbackState = "QUEUED"
             root.liveAidDiagnostics = []
             root.liveAidEvidenceSummary =
                 "AI REPAIR APPLIED TO BUFFER ONLY · "
                 + "PREFLIGHT REQUIRED · NO SAVE · NO EXECUTION"
 
-            analysisTimer.restart()
+            root.scheduleLiveAidAnalysis()
         }
 
         function onPostDraftEvent(
@@ -2129,7 +2484,7 @@ Item {
                 root.liveAidEvidenceSummary =
                     "POST-DRAFT VERIFIED RESULT DISCARDED · "
                     + "BUFFER CHANGED DURING RUN"
-                analysisTimer.restart()
+                root.scheduleLiveAidAnalysis()
                 return
             }
 
@@ -2195,7 +2550,7 @@ Item {
                 root.liveAidEvidenceSummary =
                     "POST-DRAFT FAILURE STALE · "
                     + "BUFFER CHANGED DURING RUN"
-                analysisTimer.restart()
+                root.scheduleLiveAidAnalysis()
                 return
             }
 
@@ -2227,7 +2582,9 @@ Item {
                 ? "NODES"
                 : (root.hostKind === "FLOW"
                     ? "FLOW"
-                    : String(root.hostKind || ""))))
+                    : (root.hostKind === "RESEARCH"
+                        ? "RESEARCH"
+                        : String(root.hostKind || "")))))
     readonly property int tabStripLeft:
         root.frameKindLabel.length > 0
             ? (20 + root.frameKindLabel.length * 8)
@@ -2368,7 +2725,9 @@ Item {
                 && root.hostKind !== "QIP"
                 && root.hostKind !== "MEDIA"
                 && root.hostKind !== "DRAW"
+                && root.hostKind !== "EXTERNAL"
                 && root.hostKind !== "GAME_ENGINE"
+                && root.hostKind !== "RESEARCH"
             width: visible ? spawnTabRow.width : 0
             height: 18
 
@@ -2622,7 +2981,9 @@ Item {
                     && root.hostKind !== "QIP"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
+                    && root.hostKind !== "EXTERNAL"
                     && root.hostKind !== "GAME_ENGINE"
+                    && root.hostKind !== "RESEARCH"
                     && root.hostKind !== "NODES"
                     && root.hostKind !== "FLOW"
                     && (
@@ -2638,13 +2999,53 @@ Item {
                     width: authoringSurface.width
                     height: authoringSurface.height
 
+                    CodeRunnerBar {
+                        id: codeRunnerBar
+                        objectName: "workspaceCodeRunnerBar"
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.leftMargin: 2
+                        anchors.rightMargin: 2
+                        anchors.topMargin: 2
+                        editorLoaded: root.editorLoaded
+                        editorDirty: root.editorDirty
+                        canSave: root.codeSaveAvailable
+                        sourceName: root.editorSourceName
+                        language: root.editorLanguage
+                        liveAidState: root.liveAidState
+                        diagnostics: root.liveAidDiagnostics
+                        evidenceSummary: root.liveAidEvidenceSummary
+                        preflightState: root.preflightState
+                        repairState: root.repairState
+                        liveFeedbackEnabled: root.liveFeedbackEnabled
+                        externalChangePending: root.externalChangePending
+                        externalChangePath: root.externalChangePath
+                        externalChangeKind: root.externalChangeKind
+                        cursorLine: root.editorLine
+                        cursorColumn: root.editorColumn
+                        editorRevision: root.editorRevision
+
+                        onRunRequested: root.runCodeCheck()
+                        onSaveRequested: root.saveCodeBuffer()
+                        onToggleLiveFeedbackRequested: function(enabled) {
+                            root.liveFeedbackEnabled = enabled
+                            if (enabled)
+                                root.scheduleLiveAidAnalysis()
+                        }
+                        onRepairRequested: root.requestLiveAidRepair()
+                        onApplyRepairRequested: root.requestApplyRepair()
+                        onSyncExternalRequested: root.applyQueuedExternalChange()
+                        onKeepExternalRequested: root.keepExternalBuffer()
+                    }
+
                     ScrollView {
                         id: codeScroll
                         objectName: "workspaceCodeScroll"
                         anchors.fill: parent
                         anchors.leftMargin: 2
                         anchors.rightMargin: 2
-                        anchors.topMargin: 8
+                        anchors.topMargin: codeRunnerBar.implicitHeight + 6
                         anchors.bottomMargin: 8
                         clip: true
                         ScrollBar.horizontal: GgScrollBar {}
@@ -2656,6 +3057,8 @@ Item {
                             enabled: root.editorLoaded
                             readOnly: false
                             selectByMouse: true
+                            selectByKeyboard: true
+                            persistentSelection: true
                             textFormat: TextEdit.PlainText
                             wrapMode: TextEdit.NoWrap
                             color: "#e6e6e6"
@@ -2667,6 +3070,33 @@ Item {
                             rightPadding: 12
                             topPadding: 8
                             bottomPadding: 12
+
+                            SelectionGuard {
+                                editor: codeEditor
+                            }
+
+                            Keys.onPressed: function(event) {
+                                if (event.key !== Qt.Key_Tab)
+                                    return
+                                var start = codeEditor.selectionStart
+                                var end = codeEditor.selectionEnd
+                                if (start === end)
+                                    return
+                                var from = Math.min(start, end)
+                                var to = Math.max(start, end)
+                                var text = codeEditor.text
+                                var lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1
+                                var block = text.slice(lineStart, to)
+                                var indented
+                                if (event.modifiers & Qt.ShiftModifier)
+                                    indented = block.replace(/^ {1,4}|\t/gm, "")
+                                else
+                                    indented = block.replace(/^/gm, "    ")
+                                codeEditor.remove(lineStart, to)
+                                codeEditor.insert(lineStart, indented)
+                                codeEditor.select(lineStart, lineStart + indented.length)
+                                event.accepted = true
+                            }
                             implicitWidth: Math.max(
                                 codeScroll.availableWidth,
                                 contentWidth + 24
@@ -2685,8 +3115,14 @@ Item {
                             if (!root.editorLoaded)
                                 return
 
+                            root.editorRevision += 1
+                            root.updateEditorCursor()
                             root.editorDirty =
                                 codeEditor.text !== root.editorBaseText
+                            if (!root._applyingExternal) {
+                                root.editorFeedbackState = "EDITING"
+                                root.lastEditorCheck = "STALE"
+                            }
                             if (
                                 !root._applyingExternal
                                 && String(root.currentObjectId).indexOf(
@@ -2732,8 +3168,10 @@ Item {
                             }
 
                             root.liveAidState = "QUEUED"
-                            analysisTimer.restart()
+                            root.scheduleLiveAidAnalysis()
                         }
+
+                        onCursorPositionChanged: root.updateEditorCursor()
                         }
                     }
                 }
@@ -3164,7 +3602,7 @@ Item {
                 anchors.topMargin: 4
                 anchors.bottomMargin: 18
                 active: !root.settingsOpen && root.hostKind === "OSINT"
-                visible: active
+                visible: !root.settingsOpen && root.hostKind === "OSINT"
                 sourceComponent: Component {
                     OsintSurface {
                         objectName: "workspaceOsintPane"
@@ -3229,6 +3667,30 @@ Item {
             }
 
             Loader {
+                id: externalPane
+                objectName: "workspaceExternalPane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                // Keep the pane alive when leaving EXT.  Destroying it used
+                // to spawn a second Blender (default cube) because the sidecar
+                // port was still held by the hidden first process.
+                active: true
+                visible: !root.settingsOpen && root.hostKind === "EXTERNAL"
+                sourceComponent: Component {
+                    ExternalSurface {
+                        objectName: "workspaceExternalPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
                 id: gameEnginePane
                 objectName: "workspaceGameEnginePane"
                 z: 20
@@ -3237,14 +3699,18 @@ Item {
                 anchors.rightMargin: 4
                 anchors.topMargin: 4
                 anchors.bottomMargin: 18
-                active: !root.settingsOpen && root.hostKind === "GAME_ENGINE"
-                visible: active
+                // Keep the playground alive after the first visit.  Tearing
+                // the Loader down rebuilt every native mesh and RuntimeLoader
+                // asset, which lagged the desktop and made props pop in.
+                active: root.keepGameEngine || root.hostKind === "GAME_ENGINE"
+                visible: !root.settingsOpen && root.hostKind === "GAME_ENGINE"
                 sourceComponent: Component {
                     GameEngineSurface {
                         objectName: "workspaceGameEnginePane"
                         surfaceHost: root.scratchHost()
                         frameBorder: root.frameBorder
                         frameRadius: root.frameRadius
+                        paneLive: gameEnginePane.visible
                     }
                 }
             }
@@ -3284,6 +3750,27 @@ Item {
                 sourceComponent: Component {
                     AgentFlowSurface {
                         objectName: "workspaceAgentFlowPane"
+                        surfaceHost: root.scratchHost()
+                        frameBorder: root.frameBorder
+                        frameRadius: root.frameRadius
+                    }
+                }
+            }
+
+            Loader {
+                id: researchPane
+                objectName: "workspaceResearchPane"
+                z: 20
+                anchors.fill: parent
+                anchors.leftMargin: 2
+                anchors.rightMargin: 4
+                anchors.topMargin: 4
+                anchors.bottomMargin: 18
+                active: !root.settingsOpen && root.hostKind === "RESEARCH"
+                visible: active
+                sourceComponent: Component {
+                    ResearchSurface {
+                        objectName: "workspaceResearchPane"
                         surfaceHost: root.scratchHost()
                         frameBorder: root.frameBorder
                         frameRadius: root.frameRadius
@@ -3441,47 +3928,6 @@ Item {
                 spacing: 12
                 visible:
                     !root.settingsOpen
-                    && root.hostKind === "EXTERNAL"
-                    && root.currentObjectType === "EXTERNAL_APP"
-
-                Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text: root.currentObjectTitle
-                    color: "#e6edf3"
-                    font.pixelSize: 22
-                    font.bold: true
-                }
-
-                Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text: root.currentObjectType
-                        + " · REAL_UI_STATE · HOSTING NOT AVAILABLE"
-                    color: "#c8a97e"
-                    font.family: "monospace"
-                    font.pixelSize: 12
-                }
-
-                Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text:
-                        "No X11/Wayland window embed yet. "
-                        + "This is not a fake browser or game. "
-                        + "The open program fills this workspace box when hosted."
-                    color: "#c8cdd4"
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: 12
-                }
-            }
-
-            Column {
-                anchors.centerIn: parent
-                width: Math.min(parent.width - 60, 560)
-                spacing: 12
-                visible:
-                    !root.settingsOpen
                     && root.hostKind !== "CRYPTO"
                     && root.hostKind !== "MARKETPLACE"
                     && root.hostKind !== "TMOG"
@@ -3489,7 +3935,9 @@ Item {
                     && root.hostKind !== "QIP"
                     && root.hostKind !== "MEDIA"
                     && root.hostKind !== "DRAW"
+                    && root.hostKind !== "EXTERNAL"
                     && root.hostKind !== "GAME_ENGINE"
+                    && root.hostKind !== "RESEARCH"
                     && root.currentObjectProvenance === "SYNTHETIC_UI_FIXTURE"
 
                 Text {
@@ -3866,6 +4314,28 @@ Item {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.setHostKind("FLOW")
+            }
+        }
+
+        Text {
+            text: " | "
+            color: "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+        }
+
+        Text {
+            objectName: "workspaceKindResearch"
+            text: "RESEARCH"
+            color: root.hostKind === "RESEARCH" ? "#d8dee9" : "#a8b0b8"
+            font.family: "monospace"
+            font.pixelSize: 12
+            font.bold: root.hostKind === "RESEARCH"
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setHostKind("RESEARCH")
             }
         }
     }
