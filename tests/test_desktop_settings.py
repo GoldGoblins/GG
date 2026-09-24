@@ -17,6 +17,7 @@ def main() -> int:
     saved_path = desktop_settings.SETTINGS_PATH
     scratch = Path(tempfile.mkdtemp(prefix="gg-desktop-settings-"))
     desktop_settings.SETTINGS_PATH = scratch / "settings-v1.json"
+    workspace_root = str(Path.home() / "GoldGoblins")
     try:
         loaded = desktop_settings.load_settings()
         if loaded["engineTarget"] != "GROK_TUI":
@@ -35,6 +36,13 @@ def main() -> int:
                 "showInnerEditorChrome": 0,
                 "showProductSourceTabs": 1,
                 "desktopShell": 1,
+                "workspaceFolders": [
+                    workspace_root,
+                    workspace_root + "/",
+                    "relative-folder",
+                    "/",
+                ],
+                "workspaceTrusted": 0,
             }
         )
         if not Path(path).is_file():
@@ -64,6 +72,10 @@ def main() -> int:
             raise AssertionError("bool product tabs mismatch")
         if again["desktopShell"] is not True:
             raise AssertionError("desktop shell did not persist")
+        if again["workspaceFolders"] != [workspace_root, "/"]:
+            raise AssertionError("workspace roots were not normalized")
+        if again["workspaceTrusted"] is not False:
+            raise AssertionError("workspace trust did not persist")
         rejected = desktop_settings.normalize_settings(
             {"engineTarget": "OPEN_INTERNET"}
         )
@@ -84,6 +96,10 @@ def main() -> int:
             raise AssertionError("apply_to_root missed accent")
         if root.props.get("desktopShell") is not True:
             raise AssertionError("apply_to_root missed desktop shell")
+        if root.props.get("workspaceFolders") != [workspace_root, "/"]:
+            raise AssertionError("apply_to_root missed workspace roots")
+        if root.props.get("workspaceTrusted") is not False:
+            raise AssertionError("apply_to_root missed workspace trust")
         shell_src = (
             Path(__file__).resolve().parents[1] / "backend" / "desktop_shell.py"
         ).read_text(encoding="utf-8")

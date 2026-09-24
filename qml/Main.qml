@@ -37,10 +37,36 @@ ApplicationWindow {
     property bool walletOpen: false
     property real walletX: -1
     property real walletY: -1
+    property bool settingsOpen: false
+    property real settingsX: -1
+    property real settingsY: -1
+    property bool settingsMoved: false
+    // Presentation state is intentionally separate from the legacy desktop
+    // settings above.  All engines and Settings use this same object.
+    property var visualLayoutData: ({})
+    property int visualLayoutRevision: 0
+    property string visualThemeId: "obsidian-ledger"
+    property string visualProfileId: "standard"
+    property bool visualLayoutLocked: true
+    property string visualEditorMode: "NORMAL"
+    property string visualSelectedSurface: ""
+    property string visualSourceText: ""
+    property string visualSourcePath: ""
+    property string visualSourceStatus: ""
+    property bool visualStateReady: false
+    // The registry is the workbench's contribution seam.  It is a JSON view
+    // of code-owned manifests, never a path from which QML/Python is loaded.
+    property string workbenchExtensionsJson: "[]"
+    property bool commandPaletteOpen: false
+    property string commandPaletteMode: "COMMAND"
+    property var workspaceFolders: []
+    property bool workspaceTrusted: true
 
     onSurfaceHostChanged: {
         root.pullCryptoStatus()
         root.applyDesktopShellNow()
+        root.loadVisualLayoutState()
+        root.loadWorkbenchExtensions()
     }
 
     onDesktopShellChanged: {
@@ -293,6 +319,9 @@ ApplicationWindow {
         item.desktopShell = Qt.binding(function() {
             return root.desktopShell
         })
+        item.workbenchExtensionsJson = Qt.binding(function() {
+            return root.workbenchExtensionsJson
+        })
         item.liveAidBackend = Qt.binding(function() {
             return root.liveAidBackend
         })
@@ -388,6 +417,7 @@ ApplicationWindow {
             root.bindWorkspace(workspaceLoader.item)
             if (utilitySurface.item)
                 root.bindUtility(utilitySurface.item)
+            root.applyVisualProfile()
         } catch (err) {
             root.shellLoadCurrent = "LOAD FAILED"
             root.appendShellLog("shell bind · " + String(err))
@@ -461,8 +491,8 @@ ApplicationWindow {
     readonly property bool narrowLayout: width < 1050
     readonly property bool compactTelemetry: width < 1450
 
-    readonly property color canvas: "#121212"
-    readonly property color surface: "#161616"
+    property color canvas: "#121212"
+    property color surface: "#161616"
     readonly property color line: "#6a6a6a"
     readonly property color textMain: "#e6e6e6"
     readonly property color textMuted: "#8a8a8a"
@@ -521,6 +551,394 @@ ApplicationWindow {
             } catch (err) {
             }
         }
+        function onVisualCommandRequested(payload) {
+            root.handleVisualCommand(payload)
+        }
+        function onWorkbenchExtensionsChanged(payload) {
+            if (payload)
+                root.workbenchExtensionsJson = payload
+        }
+    }
+
+    // VS Code's command-first workbench is exposed through the GG chrome,
+    // while the visual language remains unchanged.
+    Shortcut {
+        sequence: "Ctrl+Shift+P"
+        enabled: !root.shellLoading
+        onActivated: root.openCommandPalette()
+    }
+
+    Shortcut {
+        sequence: "F1"
+        enabled: !root.shellLoading
+        onActivated: root.openCommandPalette()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+P"
+        enabled: !root.shellLoading
+        onActivated: root.openQuickOpen()
+    }
+
+    function loadWorkbenchExtensions() {
+        if (!root.surfaceHost)
+            return
+        var raw = ""
+        if (root.surfaceHost.loadWorkbenchExtensionsForProfile) {
+            raw = root.surfaceHost.loadWorkbenchExtensionsForProfile(
+                root.visualThemeId,
+                root.visualProfileId
+            )
+        } else if (root.surfaceHost.loadWorkbenchExtensions) {
+            raw = root.surfaceHost.loadWorkbenchExtensions()
+        }
+        if (raw)
+            root.workbenchExtensionsJson = raw
+    }
+
+    function workbenchExtensionRows() {
+        try {
+            var rows = JSON.parse(root.workbenchExtensionsJson || "[]")
+            return rows instanceof Array ? rows : []
+        } catch (err) {
+            return []
+        }
+    }
+
+    function workbenchHostEnabled(kind) {
+        var wanted = String(kind || "").toUpperCase()
+        if (!wanted.length)
+            return true
+        var rows = root.workbenchExtensionRows()
+        for (var i = 0; i < rows.length; ++i) {
+            var row = rows[i] || {}
+            if (String(row.hostKind || "").toUpperCase() === wanted)
+                return row.enabled !== false
+        }
+        return true
+    }
+
+    function setWorkbenchExtensionEnabled(extensionId, enabled) {
+        if (!root.surfaceHost
+                || !root.surfaceHost.setWorkbenchExtensionEnabled)
+            return
+        var raw = ""
+        if (root.surfaceHost.setWorkbenchExtensionEnabledForProfile) {
+            raw = root.surfaceHost.setWorkbenchExtensionEnabledForProfile(
+                String(extensionId || ""),
+                Boolean(enabled),
+                root.visualThemeId,
+                root.visualProfileId
+            )
+        } else if (root.surfaceHost.setWorkbenchExtensionEnabled) {
+            raw = root.surfaceHost.setWorkbenchExtensionEnabled(
+                String(extensionId || ""),
+                Boolean(enabled)
+            )
+        }
+        if (raw)
+            root.workbenchExtensionsJson = raw
+        if (workspace && !root.workbenchHostEnabled(workspace.hostKind))
+            workspace.setHostKind("CODE")
+    }
+
+    function resetWorkbenchExtensions() {
+        if (!root.surfaceHost)
+            return
+        var raw = ""
+        if (root.surfaceHost.resetWorkbenchExtensionsForProfile) {
+            raw = root.surfaceHost.resetWorkbenchExtensionsForProfile(
+                root.visualThemeId,
+                root.visualProfileId
+            )
+        } else if (root.surfaceHost.resetWorkbenchExtensions) {
+            raw = root.surfaceHost.resetWorkbenchExtensions()
+        }
+        if (raw)
+            root.workbenchExtensionsJson = raw
+    }
+
+    function copyWorkbenchProfileExtensions(sourceProfileId, targetProfileId) {
+        if (!root.surfaceHost
+                || !root.surfaceHost.copyWorkbenchExtensionsProfile)
+            return
+        var raw = root.surfaceHost.copyWorkbenchExtensionsProfile(
+            root.visualThemeId,
+            String(sourceProfileId || ""),
+            String(targetProfileId || "")
+        )
+        if (raw)
+            root.workbenchExtensionsJson = raw
+    }
+
+    function copyWorkbenchThemeExtensions(
+        sourceThemeId,
+        targetThemeId,
+        profileId
+    ) {
+        if (!root.surfaceHost
+                || !root.surfaceHost.copyWorkbenchExtensionsTheme)
+            return
+        var raw = root.surfaceHost.copyWorkbenchExtensionsTheme(
+            String(sourceThemeId || ""),
+            String(targetThemeId || ""),
+            String(profileId || root.visualProfileId)
+        )
+        if (raw)
+            root.workbenchExtensionsJson = raw
+    }
+
+    function commandPaletteRows() {
+        var rows = [
+            { "id": "workbench.openSettings", "label": "Open Settings", "category": "Workbench", "keybinding": "", "description": "Open the GG settings workbench" },
+            { "id": "settings.PROFILES", "label": "Open Settings: Profiles", "category": "Settings", "description": "Switch themes and presentation profiles" },
+            { "id": "settings.SURFACES", "label": "Open Settings: Surfaces", "category": "Settings", "description": "Select a visual surface or source buffer" },
+            { "id": "settings.EDITOR", "label": "Open Settings: Editor", "category": "Settings", "description": "Lock layout, resize handles and source mode" },
+            { "id": "settings.APPEARANCE", "label": "Open Settings: Appearance", "category": "Settings", "description": "Change live frame and accent tokens" },
+            { "id": "settings.LAYOUT", "label": "Open Settings: Layout", "category": "Settings", "description": "Change chat, telemetry and utility geometry" },
+            { "id": "settings.CHAT", "label": "Open Settings: Chat", "category": "Settings", "description": "Choose the active chat motor" },
+            { "id": "settings.WORKSPACE", "label": "Open Settings: Workspace", "category": "Settings", "description": "Choose a named host surface" },
+            { "id": "settings.EXTENSIONS", "label": "Open Settings: Extensions", "category": "Settings", "description": "Enable or disable built-in contributions" },
+            { "id": "code.runCheck", "label": "Run Code Check", "category": "Code", "keybinding": "F5", "description": "Run the safe Live Aid/QML check against the current buffer" },
+            { "id": "code.toggleLiveFeedback", "label": "Toggle Live Code Feedback", "category": "Code", "keybinding": "Ctrl+Shift+L", "description": "Enable or pause debounced feedback while typing" },
+            { "id": "code.saveBuffer", "label": "Save Current Buffer", "category": "Code", "keybinding": "Ctrl+S", "description": "Save the current local or profile-owned code buffer" },
+            { "id": "workbench.toggleLayout", "label": root.visualLayoutLocked ? "Unlock Layout" : "Lock Layout", "category": "Layout", "keybinding": "", "description": "Toggle the six-dot and corner-handle presentation editor" },
+            { "id": "workbench.resetLayout", "label": "Reset Standard Layout", "category": "Layout", "description": "Restore the current Standard presentation baseline" },
+            { "id": "editor.showSource", "label": "Show Selected Surface Source", "category": "Editor", "description": "Open the profile-local source buffer for a surface" },
+            { "id": "workbench.openWallet", "label": "Open Wallet", "category": "GG", "description": "Open the top-right wallet overlay" },
+            { "id": "workbench.focusChat", "label": "Focus Chat", "category": "View", "description": "Move the primary focus to the operational stream" },
+            { "id": "workbench.focusWorkspace", "label": "Focus Workspace", "category": "View", "description": "Move the primary focus to the central workbench" },
+            { "id": "workbench.fullscreen", "label": "Toggle Fullscreen", "category": "Window", "description": "Toggle the existing GG fullscreen mode" },
+            { "id": "workbench.reload", "label": "Reload QML Shell", "category": "Developer", "description": "Recreate the current visual shell" }
+        ]
+        var hostRows = root.workbenchExtensionRows()
+        for (var i = 0; i < hostRows.length; ++i) {
+            var contribution = hostRows[i] || {}
+            var kind = String(contribution.hostKind || "").toUpperCase()
+            if (!kind || contribution.enabled === false)
+                continue
+            rows.push({
+                "id": "workspace." + kind,
+                "label": "Open " + String(contribution.name || kind),
+                "category": "Workspace",
+                "description": String(contribution.description || "")
+            })
+        }
+        rows.push(
+            { "id": "engine.GROK_TUI", "label": "Use GROK TUI", "category": "Chat", "description": "Use the native GROK TUI motor" },
+            { "id": "engine.GPT_TUI", "label": "Use GPTUI", "category": "Chat", "description": "Use the native GPTUI motor" },
+            { "id": "engine.FLOW_TUI", "label": "Use FLOW TUI", "category": "Chat", "description": "Use the native FLOW TUI motor" },
+            { "id": "engine.GROK_WORKER", "label": "Use GROK Worker", "category": "Chat", "description": "Use the resident GROK worker motor" },
+            { "id": "engine.LOCAL_QWEN", "label": "Use Local QWEN", "category": "Chat", "description": "Use the local QWEN motor" }
+        )
+        try {
+            var sessions = JSON.parse(root.chatSessionsJson || "[]")
+            if (sessions instanceof Array) {
+                for (var j = 0; j < sessions.length; ++j) {
+                    var session = sessions[j] || {}
+                    var sessionId = String(session.session_id || "")
+                    if (!sessionId.length)
+                        continue
+                    var engine = String(session.engine || "")
+                    var title = String(session.title || session.label || "")
+                    if (!title.length)
+                        title = session.current ? "Current session" : "Saved session"
+                    rows.push({
+                        "id": "session.resume." + sessionId,
+                        "label": "Resume " + title,
+                        "category": "Sessions",
+                        "description": engine + (session.current ? " · current" : "")
+                    })
+                }
+            }
+        } catch (err) {
+        }
+        return rows
+    }
+
+    function quickOpenRows() {
+        var rows = []
+        if (workspace && workspace.quickOpenRows)
+            rows = workspace.quickOpenRows()
+        if (!rows || !(rows instanceof Array))
+            rows = []
+        rows.push({
+            "id": "settings.WORKSPACE",
+            "label": "Workspace Settings",
+            "category": "Settings",
+            "description": "Open workspace folders and host views"
+        })
+        rows.push({
+            "id": "settings.EDITOR",
+            "label": "Visual Editor",
+            "category": "Settings",
+            "description": "Open layout lock, source mode and surface handles"
+        })
+        return rows
+    }
+
+    function commandPaletteItems() {
+        return root.commandPaletteMode === "QUICK_OPEN"
+            ? root.quickOpenRows()
+            : root.commandPaletteRows()
+    }
+
+    function openSettingsPage(page) {
+        root.commandPaletteOpen = false
+        root.walletOpen = false
+        if (settingsPopup)
+            settingsPopup.searchText = ""
+        root.openSettings()
+        if (settingsPopup)
+            settingsPopup.page = String(page || "APPEARANCE")
+    }
+
+    function resumeChatSessionFromPalette(sessionId) {
+        var wanted = String(sessionId || "")
+        if (!wanted.length)
+            return
+        var rows = []
+        try {
+            rows = JSON.parse(root.chatSessionsJson || "[]")
+        } catch (err) {
+            rows = []
+        }
+        for (var i = 0; i < rows.length; ++i) {
+            var row = rows[i] || {}
+            if (String(row.session_id || "") !== wanted)
+                continue
+            var engine = String(row.engine || "")
+            root.activeChatSession = wanted
+            if (engine === "GPT_TUI" || engine === "GROK_TUI"
+                    || engine === "GROK_WORKER" || engine === "LOCAL_QWEN"
+                    || engine === "FLOW_TUI")
+                root.engineTarget = engine
+            if (engine === "GPT_TUI" && root.surfaceHost) {
+                Qt.callLater(function() {
+                    if (root.surfaceHost && root.surfaceHost.activateGptTui)
+                        root.surfaceHost.activateGptTui(wanted)
+                })
+            } else if (engine === "GROK_TUI" && root.surfaceHost
+                    && root.surfaceHost.resumeGrokTui) {
+                root.surfaceHost.resumeGrokTui(wanted)
+            }
+            return
+        }
+    }
+
+    function executeCommand(commandId) {
+        var id = String(commandId || "")
+        root.commandPaletteOpen = false
+        if (id === "workbench.openSettings") {
+            root.openSettings()
+            return
+        }
+        if (id.indexOf("settings.") === 0) {
+            root.openSettingsPage(id.slice(9))
+            return
+        }
+        if (id === "workbench.toggleLayout") {
+            root.setVisualLock(!root.visualLayoutLocked)
+            root.openSettingsPage("EDITOR")
+            return
+        }
+        if (id === "workbench.resetLayout") {
+            root.resetVisualStandard()
+            root.openSettingsPage("EDITOR")
+            return
+        }
+        if (id === "editor.showSource") {
+            if (root.visualSelectedSurface.length > 0)
+                root.openVisualSource(root.visualSelectedSurface)
+            else
+                root.openSettingsPage("EDITOR")
+            return
+        }
+        if (id === "code.runCheck") {
+            if (workspace && workspace.runCodeCheck)
+                workspace.runCodeCheck()
+            return
+        }
+        if (id === "code.toggleLiveFeedback") {
+            if (workspace && workspace.liveFeedbackEnabled !== undefined) {
+                workspace.liveFeedbackEnabled = !workspace.liveFeedbackEnabled
+                if (workspace.liveFeedbackEnabled && workspace.scheduleLiveAidAnalysis)
+                    workspace.scheduleLiveAidAnalysis()
+            }
+            return
+        }
+        if (id === "code.saveBuffer") {
+            if (workspace && workspace.saveCodeBuffer)
+                workspace.saveCodeBuffer()
+            return
+        }
+        if (id === "workbench.openWallet") {
+            root.closeSettings()
+            root.walletOpen = true
+            if (root.walletX < 0) {
+                root.walletX = Math.max(12, root.width - 346)
+                root.walletY = 44
+            }
+            root.pullCryptoStatus()
+            return
+        }
+        if (id.indexOf("quick.object.") === 0) {
+            if (workspace && workspace.focusObject)
+                workspace.focusObject(id.slice(13))
+            return
+        }
+        if (id === "workbench.focusChat") {
+            if (composer)
+                composer.forceActiveFocus()
+            return
+        }
+        if (id === "workbench.focusWorkspace") {
+            if (workspace && workspace.forceActiveFocus)
+                workspace.forceActiveFocus()
+            return
+        }
+        if (id === "workbench.fullscreen") {
+            root.toggleAppFullscreen()
+            return
+        }
+        if (id === "workbench.reload") {
+            if (!root.shellLoading)
+                root.beginShellLoad("RELOAD")
+            if (root.surfaceHost && root.surfaceHost.restartDesktop)
+                root.surfaceHost.restartDesktop()
+            return
+        }
+        if (id.indexOf("workspace.") === 0) {
+            var kind = id.slice(10)
+            if (workspace && workspace.setHostKind
+                    && root.workbenchHostEnabled(kind))
+                workspace.setHostKind(kind)
+            return
+        }
+        if (id.indexOf("engine.") === 0) {
+            root.engineTarget = id.slice(7)
+            root.persistDesktopSettings()
+            return
+        }
+        if (id.indexOf("session.resume.") === 0) {
+            root.resumeChatSessionFromPalette(id.slice(15))
+        }
+    }
+
+    function openCommandPalette() {
+        root.walletOpen = false
+        root.closeSettings()
+        root.commandPaletteMode = "COMMAND"
+        root.commandPaletteOpen = false
+        root.commandPaletteOpen = true
+    }
+
+    function openQuickOpen() {
+        root.walletOpen = false
+        root.closeSettings()
+        root.commandPaletteMode = "QUICK_OPEN"
+        root.commandPaletteOpen = false
+        root.commandPaletteOpen = true
     }
 
     function colorHex(value) {
@@ -550,6 +968,47 @@ ApplicationWindow {
         root.applyCryptoWalletLabel()
     }
 
+    function openSettings() {
+        // Keep the legacy workspace state closed while Settings is a top-level
+        // window. This also makes an in-flight QML reload harmless.
+        if (workspace && workspace.closeSettings)
+            workspace.closeSettings()
+        root.walletOpen = false
+        if (!root.settingsMoved || root.settingsX < 0)
+            root.positionSettingsPopup()
+        root.settingsOpen = true
+    }
+
+    function closeSettings() {
+        root.settingsOpen = false
+        if (workspace && workspace.closeSettings)
+            workspace.closeSettings()
+    }
+
+    function toggleSettings() {
+        root.settingsOpen ? root.closeSettings() : root.openSettings()
+    }
+
+    function positionSettingsPopup() {
+        if (!settingsButton)
+            return
+        var anchor = settingsButton.mapToItem(
+            root.contentItem,
+            0,
+            settingsButton.height
+        )
+        var popupWidth = settingsPopup ? settingsPopup.width : 760
+        var popupHeight = settingsPopup ? settingsPopup.height : 700
+        root.settingsX = Math.max(
+            12,
+            Math.min(root.width - popupWidth - 12, anchor.x - 12)
+        )
+        root.settingsY = Math.max(
+            12,
+            Math.min(root.height - popupHeight - 12, anchor.y + 8)
+        )
+    }
+
     Timer {
         interval: 30000
         running: true
@@ -572,8 +1031,660 @@ ApplicationWindow {
             "showInnerEditorChrome": root.showInnerEditorChrome,
             "showProductSourceTabs": root.showProductSourceTabs,
             "showDemoFixtures": root.alphaShowDemoFixtures,
-            "desktopShell": root.desktopShell
+            "desktopShell": root.desktopShell,
+            "workspaceFolders": root.workspaceFolders || [],
+            "workspaceTrusted": root.workspaceTrusted
         }))
+    }
+
+    function visualClone() {
+        try {
+            return JSON.parse(JSON.stringify(root.visualLayoutData || {}))
+        } catch (err) {
+            return {}
+        }
+    }
+
+    function visualThemeObject(data, themeId) {
+        var themes = data && data.themes ? data.themes : {}
+        var id = String(themeId || (data ? data.activeTheme : ""))
+        return themes[id] || null
+    }
+
+    function visualProfileObject(data, themeId, profileId) {
+        var theme = root.visualThemeObject(data, themeId)
+        if (!theme || !theme.profiles)
+            return null
+        var id = String(profileId || (data ? data.activeProfile : ""))
+        return theme.profiles[id] || null
+    }
+
+    function visualProfileRows() {
+        var revision = root.visualLayoutRevision
+        var data = root.visualLayoutData || {}
+        var theme = root.visualThemeObject(data, root.visualThemeId)
+        var profiles = theme && theme.profiles ? theme.profiles : {}
+        var rows = []
+        for (var id in profiles) {
+            var profile = profiles[id] || {}
+            rows.push({
+                "id": id,
+                "name": String(profile.name || id),
+                "locked": profile.locked !== false,
+                "theme": root.visualThemeId
+            })
+        }
+        return rows
+    }
+
+    function visualThemeRows() {
+        var revision = root.visualLayoutRevision
+        var data = root.visualLayoutData || {}
+        var themes = data.themes || {}
+        var rows = []
+        for (var id in themes) {
+            var theme = themes[id] || {}
+            rows.push({
+                "id": id,
+                "name": String(theme.name || id),
+                "profiles": theme.profiles
+                    ? Object.keys(theme.profiles).length
+                    : 0
+            })
+        }
+        return rows
+    }
+
+    readonly property string visualProfilesJson: JSON.stringify(
+        root.visualProfileRows()
+    )
+    readonly property string visualThemesJson: JSON.stringify(
+        root.visualThemeRows()
+    )
+    readonly property string visualSurfaceRegistryJson: JSON.stringify(
+        (root.visualLayoutData && root.visualLayoutData.surfaceRegistry)
+            ? root.visualLayoutData.surfaceRegistry
+            : []
+    )
+
+    function visualSurfaceEntry(surfaceId) {
+        var revision = root.visualLayoutRevision
+        var profile = root.visualProfileObject(
+            root.visualLayoutData || {},
+            root.visualThemeId,
+            root.visualProfileId
+        )
+        var surfaces = profile && profile.surfaces ? profile.surfaces : {}
+        return surfaces[String(surfaceId || "")] || {}
+    }
+
+    function visualSurfaceMetric(surfaceId, key, fallback) {
+        var entry = root.visualSurfaceEntry(surfaceId)
+        var value = entry[key]
+        if (value === undefined || value === null)
+            return fallback
+        var number = Number(value)
+        return isNaN(number) ? fallback : number
+    }
+
+    function visualSurfaceModel() {
+        // The target references are live QML objects.  The registry metadata
+        // remains in the backend state; this list only joins metadata to the
+        // objects that are already rendered by Main.qml.
+        return [
+            { "surfaceId": "chat", "title": "Chat", "target": chatSurface },
+            { "surfaceId": "workspace", "title": "Workspace", "target": workspaceLoader },
+            { "surfaceId": "utility", "title": "Media / Utilities", "target": utilitySurface },
+            { "surfaceId": "telemetry", "title": "Telemetry", "target": telemetry },
+            { "surfaceId": "wallet", "title": "Wallet", "target": walletPopup },
+            { "surfaceId": "settings", "title": "Settings", "target": settingsPopup }
+        ]
+    }
+
+    function applyVisualThemeTokens(data) {
+        var theme = root.visualThemeObject(data, root.visualThemeId)
+        var tokens = theme && theme.tokens ? theme.tokens : {}
+        if (tokens.canvas)
+            root.canvas = String(tokens.canvas)
+        if (tokens.surface)
+            root.surface = String(tokens.surface)
+        if (tokens.accent)
+            root.cyan = String(tokens.accent)
+        if (tokens.frameBorder)
+            root.frameBorder = String(tokens.frameBorder)
+        if (tokens.frameRadius !== undefined)
+            root.frameRadius = Number(tokens.frameRadius)
+    }
+
+    function applyVisualTarget(surfaceId, target, entry) {
+        if (!target || !entry)
+            return
+        if (target.visualOffsetX !== undefined) {
+            target.visualOffsetX = Number(entry.offsetX || 0)
+            target.visualOffsetY = Number(entry.offsetY || 0)
+            target.visualScale = Number(entry.scale || 1)
+        }
+        // Popup width/height are bound to visualSurfaceMetric in their Main
+        // instances.  Keep those bindings intact; changing the profile below
+        // is enough to update them.
+        if (surfaceId === "wallet") {
+            root.walletX = Number(entry.x === undefined ? -1 : entry.x)
+            root.walletY = Number(entry.y === undefined ? -1 : entry.y)
+        } else if (surfaceId === "settings") {
+            root.settingsX = Number(entry.x === undefined ? -1 : entry.x)
+            root.settingsY = Number(entry.y === undefined ? -1 : entry.y)
+            root.settingsMoved = root.settingsX >= 0 || root.settingsY >= 0
+        }
+    }
+
+    function applyVisualProfile() {
+        var data = root.visualLayoutData || {}
+        var profile = root.visualProfileObject(
+            data,
+            root.visualThemeId,
+            root.visualProfileId
+        )
+        if (!profile)
+            return
+        root.visualLayoutLocked = profile.locked !== false
+        root.visualEditorMode = String(profile.editorMode || "NORMAL")
+        root.visualSelectedSurface = String(profile.sourceSurface || "")
+        var surfaces = profile.surfaces || {}
+        root.applyVisualTarget("chat", chatSurface, surfaces.chat || {})
+        root.applyVisualTarget("workspace", workspaceLoader, surfaces.workspace || {})
+        root.applyVisualTarget("utility", utilitySurface, surfaces.utility || {})
+        root.applyVisualTarget("telemetry", telemetry, surfaces.telemetry || {})
+        root.applyVisualTarget("wallet", walletPopup, surfaces.wallet || {})
+        root.applyVisualTarget("settings", settingsPopup, surfaces.settings || {})
+    }
+
+    function commitVisualState(data, persistDesktop) {
+        if (!data || !data.themes)
+            return
+        root.visualLayoutData = data
+        root.visualThemeId = String(data.activeTheme || root.visualThemeId)
+        root.visualProfileId = String(data.activeProfile || root.visualProfileId)
+        root.visualLayoutRevision += 1
+        root.applyVisualThemeTokens(data)
+        root.applyVisualProfile()
+        root.loadWorkbenchExtensions()
+        if (persistDesktop)
+            root.persistDesktopSettings()
+        root.scheduleVisualLayoutSave()
+    }
+
+    function loadVisualLayoutState() {
+        if (!root.surfaceHost || !root.surfaceHost.loadVisualLayoutState)
+            return
+        var raw = root.surfaceHost.loadVisualLayoutState()
+        try {
+            var data = JSON.parse(raw || "{}")
+            if (data && data.themes) {
+                root.visualStateReady = true
+                root.commitVisualState(data, false)
+                if (root.visualEditorMode === "SOURCE"
+                        && root.visualSelectedSurface.length > 0) {
+                    var sourceId = root.visualSelectedSurface
+                    Qt.callLater(function() {
+                        root.openVisualSource(sourceId)
+                    })
+                }
+            }
+        } catch (err) {
+            root.visualStateReady = false
+        }
+    }
+
+    function flushVisualLayoutSave() {
+        if (!root.surfaceHost || !root.surfaceHost.saveVisualLayoutState)
+            return
+        var raw = root.surfaceHost.saveVisualLayoutState(
+            JSON.stringify(root.visualLayoutData || {})
+        )
+        if (!raw)
+            return
+        try {
+            var data = JSON.parse(raw)
+            if (data && data.themes) {
+                root.visualLayoutData = data
+                root.visualThemeId = String(data.activeTheme || root.visualThemeId)
+                root.visualProfileId = String(data.activeProfile || root.visualProfileId)
+                root.visualLayoutRevision += 1
+            }
+        } catch (err) {
+        }
+    }
+
+    function scheduleVisualLayoutSave() {
+        if (visualSaveTimer)
+            visualSaveTimer.restart()
+    }
+
+    function updateVisualProfile(mutator) {
+        var data = root.visualClone()
+        var profile = root.visualProfileObject(
+            data,
+            root.visualThemeId,
+            root.visualProfileId
+        )
+        if (!profile || !mutator)
+            return
+        mutator(profile)
+        root.commitVisualState(data, false)
+    }
+
+    function setVisualTheme(themeId) {
+        var data = root.visualClone()
+        var id = String(themeId || "").trim().toLowerCase()
+        if (!data.themes || !data.themes[id])
+            return
+        var theme = data.themes[id]
+        var profiles = theme.profiles || {}
+        var nextProfile = profiles[root.visualProfileId]
+            ? root.visualProfileId
+            : (profiles.standard ? "standard" : Object.keys(profiles)[0])
+        data.activeTheme = id
+        data.activeProfile = nextProfile
+        root.commitVisualState(data, true)
+        root.flushVisualLayoutSave()
+    }
+
+    function saveVisualThemeAs(themeId) {
+        var id = String(themeId || "").trim().toLowerCase()
+            .replace(/\s+/g, "-")
+        if (!/^[a-z][a-z0-9._-]{0,47}$/.test(id))
+            return
+        var data = root.visualClone()
+        var source = root.visualThemeObject(data, root.visualThemeId)
+        var sourceThemeId = root.visualThemeId
+        if (!source || !data.themes)
+            return
+        data.themes[id] = root.visualCloneObject(source)
+        data.themes[id].name = id
+        data.activeTheme = id
+        data.activeProfile = root.visualProfileId
+        if (!data.themes[id].profiles[data.activeProfile])
+            data.activeProfile = "standard"
+        root.commitVisualState(data, true)
+        root.flushVisualLayoutSave()
+        root.copyWorkbenchThemeExtensions(
+            sourceThemeId,
+            id,
+            root.visualProfileId
+        )
+    }
+
+    function setVisualProfile(profileId) {
+        var data = root.visualClone()
+        var theme = root.visualThemeObject(data, root.visualThemeId)
+        var id = String(profileId || "").trim().toLowerCase()
+        if (!theme || !theme.profiles || !theme.profiles[id])
+            return
+        data.activeProfile = id
+        root.commitVisualState(data, false)
+        root.flushVisualLayoutSave()
+    }
+
+    function saveVisualProfileAs(profileId) {
+        var id = String(profileId || "").trim().toLowerCase()
+            .replace(/\s+/g, "-")
+        if (!/^[a-z][a-z0-9._-]{0,47}$/.test(id))
+            return
+        var data = root.visualClone()
+        var theme = root.visualThemeObject(data, root.visualThemeId)
+        var source = root.visualProfileObject(
+            data,
+            root.visualThemeId,
+            root.visualProfileId
+        )
+        if (!theme || !source)
+            return
+        var sourceProfileId = root.visualProfileId
+        theme.profiles = theme.profiles || {}
+        theme.profiles[id] = root.visualCloneObject(source)
+        theme.profiles[id].name = id
+        data.activeProfile = id
+        root.commitVisualState(data, false)
+        root.flushVisualLayoutSave()
+        root.copyWorkbenchProfileExtensions(sourceProfileId, id)
+    }
+
+    function visualCloneObject(value) {
+        try {
+            return JSON.parse(JSON.stringify(value || {}))
+        } catch (err) {
+            return {}
+        }
+    }
+
+    function resetVisualProfile() {
+        var data = root.visualClone()
+        var theme = root.visualThemeObject(data, root.visualThemeId)
+        if (!theme || !theme.profiles || !theme.profiles.standard)
+            return
+        var profileName = String(
+            (theme.profiles[root.visualProfileId] || {}).name
+                || root.visualProfileId
+        )
+        theme.profiles[root.visualProfileId] = root.visualCloneObject(
+            theme.profiles.standard
+        )
+        theme.profiles[root.visualProfileId].name = profileName
+        data.activeProfile = root.visualProfileId
+        root.commitVisualState(data, false)
+        root.flushVisualLayoutSave()
+        root.resetWorkbenchExtensions()
+        if (root.settingsOpen)
+            Qt.callLater(root.positionSettingsPopup)
+    }
+
+    function resetVisualStandard() {
+        if (root.surfaceHost && root.surfaceHost.resetVisualLayoutState) {
+            var raw = root.surfaceHost.resetVisualLayoutState()
+            try {
+                var data = JSON.parse(raw || "{}")
+                root.walletX = -1
+                root.walletY = -1
+                root.settingsX = -1
+                root.settingsY = -1
+                root.settingsMoved = false
+                root.commitVisualState(data, true)
+                root.resetWorkbenchExtensions()
+                if (root.settingsOpen)
+                    Qt.callLater(root.positionSettingsPopup)
+                return
+            } catch (err) {
+            }
+        }
+    }
+
+    function selectVisualSurface(surfaceId) {
+        var id = String(surfaceId || "")
+        var registry = root.visualLayoutData
+            ? root.visualLayoutData.surfaceRegistry || []
+            : []
+        var found = false
+        for (var i = 0; i < registry.length; i++) {
+            if (String(registry[i].id || "") === id) {
+                found = true
+                break
+            }
+        }
+        if (!found)
+            return
+        var entry = root.visualSurfaceEntry(id)
+        if (!entry || !root.visualLayoutData)
+            return
+        root.visualSelectedSurface = id
+        root.updateVisualProfile(function(profile) {
+            profile.sourceSurface = id
+        })
+    }
+
+    function openVisualSource(surfaceId) {
+        var id = String(surfaceId || "").trim()
+        if (!id)
+            return
+        root.selectVisualSurface(id)
+        if (root.visualSelectedSurface !== id)
+            return
+        if (id === "wallet") {
+            root.closeSettings()
+            root.walletOpen = true
+        } else if (id === "settings") {
+            root.walletOpen = false
+            root.settingsOpen = true
+        }
+        root.visualEditorMode = "SOURCE"
+        root.updateVisualProfile(function(profile) {
+            profile.editorMode = "SOURCE"
+            profile.sourceSurface = id
+        })
+        if (settingsPopup && root.settingsOpen)
+            settingsPopup.page = "EDITOR"
+        if (!root.surfaceHost || !root.surfaceHost.loadVisualSource)
+            return
+        // Profile/theme selection may still be in the short debounce window.
+        // Flush it before reading a profile-local source buffer.
+        root.flushVisualLayoutSave()
+        var raw = root.surfaceHost.loadVisualSource(
+            id,
+            root.visualThemeId,
+            root.visualProfileId
+        )
+        try {
+            var payload = JSON.parse(raw || "{}")
+            root.visualSourceText = String(payload.source || "")
+            root.visualSourcePath = String(payload.relativePath || "")
+            root.visualSourceStatus = payload.status === "PASS"
+                ? (payload.isBuffer ? "BUFFER" : "DISK")
+                : String(payload.status || "FAIL")
+        } catch (err) {
+            root.visualSourceStatus = "FAIL"
+        }
+    }
+
+    function closeVisualSource() {
+        root.visualEditorMode = "NORMAL"
+        root.updateVisualProfile(function(profile) {
+            profile.editorMode = "NORMAL"
+        })
+        root.flushVisualLayoutSave()
+    }
+
+    function saveVisualSource(source) {
+        var id = root.visualSelectedSurface
+        if (!id || !root.surfaceHost || !root.surfaceHost.saveVisualSourceBuffer)
+            return
+        root.flushVisualLayoutSave()
+        var raw = root.surfaceHost.saveVisualSourceBuffer(
+            id,
+            root.visualThemeId,
+            root.visualProfileId,
+            String(source || "")
+        )
+        try {
+            var payload = JSON.parse(raw || "{}")
+            root.visualSourceText = String(source || "")
+            root.visualSourceStatus = String(payload.status || "FAIL")
+            if (payload.status === "BUFFER_SAVED") {
+                root.updateVisualProfile(function(profile) {
+                    if (profile.surfaces && profile.surfaces[id])
+                        profile.surfaces[id].sourceBuffer = String(source || "")
+                })
+                root.flushVisualLayoutSave()
+            }
+        } catch (err) {
+            root.visualSourceStatus = "FAIL"
+        }
+    }
+
+    function moveVisualSurface(surfaceId, dx, dy) {
+        var id = String(surfaceId || "")
+        var target = null
+        if (id === "chat") target = chatSurface
+        else if (id === "workspace") target = workspaceLoader
+        else if (id === "utility") target = utilitySurface
+        else if (id === "telemetry") target = telemetry
+        else if (id === "wallet") target = walletPopup
+        else if (id === "settings") target = settingsPopup
+        if (!target)
+            return
+        var entry = root.visualSurfaceEntry(id)
+        root.updateVisualProfile(function(profile) {
+            var surface = profile.surfaces[id]
+            if (!surface)
+                return
+            if (id === "wallet" || id === "settings") {
+                var x = Number(surface.x)
+                var y = Number(surface.y)
+                if (x < 0) {
+                    var point = target.mapToItem(root.contentItem, 0, 0)
+                    x = point.x
+                }
+                if (y < 0) {
+                    var pointY = target.mapToItem(root.contentItem, 0, 0)
+                    y = pointY.y
+                }
+                surface.x = Math.max(0, x + Number(dx || 0))
+                surface.y = Math.max(0, y + Number(dy || 0))
+                if (id === "wallet") {
+                    root.walletX = surface.x
+                    root.walletY = surface.y
+                } else {
+                    root.settingsX = surface.x
+                    root.settingsY = surface.y
+                    root.settingsMoved = true
+                }
+            } else {
+                surface.offsetX = Number(surface.offsetX || 0) + Number(dx || 0)
+                surface.offsetY = Number(surface.offsetY || 0) + Number(dy || 0)
+            }
+        })
+    }
+
+    function resizeVisualSurface(surfaceId, corner, dx, dy) {
+        var id = String(surfaceId || "")
+        var amount = (Number(dx || 0) + Number(dy || 0)) / 2
+        if (corner === "TOP_LEFT" || corner === "BOTTOM_LEFT")
+            amount = -amount
+        if (corner === "TOP_RIGHT" || corner === "BOTTOM_RIGHT")
+            amount = amount
+        root.updateVisualProfile(function(profile) {
+            var surface = profile.surfaces[id]
+            if (!surface)
+                return
+            if (id === "wallet" || id === "settings") {
+                var currentWidth = Number(surface.width)
+                if (currentWidth < 0)
+                    currentWidth = id === "wallet" ? 328 : 760
+                var currentHeight = Number(surface.height)
+                if (currentHeight < 0)
+                    currentHeight = id === "wallet" ? 360 : 620
+                surface.width = Math.max(260, currentWidth + amount)
+                surface.height = Math.max(260, currentHeight + amount)
+            } else {
+                surface.scale = Math.max(
+                    0.45,
+                    Math.min(2.5, Number(surface.scale || 1) + amount / 500)
+                )
+            }
+        })
+    }
+
+    function handleVisualCommand(payload) {
+        var parsed = {}
+        try {
+            parsed = JSON.parse(payload || "{}")
+        } catch (err) {
+            return
+        }
+        if (!parsed.valid) {
+            root.settingsOpen = true
+            if (settingsPopup)
+                settingsPopup.page = "EDITOR"
+            return
+        }
+        var command = String(parsed.command || "")
+        var action = String(parsed.action || "")
+        if (command === "/theme") {
+            if (action === "use")
+                root.setVisualTheme(parsed.id)
+            else if (action === "save")
+                root.saveVisualThemeAs(parsed.id)
+            root.settingsOpen = true
+            if (settingsPopup)
+                settingsPopup.page = "PROFILES"
+        } else if (command === "/profile") {
+            if (action === "use")
+                root.setVisualProfile(parsed.id)
+            else if (action === "save")
+                root.saveVisualProfileAs(parsed.id)
+            else if (action === "reset")
+                root.resetVisualProfile()
+            root.settingsOpen = true
+            if (settingsPopup)
+                settingsPopup.page = "PROFILES"
+        } else if (command === "/layout") {
+            if (action === "lock")
+                root.setVisualLock(true)
+            else if (action === "unlock")
+                root.setVisualLock(false)
+            else if (action === "reset")
+                root.resetVisualStandard()
+            root.settingsOpen = true
+            if (settingsPopup)
+                settingsPopup.page = action === "surfaces"
+                    ? "SURFACES"
+                    : "EDITOR"
+        } else if (command === "/source") {
+            if (action === "close")
+                root.closeVisualSource()
+            else if (String(parsed.surface || "").length > 0)
+                root.openVisualSource(parsed.surface)
+            else {
+                root.settingsOpen = true
+                if (settingsPopup)
+                    settingsPopup.page = "EDITOR"
+            }
+        } else if (command === "/view") {
+            if (action === "open" && workspace
+                    && root.workbenchHostEnabled(parsed.kind)) {
+                workspace.setHostKind(String(parsed.kind || "CODE"))
+                root.closeSettings()
+            } else {
+                root.openSettingsPage("WORKSPACE")
+            }
+        } else if (command === "/engine") {
+            if (action === "use") {
+                root.engineTarget = String(parsed.target || root.engineTarget)
+                root.persistDesktopSettings()
+            } else {
+                root.openSettingsPage("CHAT")
+            }
+        } else if (command === "/extension") {
+            if (action === "enable" || action === "disable")
+                root.setWorkbenchExtensionEnabled(
+                    String(parsed.id || ""),
+                    action === "enable"
+                )
+            root.openSettingsPage("EXTENSIONS")
+        } else if (command === "/settings") {
+            root.openSettingsPage(String(parsed.page || "APPEARANCE"))
+        } else if (command === "/quickopen") {
+            root.openQuickOpen()
+        }
+    }
+
+    function setVisualLock(locked) {
+        var value = Boolean(locked)
+        root.visualLayoutLocked = value
+        root.updateVisualProfile(function(profile) {
+            profile.locked = value
+        })
+        root.flushVisualLayoutSave()
+    }
+
+    function setVisualEditorMode(mode) {
+        var value = String(mode || "NORMAL").toUpperCase()
+        if (value !== "SOURCE")
+            value = "NORMAL"
+        if (value === "SOURCE" && root.visualSelectedSurface.length > 0) {
+            root.openVisualSource(root.visualSelectedSurface)
+            return
+        }
+        root.visualEditorMode = value
+        root.updateVisualProfile(function(profile) {
+            profile.editorMode = value
+        })
+        root.flushVisualLayoutSave()
+    }
+
+    Timer {
+        id: visualSaveTimer
+        interval: 180
+        repeat: false
+        onTriggered: root.flushVisualLayoutSave()
     }
 
     function applyDesktopShellNow() {
@@ -719,6 +1830,8 @@ ApplicationWindow {
         return JSON.stringify({
             "schema": "gg.workbench.context-snapshot.v1",
             "workspace": workspaceSnapshot,
+            "workspaceFolders": root.workspaceFolders || [],
+            "workspaceTrusted": root.workspaceTrusted,
             "recentChat": recentChat
         })
     }
@@ -1284,21 +2397,38 @@ ApplicationWindow {
                     id: settingsButton
                     objectName: "topBarSettingsButton"
                     text: "SETTINGS"
-                    color: workspace && workspace.settingsOpen ? "#e6edf3" : "#c8cdd4"
+                    color: root.settingsOpen ? "#e6edf3" : "#c8cdd4"
                     font.family: "monospace"
                     font.pixelSize: 13
-                    font.bold: workspace && workspace.settingsOpen
+                    font.bold: root.settingsOpen
 
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (!workspace)
-                                return
-                            workspace.settingsOpen
-                                ? workspace.closeSettings()
-                                : workspace.openSettings()
-                        }
+                        onClicked: root.toggleSettings()
+                    }
+                }
+
+                Text {
+                    text: "·"
+                    color: "#a8b0b8"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    id: commandPaletteButton
+                    objectName: "topBarCommandPaletteButton"
+                    text: "COMMANDS"
+                    color: root.commandPaletteOpen ? "#e6edf3" : "#c8cdd4"
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    font.bold: root.commandPaletteOpen
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.openCommandPalette()
                     }
                 }
 
@@ -1324,6 +2454,10 @@ ApplicationWindow {
                             if (root.shellLoading)
                                 return
                             root.beginShellLoad("RELOAD")
+                            // RELOAD clears both loaders first. Queue the
+                            // normal shell pipeline again so the button cannot
+                            // strand the desktop in an empty workspace.
+                            Qt.callLater(root.loadNextShellFile)
                             if (root.surfaceHost && root.surfaceHost.restartDesktop)
                                 root.surfaceHost.restartDesktop()
                         }
@@ -1440,7 +2574,12 @@ ApplicationWindow {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            root.walletOpen = !root.walletOpen
+                            if (root.walletOpen) {
+                                root.walletOpen = false
+                                return
+                            }
+                            root.closeSettings()
+                            root.walletOpen = true
                             if (root.walletOpen) {
                                 if (root.walletX < 0) {
                                     root.walletX = Math.max(12, root.width - 346)
@@ -1475,6 +2614,19 @@ ApplicationWindow {
             Item {
                 id: chatSurface
                 objectName: "chatSurface"
+                property real visualOffsetX: 0
+                property real visualOffsetY: 0
+                property real visualScale: 1
+                transform: [
+                    Translate {
+                        x: chatSurface.visualOffsetX
+                        y: chatSurface.visualOffsetY
+                    },
+                    Scale {
+                        xScale: chatSurface.visualScale
+                        yScale: chatSurface.visualScale
+                    }
+                ]
                 visible: !root.narrowLayout || root.narrowPane === "CHAT"
                 width: root.narrowLayout
                     ? body.width
@@ -1854,6 +3006,12 @@ ApplicationWindow {
                                             wrapMode: TextEdit.NoWrap
                                             font.family: "monospace"
                                             font.pixelSize: 12
+                                            selectionColor: "#3a3a3a"
+                                            selectedTextColor: "#f2f2f2"
+
+                                            SelectionGuard {
+                                                editor: codeblockView
+                                            }
                                         }
 
                                         ScrollBar.vertical: GgScrollBar {}
@@ -2100,6 +3258,19 @@ ApplicationWindow {
                 Loader {
                     id: workspaceLoader
                     objectName: "workspaceLoader"
+                    property real visualOffsetX: 0
+                    property real visualOffsetY: 0
+                    property real visualScale: 1
+                    transform: [
+                        Translate {
+                            x: workspaceLoader.visualOffsetX
+                            y: workspaceLoader.visualOffsetY
+                        },
+                        Scale {
+                            xScale: workspaceLoader.visualScale
+                            yScale: workspaceLoader.visualScale
+                        }
+                    ]
                     asynchronous: true
                     visible: !root.narrowLayout || root.narrowPane === "WORKSPACE"
                     anchors.left: parent.left
@@ -2120,6 +3291,19 @@ ApplicationWindow {
 
                 Loader {
                     id: utilitySurface
+                    property real visualOffsetX: 0
+                    property real visualOffsetY: 0
+                    property real visualScale: 1
+                    transform: [
+                        Translate {
+                            x: utilitySurface.visualOffsetX
+                            y: utilitySurface.visualOffsetY
+                        },
+                        Scale {
+                            xScale: utilitySurface.visualScale
+                            yScale: utilitySurface.visualScale
+                        }
+                    ]
                     anchors.bottomMargin: 0
                     objectName: "utilitySurfaceLoader"
                     asynchronous: true
@@ -2143,6 +3327,19 @@ ApplicationWindow {
 
             TelemetryRail {
                 id: telemetry
+                property real visualOffsetX: 0
+                property real visualOffsetY: 0
+                property real visualScale: 1
+                transform: [
+                    Translate {
+                        x: telemetry.visualOffsetX
+                        y: telemetry.visualOffsetY
+                    },
+                    Scale {
+                        xScale: telemetry.visualScale
+                        yScale: telemetry.visualScale
+                    }
+                ]
                 visible: !root.compactTelemetry && !root.narrowLayout
                 width: root.alphaTelemetryWidth
                 height: body.height
@@ -2290,6 +3487,9 @@ ApplicationWindow {
         surfaceHost: root.surfaceHost
         frameBorder: root.frameBorder
         frameRadius: root.frameRadius
+        layoutLocked: root.visualLayoutLocked
+        visualWidth: root.visualSurfaceMetric("wallet", "width", -1)
+        visualHeight: root.visualSurfaceMetric("wallet", "height", -1)
         statusJson: root.cryptoStatusJson
         onRequestClose: root.walletOpen = false
         onWalletStatusUpdated: function(raw) {
@@ -2312,6 +3512,220 @@ ApplicationWindow {
             if (visible)
                 walletPopup.pull()
         }
+    }
+
+    SettingsPopup {
+        id: settingsPopup
+        objectName: "settingsPopup"
+        z: 9999
+        visible: root.settingsOpen
+        x: root.settingsX < 0
+            ? 12
+            : root.settingsX
+        y: root.settingsY < 0 ? 60 : root.settingsY
+        chatWidthRatio: root.alphaChatWidthRatio
+        telemetryWidth: root.alphaTelemetryWidth
+        accentColor: root.cyan
+        frameBorder: root.frameBorder
+        frameRadius: root.frameRadius
+        layoutLocked: root.visualLayoutLocked
+        visualWidth: root.visualSurfaceMetric("settings", "width", -1)
+        visualHeight: root.visualSurfaceMetric("settings", "height", -1)
+        showDemoFixtures: root.alphaShowDemoFixtures
+        showProductSourceTabs: root.showProductSourceTabs
+        showOpenTabInInput: root.showOpenTabInInput
+        showInnerEditorChrome: root.showInnerEditorChrome
+        hostKind: workspace ? workspace.hostKind : "CODE"
+        engineTarget: root.engineTarget
+        utilityHeight: root.alphaUtilityHeight
+        desktopShell: root.desktopShell
+        visualThemeId: root.visualThemeId
+        visualProfileId: root.visualProfileId
+        visualThemesJson: root.visualThemesJson
+        visualProfilesJson: root.visualProfilesJson
+        visualSurfaceRegistryJson: root.visualSurfaceRegistryJson
+        visualSelectedSurface: root.visualSelectedSurface
+        visualEditorMode: root.visualEditorMode
+        visualSourceText: root.visualSourceText
+        visualSourcePath: root.visualSourcePath
+        visualSourceStatus: root.visualSourceStatus
+        extensionsJson: root.workbenchExtensionsJson
+        workspaceFoldersJson: JSON.stringify(root.workspaceFolders || [])
+        workspaceTrusted: root.workspaceTrusted
+
+        onCloseRequested: root.closeSettings()
+        onChatWidthRatioChangedByUser: function(value) {
+            root.alphaChatWidthRatio = value
+            root.persistDesktopSettings()
+        }
+        onTelemetryWidthChangedByUser: function(value) {
+            root.alphaTelemetryWidth = value
+            root.persistDesktopSettings()
+        }
+        onAccentColorChangedByUser: function(value) {
+            root.cyan = value
+            root.persistDesktopSettings()
+        }
+        onFrameBorderChangedByUser: function(value) {
+            root.frameBorder = value
+            root.persistDesktopSettings()
+        }
+        onFrameRadiusChangedByUser: function(value) {
+            root.frameRadius = value
+            root.persistDesktopSettings()
+        }
+        onDemoVisibilityChangedByUser: function(value) {
+            root.alphaShowDemoFixtures = value
+            root.persistDesktopSettings()
+        }
+        onProductSourceTabsChangedByUser: function(value) {
+            root.showProductSourceTabs = value
+            root.persistDesktopSettings()
+        }
+        onShowOpenTabInInputChangedByUser: function(value) {
+            root.showOpenTabInInput = value
+            root.persistDesktopSettings()
+        }
+        onShowInnerEditorChromeChangedByUser: function(value) {
+            root.showInnerEditorChrome = value
+            root.persistDesktopSettings()
+        }
+        onHostKindChangedByUser: function(value) {
+            if (workspace && workspace.setHostKind)
+                workspace.setHostKind(value)
+            root.closeSettings()
+        }
+        onSpawnInstanceRequested: {
+            if (workspace && workspace.spawnHostInstance)
+                workspace.spawnHostInstance()
+            root.closeSettings()
+        }
+        onEngineTargetChangedByUser: function(value) {
+            root.engineTarget = value
+            root.persistDesktopSettings()
+        }
+        onUtilityHeightChangedByUser: function(value) {
+            root.alphaUtilityHeight = value
+            root.persistDesktopSettings()
+        }
+        onDesktopShellChangedByUser: function(value) {
+            root.desktopShell = value
+        }
+        onExtensionEnabledChangedByUser: function(extensionId, enabled) {
+            root.setWorkbenchExtensionEnabled(extensionId, enabled)
+        }
+        onResetExtensionsRequested: root.resetWorkbenchExtensions()
+        onWorkspaceFoldersChangedByUser: function(foldersJson) {
+            try {
+                var folders = JSON.parse(foldersJson || "[]")
+                root.workspaceFolders = folders instanceof Array ? folders : []
+            } catch (err) {
+                root.workspaceFolders = []
+            }
+            root.persistDesktopSettings()
+        }
+        onWorkspaceTrustedChangedByUser: function(value) {
+            root.workspaceTrusted = Boolean(value)
+            root.persistDesktopSettings()
+        }
+        onVisualThemeRequested: function(value) {
+            root.setVisualTheme(value)
+        }
+        onVisualSaveThemeRequested: function(value) {
+            root.saveVisualThemeAs(value)
+        }
+        onVisualProfileRequested: function(value) {
+            root.setVisualProfile(value)
+        }
+        onVisualSaveProfileRequested: function(value) {
+            root.saveVisualProfileAs(value)
+        }
+        onVisualResetProfileRequested: root.resetVisualProfile()
+        onVisualSurfaceRequested: function(value) {
+            root.selectVisualSurface(value)
+            if (settingsPopup && settingsPopup.page === "EDITOR")
+                root.openVisualSource(value)
+        }
+        onVisualSourceRequested: function(value) {
+            root.openVisualSource(value)
+        }
+        onVisualLockRequested: function(value) {
+            root.setVisualLock(value)
+        }
+        onVisualModeRequested: function(value) {
+            root.setVisualEditorMode(value)
+        }
+        onVisualSourceSaveRequested: function(value) {
+            root.saveVisualSource(value)
+        }
+        onVisualSourceCloseRequested: root.closeVisualSource()
+        onResetVisualRequested: root.resetVisualStandard()
+        onXChanged: {
+            if (visible) {
+                root.settingsX = x
+                root.settingsMoved = true
+            }
+        }
+        onYChanged: {
+            if (visible) {
+                root.settingsY = y
+                root.settingsMoved = true
+            }
+        }
+    }
+
+    CommandPalette {
+        id: commandPalette
+        objectName: "commandPalette"
+        parent: root.contentItem
+        anchors.fill: parent
+        z: 11000
+        visible: root.commandPaletteOpen
+        title: root.commandPaletteMode === "QUICK_OPEN"
+            ? "QUICK OPEN"
+            : "COMMAND PALETTE"
+        placeholderText: root.commandPaletteMode === "QUICK_OPEN"
+            ? "Search files, views or settings..."
+            : "Type a command..."
+        footerHint: root.commandPaletteMode === "QUICK_OPEN"
+            ? "Ctrl+P"
+            : "Ctrl+Shift+P / F1"
+        commands: root.commandPaletteItems()
+
+        onCommandRequested: function(commandId) {
+            root.executeCommand(commandId)
+        }
+        onDismissed: root.commandPaletteOpen = false
+    }
+
+    VisualLayoutOverlay {
+        id: visualLayoutOverlay
+        objectName: "visualLayoutOverlay"
+        parent: root.contentItem
+        anchors.fill: parent
+        z: 10000
+        surfaceModel: root.visualSurfaceModel()
+        layoutUnlocked: !root.visualLayoutLocked
+        editorMode: root.visualEditorMode
+        sourceSurface: root.visualSelectedSurface
+        sourceText: root.visualSourceText
+        sourcePath: root.visualSourcePath
+        sourceStatus: root.visualSourceStatus
+        frameBorder: root.frameBorder
+        accentColor: root.cyan
+
+        onSurfaceResizeRequested: function(surfaceId, corner, dx, dy) {
+            root.resizeVisualSurface(surfaceId, corner, dx, dy)
+        }
+        onSurfaceMoveRequested: function(surfaceId, dx, dy) {
+            root.moveVisualSurface(surfaceId, dx, dy)
+        }
+        onSourceSaveRequested: function(surfaceId, source) {
+            if (root.visualSelectedSurface !== surfaceId)
+                root.selectVisualSurface(surfaceId)
+            root.saveVisualSource(source)
+        }
+        onSourceCloseRequested: root.closeVisualSource()
     }
 
     WebAgentCursor {

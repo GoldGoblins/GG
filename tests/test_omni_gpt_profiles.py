@@ -38,6 +38,8 @@ def main() -> int:
         assert "default_lens=GG Idékompassen" in context
         assert "ai-installator" in context
         assert "AGENTS.md" in context
+        assert "[GG SYSTEM ONE]" in context
+        assert "authority=NONE" in context
         compact = build_context(
             "Jag har en idé om en GPT och vill förstå vad jag menar",
             root=root,

@@ -17,6 +17,10 @@ def main() -> int:
         raise AssertionError("flow must not spawn a second brain")
     if empty["action_authority"] != "NONE":
         raise AssertionError("flow must not grant authority")
+    if empty.get("verifier_context") != "FRESH":
+        raise AssertionError("verifier must not share the worker context")
+    if (empty.get("diamond") or {}).get("verify") != "TEST":
+        raise AssertionError("verify in code, not in chat")
     if [row["id"] for row in empty["stages"]] != list(agent_flow.STAGES):
         raise AssertionError("stage order")
 

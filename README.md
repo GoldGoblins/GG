@@ -4,6 +4,18 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
+## Patch notes · 2026-09-24 · settings, OSINT scale and GAME ENGINE world systems
+
+This release collects the desktop work since the 2026-09-10 patch, through session 62.
+
+**Settings and CODE.** SETTINGS now opens as a modular popup with search and visual controls for named profiles, surfaces and layout editing. CODE adds a command palette and an in-workspace runner/live-aid entry. The workspace also fixes a duplicate QML host-change handler that could stop startup loading.
+
+**OSINT map.** Dense location feeds are reduced into zoom-aware grid buckets before they reach the map, keeping marker work bounded as the view changes. OSINT remains a separate surface from GAME ENGINE; the bundled camera-location pins are sample map data, not live video.
+
+**GAME ENGINE.** The local simulation now carries individual NPC identity, progression and gear alongside quest/dialogue, faction, social and world-event state. Item, equipment, crafting and trade changes are recorded with the local event journal. Terrain and render LOD limit visible work, and the presentation-only DOS view can continue showing the same simulation state when rich 3D is unavailable. This is a bounded local game slice; it does not claim an online MMO server.
+
+**Original Blender assets.** The included pipeline builds original low-poly hero, NPC and world-prop assets and loads them through the bounded asset contract, with native geometry available as fallback. Third-party game meshes and textures used only as private design references are not part of this release.
+
 ## Patch notes · 2026-09-10 · wallet box, CRYPTO desk, FLOW TUI, house chrome
 
 What GitHub had until this push: same-task thought desk, paper CRYPTO DESK,
@@ -140,6 +152,298 @@ boundary, but no sockets, server, account access or live multiplayer are
 enabled. The architecture takes inspiration from the requested fast,
 gameplay-first engines while remaining original code; no source code or
 assets from those projects are bundled.
+
+Physics stays at a deterministic 60 Hz. The visible QML surface consumes a
+bounded 30 Hz render snapshot (20 Hz in stress mode), pauses the local runtime
+when the surface is hidden, and uses QtQuick3D's native `Repeater3D` with a
+compact primitive scale. OSINT is a separate read-only surface and is not a
+Game Engine data or rendering dependency.
+
+## Patch notes · 2026-09-13 · world-scale foundation
+
+The GAME ENGINE now exposes a versioned world contract for the long-term MMO
+direction: deterministic cell keys, invisible cell streaming, camera-relative
+rendering, a provisional planet frame, projected-error LOD metadata and the
+reachable-terrain rule. The local player also has one shared movement contract
+with `GROUND`, `SWIM` and `FLY` modes, while the original fixed-step replay
+path remains compatible.
+
+The visible surface exposes the three modes with buttons and keyboard
+shortcuts. This is still a local preview: it does not claim to be a globe
+renderer, MMO server or native GPU renderer yet. The next renderer pass can
+consume the same world cells for visibility, instancing, AI, networking and
+the future in-game editor.
+
+The same pass now also contains a versioned, data-driven content catalogue:
+three movement abilities, deterministic affix loot, two enchantments, a recipe,
+races/specs/talents and level/ascension/paragon state. The PLAY and SCENE pages
+can fire abilities, roll and enchant loot, craft a ration, place bounded live
+props/ramps and undo them. The NET page exposes a memory-only save/load seam;
+there are still no sockets, accounts or filesystem save writes.
+
+Rendering policy is now explicit rather than implied: POTATO, BALANCED, MODERN
+and CINEMATIC profiles carry resolution, AA, upscaler, shadow, texture and
+visible-instance budgets. The current surface uses QtQuick3D through Qt RHI and
+applies NoAA/MSAA/SSAA plus optional temporal AA through SceneEnvironment;
+View3D exposes Qt's frame/render timing while the host reports CPU snapshot
+timing. Vendor upscalers (DLSS/FSR/XeSS), GPU timestamp queries and a native
+QQuick3D instancing subclass remain optional runtime layers, so the preview
+does not pretend a GPU feature is active when it is not.
+The same GAME ENGINE slice now generates a deterministic analytic heightfield
+for the loaded cells. Each cell carries a stable seed, biome, corner/center
+height samples, an LOD-sized height grid, water depth, movement modes, patch
+geometry choice and render/physics visibility policy. A lazy QtQuick3D geometry
+cache turns the grids into indexed low-polygon terrain meshes with normals, so
+the scene shows slopes and hills rather than one cube slab per cell; a shared
+sea-level surface still handles water. Character-like entities use one shared
+low-poly body mesh plus a small head material, while props remain rounded
+low-cost primitives. Terrain meshes add shallow edge skirts to hide only
+cross-LOD T-junction cracks; the authoritative heightfield and physics remain
+unchanged. The stage fills the body and its navigation and inspector cards
+float above the render, matching the information-dense OSINT composition.
+This is intentionally a small world primitive; richer authored terrain, boats,
+NPC schedules/dialogue/combat and a native globe renderer remain later layers.
+The SCENE page also exposes bounded terrain authoring commands (raise, lower,
+land, water, reef, island, clear and undo); these are stored as cell patches
+and included in the memory-only save/load seam. `SHIFT+CLICK`/drag in the
+viewport targets any currently loaded cell, while `BRUSH ON` emits compact
+sub-cell height stamps as the pointer moves. Radius (`0.75`–`20` m) and
+falloff (`SMOOTH`, `LINEAR`, `SHARP`, `GAUSSIAN`) are visible in the inspector;
+the backend clamps them, indexes touched cells for cheap evaluation, and
+persists the stamps with undo. The backend revalidates every target against the
+current interest set. Height edits use one continuous analytic field, so
+stamps may cross streamed cell edges without seams or a per-pixel sculpt
+buffer.
+The ten-layer implementation contract and its remaining boundaries are kept in
+[`GAME_ENGINE_ARCHITECTURE.md`](GAME_ENGINE_ARCHITECTURE.md).
+
+The terrain preview now keeps the low-resolution seabed mesh alive in water
+cells as well. The shared sea-level surface covers submerged geometry while
+shallow cells retain their shoreline shape, and normals come from the global
+heightfield so LOD changes do not create a lighting break at a cell edge.
+
+## Patch notes · 2026-09-13 · deterministic NPC vertical slice
+
+The GAME ENGINE now seeds three readable NPC archetypes in the same bounded
+runtime pool as the player: a WANDERER, GUARDIAN and CRITTER. Their compact
+state machine uses deterministic radial perception and exposes `WANDER`,
+`FOLLOW`, `ALERT` and `FLEE` states. Decisions run at 20 Hz while steering and
+terrain-following movement stay on the fixed 60 Hz simulation. The local
+steering target is clamped to each NPC's authored home radius, so the preview
+gets visible life without pretending that a remote server authority is already
+connected.
+
+NPCs are also available from the in-game SCENE editor. A placed NPC is a real
+character-like figure, participates in the same editor undo and memory save/load
+path, and is represented in the OSINT-like overlay with its state, perception
+cadence and navigation boundary.
+
+The first navigation layer is now present as a bounded tiled heightfield: 4 m
+walk tiles inherit the terrain height/normal contract, reject excessive slopes
+and steps, and expose deterministic four-connected A* over the currently
+streamed cells. Tile construction is cached until the cell set, movement mode
+  or terrain-edit revision changes. The player now has a separate WoW-style
+  third-person controller with W/S character-facing movement, A/D turning,
+  Q/E strafe, normalized diagonals, sprint, grounded jump and fixed-step
+  vertical contact. NPC decisions now consume short bounded A* routes
+over the same loaded heightfield when possible, with bounded direct steering as
+fallback; schedules, dialogue, combat and crowd avoidance remain later layers.
+
+## Patch notes · 2026-09-13 · low-cost locomotion pose seam
+
+Character-like entities now carry a deterministic root-pose contract with
+`IDLE`, `WALK`, `SPRINT` and `AIR` states. The current shared low-poly body
+uses bounded bob, lean, sway and squash accents, driven by fixed-step time and
+speed. Eight cached phase variants now move the limbs inside the same single
+body draw path, so walking and sprinting read as motion without a skeleton,
+texture set or per-limb render fan-out. A future skinned asset can reuse the
+same state and phase.
+
+## Patch notes · 2026-09-14 · authored/skinned asset import
+
+The preview now has a bounded local glTF 2.0/GLB asset seam. A backend
+validator admits only allowlisted local files and checks source, buffer, mesh,
+vertex, joint and animation budgets once at startup. Character rows keep the
+same animation state and phase, while adding only an asset binding and an
+instance rank. QtQuick3D `RuntimeLoader` can take over the first eight slots;
+the existing pose mesh remains visible until loading succeeds or if loading
+fails.
+
+The canonical player asset is the original Blender-generated
+`qml/assets/authored/gg-clay-hero-a.glb`: a bounded skinned low-poly clay
+character with 18 joints, 32 skinned mesh parts, six equipment sockets and
+`Idle`, `Walk`, `Sprint` and `Air` clips. Movement, camera orbit, terrain
+physics and render cadence are unchanged. The historical
+`qml/assets/gg-authored-hero.gltf` path is a temporary compatibility alias for
+already-running desktop hosts and does not create a second character body.
+
+## Patch notes · 2026-09-14 · living item/world-state slice
+
+The next layer turns the scene into a small data-driven world: ten item
+definitions, seven rarity levels (`TRASH` through `ARTIFACT`), two deterministic
+loot tables, a supply crate, player equipment and an NPC pocket state. The
+same item instance can move between ground, container, inventory, equipped and
+pocket contexts while keeping its own owner, quantity, condition and 3D visual
+binding.
+
+The PLAY page now renders visible rarity-colored 3D drops and an equipped
+weapon, and exposes `INTERACT`, `PICKUP`, `EQUIP`, `OPEN CACHE`, `LOOT CACHE`
+and `DROP`. Ground items are visual-only and do not consume the fixed physics
+or NPC pool. Proximity is revalidated by the backend, and the item graph is
+included in the local memory save/load round trip.
+
+The first item meshes are native QtQuick3D primitives so the world is alive
+immediately; the asset IDs and context states are ready for authored sword,
+armor, crate and creature meshes later. This keeps the user-facing vision
+moving now while preserving the authored/skinned import seam and its render
+budget.
+
+Four deterministic ambient-life proxies also circulate around the starter
+island using authored fisher/traveler/scout/carrier routes. Their separate
+life contract exposes a 120-second day clock, day/night activities and a
+bounded `PLAYER_NEAR` stimulus in the inspector. They are deliberately
+render-only until schedules, perception and promotion into the bounded NPC
+pool are expanded.
+
+## Patch notes · 2026-09-14 · authored static item takeover
+
+The item seam now has two real local glTF 2.0 fixtures: `gg-authored-saber.gltf`
+and `gg-authored-crate.gltf`. The same allowlisted validator that admits the
+hero asset inspects them as `AUTHORED_STATIC`, and the runtime publishes a
+separate bounded budget for item loaders. The saber can appear on the ground or
+in the player's main hand; the crate can replace its ground primitive. All
+other starter items retain their native QtQuick3D primitive until an authored
+mesh is available.
+
+`RuntimeLoader` takes over only after a successful decode. During loading or an
+error, the original rarity-colored primitive remains visible, so importing a
+mesh cannot make an item disappear. The offscreen QML regression now checks
+both static-item takeovers and the live character fallback path across the
+player, NPCs and ambient-life figures.
+
+## Patch notes · 2026-09-14 · presentation-only DOS failover
+
+The GAME ENGINE now has a second `DOS_2D` presentation stage. It renders the
+same authoritative snapshot through a terminal-style canvas if the rich 3D
+stage is unavailable; changing stages never resets or forks simulation,
+inventory, gear, loot or NPC state. This is an in-process graphics failover
+today; a future outer process watchdog can cover a complete QtQuick3D/plugin
+crash.
+
+The fallback also accepts a bounded command grammar. `MOVE`/`TURN` use finite
+fixed-step impulses, and item, NPC, trade, crafting, persistence and presentation
+commands dispatch to the same runtime methods as rich-mode controls. The
+parser does not execute shell text or maintain a second DOS world.
+
+## Patch notes · 2026-09-14 · authoritative event journal
+
+The GAME ENGINE now records real state transitions in a bounded
+`gg.game-engine.events.v1` journal. Each row has a monotonic sequence, fixed
+step time, actor/subject/target IDs, outcome text and a sanitized payload.
+Loot, crafting, sockets, enchants, item movement, NPC interactions, NPC world
+intents and memory SAVE/LOAD boundaries are recorded from the canonical state
+path; the journal is not a fake progress layer or a second simulation.
+
+The structured history is persisted with the existing memory-only payload and
+the latest rows are also rendered in the DOS terminal fallback. The old
+compact event list remains for existing UI panels while the new journal gives
+future logs, replay inspection and NPC world actions a stable data contract.
+
+## Patch notes · 2026-09-14 · committed NPC world actions
+
+NPC decisions now have a bounded commit phase. Nearby `GATHER`/`HAUL` actions
+move real world item instances into the NPC pocket, food is actually
+consumed, water need is actually refilled at a valid water/cooking station,
+and `CRAFT` consumes and produces the recipe IDs held by that individual. Rest,
+observation and inspection update durable needs, relationships or memory.
+Failed actions remain no-ops and are journaled with a bounded reason; no
+synthetic inventory or progress is created. The NPC tracker exposes the last
+committed outcome.
+
+NPC identity inventory/equipment references are now materialized into real
+`POCKET`/`EQUIPPED` item instances and reconciled on reset/load. A nearby
+physical NPC can exchange one real player inventory instance for one real NPC
+pocket instance through `TRADE`; proximity, LOS, ownership, quest/container
+binding and rollback are validated before mutation. Counts, identity refs,
+NPC memory, `NPC_TRADE` audit rows and the latest trade snapshot use the same
+canonical state, and DOS/QML dispatch to that operation. The first vendor
+economy now reuses the same physical stock: `BUY` and `SELL` validate a live
+nearby vendor, exact item instances, bounded gold and inventory capacity, then
+commit the item, NPC identity, wallet, vendor account, memory and journal under
+one atomic transition. Vendor stock is never a second fake list; it is the
+NPC's materialized `POCKET`.
+
+The starter economy exposes Mira's Shore Stall (`vendor.mira`) with `GOLD`,
+explicit buy/sell price rows and a memory-only wallet. DOS accepts
+`BUY|SELL [vendor-id] instance-id`; omitted vendor IDs resolve the nearest
+configured vendor. Currency and vendor state persist through SAVE/LOAD while
+the outer account/database layer remains intentionally disconnected. Vendor
+stock now replenishes from the existing deterministic loot tables at a bounded
+fixed-step interval, with provenance stored on each physical instance. Current
+prices respond to real stock and per-item demand memory; the QML BAG panel
+shows the live stock limit/restock count and only dispatches actual offer IDs.
+Each vendor also carries bounded authored preferences and need thresholds. Mira
+reads her live NPC needs before a restock, can hold when hunger/thirst/fatigue
+is urgent, and otherwise chooses among valid rolls from the real loot table by
+target stock and preference. Those decisions, selected definitions, actual
+needs and hold counts persist with the vendor account and appear in both the
+rich panel and DOS-backed snapshot; no synthetic item or hidden stock cache is
+created.
+
+## Patch notes · 2026-09-13 · WoW input and OSINT addon overlay
+
+Ground control now follows the requested classic WoW grammar: `W/S` move
+forward/back, `A/D` rotate in place, `Q/E` strafe, right mouse orbits the
+camera, `Space` jumps and `Shift` sprints. The camera no longer changes the
+player's movement vector behind the user's back. A bounded keybinding registry
+exposes the same action names to QML, replay data and the future in-game
+editor; the UI page can capture a new key and restore defaults.
+This project pins that classic behavior deliberately; current live WoW
+defaults can change independently of the documented classic layout.
+
+The stage now has a compact PitBull/oUF-inspired unit-state overlay for player,
+resource, cell and target information. Built-in views are registered as
+data-only, event-driven addons with explicit kilobyte budgets: unit frames,
+action bar, NPC tracker, loot/craft ledger, world navigator and terrain
+authoring. The UI panels use approximately 24–30% background opacity so the
+scene remains the primary surface, in the same information-dense spirit as
+the OSINT view. Third-party scripting is deliberately a later sandbox/ABI
+boundary, not silently executed in this local preview.
+
+The research pass cross-checked the requested
+[Renkai Games PS2 retrospective](https://www.youtube.com/watch?v=QUBrrCTKOmQ),
+[Blizzard's basic movement guide](https://worldofwarcraft.blizzard.com/en-us/news/20151231),
+the [oUF unit-frame documentation](https://ouf-wow-ouf.mintlify.app/), and
+the [Ratchet & Clank postmortem](https://www.gamedeveloper.com/game-platforms/postmortem-insomniac-games-i-ratchet-clank-i-).
+The implementation takeaway is consistent across them: validate readable
+movement and silhouettes early, spend memory explicitly, reuse/instance what
+can be reused, and let presentation and information density carry more of the
+experience than uncontrolled geometry or opaque interface chrome.
+
+## Patch notes · 2026-09-13 · NPC sight and interaction seam
+
+NPC perception now performs a bounded line-of-sight check against the local
+static scene and retains a short last-seen stimulus memory. This makes a
+guardian investigate a remembered position while keeping the 20 Hz decision
+pass cheap; no full behavior-tree or LLM loop is involved. The PLAY overlay
+shows `LOS`/`NO-LOS`, stimulus state and the current interaction affordance.
+
+`INTERACT` selects the nearest NPC inside a 3.5 m talk radius, validates the
+line of sight and returns either a deterministic content response or an
+explicit occlusion result plus an event-stream entry. It is a small seam for
+future dialogue, quests, faction and combat signals rather than a hard-coded
+conversation system.
+
+## Patch notes · 2026-09-13 · TSEU-inspired energy bookkeeping
+
+The GAME ENGINE now exposes a small, honest field-energy ledger inspired by
+the proposed TSEU formulation. It sums tagged rest/kinetic energy and reports
+an explicit game-mass equivalent through `E / c_game²`; charge remains a
+separate gameplay channel and gravity/electromagnetism solvers are not
+pretended to be active. The log/exp identity is available for guarded real
+n-th roots, inverse powers and small-dimensional norms, while the p=2 hot path
+keeps direct `sqrt` for speed. This is a simulation/accounting contract, not a
+new GR mass definition or a claim to have unified the fundamental forces.
 
 ## Patch notes · 2026-09-08 · bounded crypto research + QIP/WASM lab
 
@@ -701,4 +1005,19 @@ LOCAL CHAT BRIDGE
 
 Select **GPTUI** beside **GROK TUI** in the lower-left chat footer (also in Settings). Codex CLI runs inside Universal Operational Stream with its own PTY and terminal grid. Switching engines preserves both running terminal sessions. The selected engine is saved with desktop settings.
 
-Requires `codex` on PATH. Sign in through Codex when prompted; use `/model` to select a model available to your account and `/resume` to reopen a Codex conversation. GPTUI sessions are saved in the same local chat catalog as Grok and resume in the shared GoldGoblins workspace. Both motors read the workspace `AGENTS.md`, which points at the live knowledge-tree HEAD and its verified sources. Codex starts with workspace-write sandboxing and on-request approvals. Restart GG AI Desktop after installing this Python backend change.
+Requires `codex` on PATH. Sign in through Codex when prompted; use `/model` to select a model available to your account and `/resume` to reopen a Codex conversation. GPTUI sessions are saved in the same local chat catalog as Grok and resume in the shared GoldGoblins workspace. Both motors read the workspace `AGENTS.md`, which points at the live knowledge-tree HEAD and its verified sources. GPTUI starts Codex with `--dangerously-bypass-approvals-and-sandbox` (YOLO): Codex has no sandbox boundary and does not pause for its normal CLI approvals. The existing `CODEX_HOME`, `AGENTS.md`, OmniGPT profile layer, agents, skills and plugins remain enabled; the flag changes execution permissions, not instruction or authority precedence. Restart GG AI Desktop after installing this Python backend change.
+
+## GAME ENGINE · NPC progression and gear pursuit
+
+NPCs now have persistent level, XP, stats, spec/talents, professions, paragon,
+ascension and derived power. Their power comes from the real equipped item
+instances, including rarity, quality, sockets, runes/runewords, enchants and
+rolled affixes. NPCs with a scavenging role seek real ground/container loot,
+compare it against their current slot and equip only a genuine upgrade; trade,
+vendor sales and NPC crafting use the same atomic path.
+
+The living-world loop now also has real bounded combat, retaliation, defeat
+loot, quest objectives/rewards, faction reputation and occupation schedules.
+Rich 3D and DOS mode consume the same state, including SAVE/LOAD of the
+simulation clock; the next layers are richer dialogue, population-scale
+crowds and more authored assets/content.

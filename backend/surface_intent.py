@@ -31,6 +31,10 @@ _OSINT = re.compile(
     r"\b(osint|osiris(?:ai)?|intelligence|recon(?:naissance)?)\b",
     re.IGNORECASE,
 )
+_RESEARCH = re.compile(
+    r"\b(research|research desk|researcha|undersök(?:a|ning)?|evidence|evidens|källor|metodminne|sql preview)\b",
+    re.IGNORECASE,
+)
 _QIP = re.compile(
     r"\b(qip|wasm|webassembly|component\s+debugger)\b",
     re.IGNORECASE,
@@ -55,12 +59,15 @@ _DRAW = re.compile(
     r"\b(draw|rita|rit(?:a)?|gimp|photoshop|illustrator|photopea|pixel|canvas|2d|bildrediger(?:are)?)\b",
     re.IGNORECASE,
 )
+_BLENDER = re.compile(r"\b(blender)\b", re.IGNORECASE)
 _BARE = {
     "terminal": "TERMINAL",
     "term": "TERMINAL",
     "web": "WEB",
     "webb": "WEB",
     "external": "EXTERNAL",
+    "ext": "EXTERNAL",
+    "blender": "EXTERNAL",
     "kod": "CODE",
     "code": "CODE",
     "site": "SITE",
@@ -70,6 +77,9 @@ _BARE = {
     "osint": "OSINT",
     "osiris": "OSINT",
     "osirisai": "OSINT",
+    "research": "RESEARCH",
+    "research desk": "RESEARCH",
+    "evidens": "RESEARCH",
     "qip": "QIP",
     "wasm": "QIP",
     "webassembly": "QIP",
@@ -119,6 +129,8 @@ def parse_surface_intent(text: str) -> str:
         return "TMOG"
     if _OSINT.search(value):
         return "OSINT"
+    if _RESEARCH.search(value):
+        return "RESEARCH"
     if _QIP.search(value):
         return "QIP"
     if _GAME_ENGINE.search(value):
@@ -131,6 +143,8 @@ def parse_surface_intent(text: str) -> str:
         return "MEDIA"
     if _DRAW.search(value):
         return "DRAW"
+    if _BLENDER.search(value):
+        return "EXTERNAL"
     if _WEB.search(value):
         return "WEB"
     if _EXTERNAL.search(value):

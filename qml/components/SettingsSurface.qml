@@ -29,6 +29,11 @@ Item {
     property string engineTarget: "GROK_TUI"
     property int utilityHeight: 112
     property bool desktopShell: false
+    property string extensionsJson: "[]"
+    property string workspaceFoldersJson: "[]"
+    property bool workspaceTrusted: true
+    property bool embedded: false
+    property string section: "ALL"
     readonly property string themeId: "obsidian-ledger-standard"
 
     signal chatWidthRatioChangedByUser(real value)
@@ -45,14 +50,42 @@ Item {
     signal engineTargetChangedByUser(string value)
     signal utilityHeightChangedByUser(int value)
     signal desktopShellChangedByUser(bool value)
+    signal extensionEnabledChangedByUser(string extensionId, bool enabled)
+    signal resetExtensionsRequested()
+    signal workspaceFoldersChangedByUser(string foldersJson)
+    signal workspaceTrustedChangedByUser(bool value)
     signal closeRequested()
 
     implicitWidth: 620
     implicitHeight: 560
 
+    function sectionVisible(name) {
+        return root.section === "ALL" || root.section === name
+    }
+
+    function resetStandard() {
+        root.chatWidthRatioChangedByUser(0.31)
+        root.telemetryWidthChangedByUser(168)
+        root.accentColorChangedByUser("#8a8a8a")
+        root.frameBorderChangedByUser("#6a6a6a")
+        root.frameRadiusChangedByUser(4)
+        root.demoVisibilityChangedByUser(false)
+        root.productSourceTabsChangedByUser(false)
+        root.showOpenTabInInputChangedByUser(false)
+        root.showInnerEditorChromeChangedByUser(true)
+        root.hostKindChangedByUser("CODE")
+        root.engineTargetChangedByUser("GROK_TUI")
+        root.utilityHeightChangedByUser(112)
+        root.desktopShellChangedByUser(false)
+        root.workspaceFoldersChangedByUser("[]")
+        root.workspaceTrustedChangedByUser(true)
+        root.resetExtensionsRequested()
+    }
+
     GgFrame {
         id: settingsChrome
         anchors.fill: parent
+        visible: !root.embedded
         leftLegend: ""
         rightLegend: ""
         backgroundColor: "#161616"
@@ -82,6 +115,8 @@ Item {
 
             Text {
                 width: parent.width
+                height: visible ? implicitHeight : 0
+                visible: root.section === "ALL"
                 text: "Settings modules are separated by concern. "
                     + "Only controls with real alpha wiring are interactive."
                 color: "#c8cdd4"
@@ -91,6 +126,10 @@ Item {
 
             SettingsAppearanceModule {
                 width: parent.width
+                height: root.sectionVisible("APPEARANCE")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("APPEARANCE")
                 accentColor: root.accentColor
                 frameBorder: root.frameBorder
                 frameRadius: root.frameRadius
@@ -110,6 +149,10 @@ Item {
 
             SettingsLayoutModule {
                 width: parent.width
+                height: root.sectionVisible("LAYOUT")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("LAYOUT")
                 chatWidthRatio: root.chatWidthRatio
                 telemetryWidth: root.telemetryWidth
                 utilityHeight: root.utilityHeight
@@ -134,6 +177,10 @@ Item {
 
             SettingsChatModule {
                 width: parent.width
+                height: root.sectionVisible("CHAT")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("CHAT")
                 showOpenTabInInput: root.showOpenTabInInput
                 engineTarget: root.engineTarget
 
@@ -148,8 +195,15 @@ Item {
 
             SettingsWorkspaceModule {
                 width: parent.width
+                height: root.sectionVisible("WORKSPACE")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("WORKSPACE")
                 showInnerEditorChrome: root.showInnerEditorChrome
                 hostKind: root.hostKind
+                extensionsJson: root.extensionsJson
+                workspaceFoldersJson: root.workspaceFoldersJson
+                workspaceTrusted: root.workspaceTrusted
 
                 onShowInnerEditorChromeChangedByUser: function(value) {
                     root.showInnerEditorChromeChangedByUser(value)
@@ -160,14 +214,30 @@ Item {
                 }
 
                 onSpawnInstanceRequested: root.spawnInstanceRequested()
+
+                onWorkspaceFoldersChangedByUser: function(foldersJson) {
+                    root.workspaceFoldersChangedByUser(foldersJson)
+                }
+
+                onWorkspaceTrustedChangedByUser: function(value) {
+                    root.workspaceTrustedChangedByUser(value)
+                }
             }
 
             SettingsActivityModule {
                 width: parent.width
+                height: root.sectionVisible("ACTIVITY")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("ACTIVITY")
             }
 
             SettingsDeveloperModule {
                 width: parent.width
+                height: root.sectionVisible("DEVELOPER")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("DEVELOPER")
                 showDemoFixtures: root.showDemoFixtures
                 showProductSourceTabs: root.showProductSourceTabs
 
@@ -182,30 +252,29 @@ Item {
 
             SettingsExtensionsModule {
                 width: parent.width
+                height: root.sectionVisible("EXTENSIONS")
+                    ? implicitHeight
+                    : 0
+                visible: root.sectionVisible("EXTENSIONS")
+
+                extensionsJson: root.extensionsJson
+
+                onExtensionEnabledChangedByUser: function(extensionId, enabled) {
+                    root.extensionEnabledChangedByUser(extensionId, enabled)
+                }
+
+                onResetExtensionsRequested: root.resetExtensionsRequested()
             }
 
             Row {
                 width: parent.width
-                height: 44
+                height: root.section === "ALL" ? 44 : 0
+                visible: root.section === "ALL"
                 spacing: 8
 
                 GgButton {
                     text: "Reset standard layout"
-                    onClicked: {
-                        root.chatWidthRatioChangedByUser(0.31)
-                        root.telemetryWidthChangedByUser(168)
-                        root.accentColorChangedByUser("#8a8a8a")
-                        root.frameBorderChangedByUser("#6a6a6a")
-                        root.frameRadiusChangedByUser(4)
-                        root.demoVisibilityChangedByUser(false)
-                        root.productSourceTabsChangedByUser(false)
-                        root.showOpenTabInInputChangedByUser(false)
-                        root.showInnerEditorChromeChangedByUser(true)
-                        root.hostKindChangedByUser("CODE")
-                        root.engineTargetChangedByUser("GROK_TUI")
-                        root.utilityHeightChangedByUser(112)
-                        root.desktopShellChangedByUser(false)
-                    }
+                    onClicked: root.resetStandard()
                 }
 
                 GgButton {

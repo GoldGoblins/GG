@@ -65,6 +65,8 @@ def main() -> int:
     inline.feed("one\ntwo\nthree\nfour\n")
     if not inline.history:
         raise AssertionError("inline VT did not retain scrollback")
+    if "one" not in inline.plain_text():
+        raise AssertionError("plain_text lost scrollback: " + repr(inline.plain_text()))
 
     region = MiniVt(5, 20)
     region.feed("\x1b[1;4r\x1b[Hone\r\ntwo\r\nthree\r\nfour\r\nfive")

@@ -502,6 +502,14 @@ def compose_worker_prompt(
             "Profile source unavailable; follow AGENTS.md and Idékompassen.\n"
             "[/GG OMNIGPT PROFILE LAYER]"
         )
+    system_one_block = ""
+    if "[GG SYSTEM ONE]" not in omni_context:
+        try:
+            from backend.system_one_contract import decide_turn, format_compact
+
+            system_one_block = format_compact(decide_turn(text)) + "\n"
+        except Exception:
+            system_one_block = ""
     return (
         "GG_WORKSPACE schema="
         + WORKSPACE_TURN_SCHEMA
@@ -526,6 +534,7 @@ def compose_worker_prompt(
         + "\npolicy="
         + WORKER_POLICY
         + "\n"
+        + system_one_block
         + omni_context
         + "\nchat=UNIVERSAL. If the user greets, greet back. "
         "Bound current is background until they ask to code or change it.\n"

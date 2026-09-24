@@ -26,6 +26,10 @@ DEFAULTS = {
     "showProductSourceTabs": False,
     "showDemoFixtures": False,
     "desktopShell": False,
+    # VS Code-style multi-root metadata.  These paths are presentation/context
+    # state only; registering a folder never grants execution or write access.
+    "workspaceFolders": [],
+    "workspaceTrusted": True,
 }
 
 _ROOT_KEYS = {
@@ -41,6 +45,8 @@ _ROOT_KEYS = {
     "showProductSourceTabs": "showProductSourceTabs",
     "showDemoFixtures": "alphaShowDemoFixtures",
     "desktopShell": "desktopShell",
+    "workspaceFolders": "workspaceFolders",
+    "workspaceTrusted": "workspaceTrusted",
 }
 
 
@@ -97,6 +103,20 @@ def normalize_settings(raw: object) -> dict[str, object]:
     ):
         value = data.get(key, DEFAULTS[key])
         out[key] = bool(value)
+    folders = data.get("workspaceFolders", DEFAULTS["workspaceFolders"])
+    clean_folders: list[str] = []
+    if isinstance(folders, (list, tuple)):
+        for folder in folders[:8]:
+            value = str(folder or "").strip()
+            if not value.startswith("/") or len(value) > 256:
+                continue
+            if value != "/":
+                value = value.rstrip("/")
+            if value and value not in clean_folders:
+                clean_folders.append(value)
+    out["workspaceFolders"] = clean_folders
+    trusted = data.get("workspaceTrusted", DEFAULTS["workspaceTrusted"])
+    out["workspaceTrusted"] = bool(trusted)
     out["schema"] = SCHEMA
     return out
 

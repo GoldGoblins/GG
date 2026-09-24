@@ -18,6 +18,9 @@ def main() -> int:
     assert talk["parallel_agent_brain"] == "FORBIDDEN"
     assert talk["model_agents"] is False
     assert talk["front_man"]["in_code"] is True
+    assert talk["verifier_context"] == "FRESH"
+    assert talk["diamond"]["verify"] == "TEST"
+    assert talk["expected_seats"] == talk["got_seats"]
     assert talk["seats"]["builder"]["mode"] == "TALK"
     assert talk["seats"]["memory"]["id"] == "MEMORY"
     assert "MEMORY hits=" in talk["text"]

@@ -171,11 +171,15 @@ Item {
             selectByMouse: true
             selectByKeyboard: true
             persistentSelection: true
+            selectionColor: "#3a3a3a"
+            selectedTextColor: "#f2f2f2"
             textFormat: TextEdit.PlainText
             wrapMode: TextEdit.WordWrap
             height: implicitHeight
             font.family: "monospace"
             font.pixelSize: 12
+
+            SelectionGuard {}
         }
 
         Repeater {
@@ -199,11 +203,15 @@ Item {
                 selectByMouse: true
                 selectByKeyboard: true
                 persistentSelection: true
+                selectionColor: "#3a3a3a"
+                selectedTextColor: "#f2f2f2"
                 textFormat: TextEdit.PlainText
                 wrapMode: TextEdit.WordWrap
                 height: implicitHeight
                 font.family: "monospace"
                 font.pixelSize: 12
+
+                SelectionGuard {}
             }
         }
 

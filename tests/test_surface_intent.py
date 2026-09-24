@@ -45,6 +45,8 @@ def main() -> int:
     assert parse_surface_intent("öppna emulatorn") == "MEDIA"
     assert parse_surface_intent("draw") == "DRAW"
     assert parse_surface_intent("öppna gimp") == "DRAW"
+    assert parse_surface_intent("blender") == "EXTERNAL"
+    assert parse_surface_intent("öppna blender") == "EXTERNAL"
     assert parse_surface_intent("terminal") == "TERMINAL"
     assert parse_surface_intent("Hej") == ""
     assert parse_surface_intent("läs main.py") == ""

@@ -45,6 +45,8 @@ def main() -> int:
     assert small not in small_prompt
     assert USER_TURN_MARKER in small_prompt
     assert "Vad gör root?" in small_prompt.split(USER_TURN_MARKER, 1)[1]
+    assert "[GG SYSTEM ONE]" in small_prompt
+    assert "authority=NONE" in small_prompt
     assert bound_read_path("qml/components/ContextComposer.qml") in small_prompt
     assert len(small_prompt) <= PRIMARY_PROMPT_MAX_CHARS
     assert estimate_prompt_tokens(SYSTEM_PROMPT + small_prompt) < 1800

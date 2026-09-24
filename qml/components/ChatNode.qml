@@ -14,6 +14,10 @@ Item {
     property string workStagesJson: ""
     property int maxBubbleWidth: 720
 
+    readonly property bool grokMotor:
+        String(root.authorLabel).toUpperCase() === "GROK TUI"
+    readonly property bool gptMotor:
+        String(root.authorLabel).toUpperCase() === "GPTUI"
     readonly property bool syntheticFixture:
         root.provenanceClass === "SYNTHETIC_UI_FIXTURE"
     readonly property string provenanceLegend:
@@ -149,7 +153,8 @@ Item {
         backgroundColor: root.nodeKind === "REQUEST"
             ? "#2a2a2a"
             : "#1c1c1c"
-        borderColor: "#6a6a6a"
+        borderColor: root.grokMotor ? "#c8a97e" : (root.gptMotor ? "#8db89a" : "#6a6a6a")
+        leftLegendColor: root.grokMotor ? "#c8a97e" : (root.gptMotor ? "#8db89a" : "#e6edf3")
         rightLegendColor: root.syntheticFixture ? "#d2b48c" : "#8b949e"
 
         Column {
@@ -238,6 +243,12 @@ Item {
             wrapMode: TextEdit.WordWrap
             height: implicitHeight
             font.pixelSize: 13
+            selectionColor: "#3a3a3a"
+            selectedTextColor: "#f2f2f2"
+
+            SelectionGuard {
+                editor: bodyTextView
+            }
         }
 
         Repeater {

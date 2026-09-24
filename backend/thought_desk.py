@@ -1,10 +1,11 @@
 """Same-task specialist panel for the existing thought stream.
 
 This is not a second agent brain.  PARALLEL_AGENT_BRAIN stays FORBIDDEN.
-The useful idea from the public swarm writeups is: several small seats look
-at one task at the same time, they do not wait for each other, and a Front
-Man in code merges them.  Extra loops spend more compute on the same seats
-when they disagree — Astra-style depth, not more parameters.
+The useful idea from the public swarm writeups is: several small deterministic
+lanes look at one task at the same time, they do not wait for each other, and
+a Front Man in code merges them.  The lane count and review depth adapt to
+the task instead of forcing every request through the same six-seat/three-
+loop shape.
 
 The panel compiles into the OmniGPT/chat prompt so the motor hammers one
 task from every live seat in the same turn instead of walking A then B.
@@ -20,11 +21,12 @@ from backend.chat_context_compiler import work_intent
 
 
 SCHEMA = "gg.thought-desk.v1"
-MAX_SEATS = 6
+MAX_SEATS = 12
 MAX_LOOPS = 3
-MAX_WORKERS = 6
+MAX_WORKERS = 12
 PARALLEL_AGENT_BRAIN = "FORBIDDEN"
 FLAT_MODEL_COMMAND_LOOP = "FORBIDDEN"
+PARALLEL_EXECUTION = "BOUNDED_ADAPTIVE_DAG"
 
 _RED_RE = re.compile(
     r"\b(wp-admin|one\.com|password|lösenord|sudo|credential|secret|2fa)\b",
@@ -117,6 +119,37 @@ def _memory(text: str) -> dict[str, Any]:
     }
 
 
+def _quality(text: str) -> dict[str, Any]:
+    compact = " ".join(str(text or "").split())
+    target_count = len(_FILE_RE.findall(compact))
+    return {
+        "id": "QUALITY",
+        "target_count": target_count,
+        "specificity": "HIGH" if target_count else ("MEDIUM" if len(compact) > 24 else "LOW"),
+        "input_chars": len(compact),
+        "note": "Deterministic quality signal; no model call and no authority.",
+    }
+
+
+def _research(text: str) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    try:
+        from backend.research_desk import match_methods
+
+        matches = match_methods(text, limit=3)
+    except Exception:
+        matches = []
+    return {
+        "id": "RESEARCH",
+        "method_matches": [
+            {"id": str(row.get("id") or ""), "name": str(row.get("name") or ""), "score": int(row.get("match_score") or 0)}
+            for row in matches
+        ],
+        "count": len(matches),
+        "read_only": True,
+    }
+
+
 def _critic(text: str, builder: dict[str, Any] | None = None) -> dict[str, Any]:
     flags: list[str] = []
     if _LINEAR_RE.search(text):
@@ -190,18 +223,36 @@ def _front_man(
 
 
 def _compile_seats(text: str, builder_hint: dict[str, Any] | None = None) -> dict[str, Any]:
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="gg-thought") as pool:
-        intent_f = pool.submit(_intent, text)
-        risk_f = pool.submit(_risk, text)
-        evidence_f = pool.submit(_evidence, text)
-        memory_f = pool.submit(_memory, text)
-        builder_f = pool.submit(_builder, text)
+    from backend.research_desk import adaptive_execution_plan
+
+    execution = adaptive_execution_plan(text)
+    jobs = {
+        "intent": _intent,
+        "risk": _risk,
+        "evidence": _evidence,
+        "memory": _memory,
+        "builder": _builder,
+        "quality": _quality,
+        "research": _research,
+    }
+    with ThreadPoolExecutor(
+        max_workers=min(MAX_WORKERS, max(1, int(execution["workers"]))),
+        thread_name_prefix="gg-thought",
+    ) as pool:
+        futures = {key: pool.submit(fn, text) for key, fn in jobs.items()}
+        intent_f = futures["intent"]
+        risk_f = futures["risk"]
+        evidence_f = futures["evidence"]
+        memory_f = futures["memory"]
+        builder_f = futures["builder"]
         intent = intent_f.result()
         risk = risk_f.result()
         evidence = evidence_f.result()
         memory = memory_f.result()
         builder = builder_hint or builder_f.result()
         critic = _critic(text, builder)
+        quality = futures["quality"].result()
+        research = futures["research"].result()
     return {
         "intent": intent,
         "risk": risk,
@@ -209,12 +260,17 @@ def _compile_seats(text: str, builder_hint: dict[str, Any] | None = None) -> dic
         "memory": memory,
         "critic": critic,
         "builder": builder,
+        "quality": quality,
+        "research": research,
+        "execution": execution,
     }
 
 
 def sit(text: str, *, compact: bool = False) -> dict[str, Any]:
     raw = _text(text)
     seats = _compile_seats(raw)
+    execution = dict(seats.get("execution") or {})
+    max_loops = max(1, min(MAX_LOOPS, int(execution.get("loops") or 1)))
     loops = 1
     man = _front_man(
         seats["intent"],
@@ -224,7 +280,7 @@ def sit(text: str, *, compact: bool = False) -> dict[str, Any]:
         seats["builder"],
     )
     graveyard: list[str] = []
-    while man.get("conflict") and loops < MAX_LOOPS:
+    while man.get("conflict") and loops < max_loops:
         if "LINEAR_TRAP" in (seats["critic"].get("flags") or []):
             graveyard.append("sequential A-then-B plan")
             seats["builder"] = {
@@ -241,15 +297,35 @@ def sit(text: str, *, compact: bool = False) -> dict[str, Any]:
             seats["critic"],
             seats["builder"],
         )
+    fake = [
+        flag
+        for flag in (seats["critic"].get("flags") or [])
+        if flag in {"LINEAR_TRAP", "SERIALIZED_PARALLEL_WORK"}
+    ]
     board = {
         "schema": SCHEMA,
         "mode": "SAME_TASK_PANEL",
+        "diamond": {
+            "fan_out": str(seats["builder"].get("mode") or "") == "PARALLEL",
+            "reduce": "CODE",
+            "verify": "TEST",
+            "synthesize": "ONE_MOTOR",
+        },
+        "verifier_context": "FRESH",
+        "fake_edges": fake,
+        "expected_seats": len(seats),
+        "got_seats": len(seats),
         "parallel_agent_brain": PARALLEL_AGENT_BRAIN,
         "flat_model_command_loop": FLAT_MODEL_COMMAND_LOOP,
         "model_agents": False,
         "cross_talk_during_inference": False,
         "loops": loops,
         "max_loops": MAX_LOOPS,
+        "max_adaptive_loops": max_loops,
+        "seat_count": len(seats),
+        "max_seats": MAX_SEATS,
+        "parallel_execution": PARALLEL_EXECUTION,
+        "execution": execution,
         "compact": compact,
         "seats": seats,
         "front_man": man,
@@ -277,6 +353,9 @@ def render(board: dict[str, Any], *, compact: bool = False) -> str:
         "schema=" + SCHEMA,
         "mode=SAME_TASK_PANEL",
         "parallel_agent_brain=" + PARALLEL_AGENT_BRAIN,
+        "diamond=FAN_OUT,REDUCE_CODE,VERIFY_TEST,SYNTHESIZE_ONE",
+        "verifier_context=FRESH",
+        "parallel_execution=" + PARALLEL_EXECUTION,
         "loops=" + str(board.get("loops") or 1) + "/" + str(MAX_LOOPS),
         "light=" + str(man.get("light") or "HOLD"),
         "INTENT " + str(intent.get("ask") or ""),
@@ -289,8 +368,8 @@ def render(board: dict[str, Any], *, compact: bool = False) -> str:
         "CRITIC " + flags,
         "BUILDER " + str(builder.get("mode") or "TALK") + ((" · " + moves) if moves else ""),
         "FRONT_MAN " + str(man.get("light") or "HOLD") + " · " + reasons,
-        "Rule: all live seats attack this same task now. Do not serialize. "
-        "No extra agent brain. Front Man merges. Extra loops spend compute, not new weights.",
+        "Rule: bounded deterministic lanes attack this same task now. "
+        "No free agent brain. Front Man merges. Depth follows risk and disagreement.",
         "[/SAME_TASK_DESK]",
     ]
     text = "\n".join(lines)

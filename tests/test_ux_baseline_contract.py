@@ -443,7 +443,7 @@ def main() -> int:
         'objectId: "ws.app.external"',
         'objectType: "EXTERNAL_APP"',
         'objectId: "ws.web.stub"',
-        "HOSTING NOT AVAILABLE",
+        "ExternalSurface",
         "id: userTerminalHost",
         "fillHost: true",
         'objectName: "workspaceHostKindSelector"',
@@ -546,6 +546,11 @@ def main() -> int:
             marker in workspace_surface,
             "Workspace host MVP marker missing: " + marker,
         )
+    external_surface = text("qml/components/ExternalSurface.qml")
+    require(
+        'objectName: "workspaceExternalHole"' in external_surface,
+        "EXT Blender hole missing.",
+    )
     web_pane = text("qml/components/WebPane.qml")
     require(
         "function hrefAllowed(" in web_pane,
@@ -763,7 +768,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW", "RESEARCH"]',
     ):
         require(
             marker in settings_workspace,
@@ -791,8 +796,8 @@ def main() -> int:
         )
 
     for marker in (
-        "Future themes and visual modules can integrate here. ",
-        "Give instructions directly in the chat. If an operation ",
+        "Built-in contributions are the VS Code-style extension seam ",
+        "The registry describes what is already in the app; it never ",
     ):
         require(
             marker in settings_extensions,
@@ -963,6 +968,9 @@ def main() -> int:
         'objectName: "workspaceSurface"',
         "property var liveAidBackend: null",
         'objectName: "workspaceCodeEditor"',
+        "selectByKeyboard: true",
+        "persistentSelection: true",
+        "SelectionGuard {",
         "function loadCurrentAuthoringBuffer()",
         "function requestLiveAidAnalysis()",
         "analysisTimer.restart()",
@@ -1181,6 +1189,7 @@ def main() -> int:
         "persistentSelection: true",
         "textFormat: TextEdit.PlainText",
         "wrapMode: TextEdit.WordWrap",
+        "SelectionGuard {",
     ):
         require(
             marker in chat_node,
@@ -1497,8 +1506,11 @@ def main() -> int:
         and "active: !root.settingsOpen && root.hostKind === \"OSINT\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"QIP\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml
-        and "active: !root.settingsOpen && root.hostKind === \"GAME_ENGINE\"" in ws_qml
-        and "active: !root.settingsOpen && root.hostKind === \"NODES\"" in ws_qml,
+        and "active: !root.settingsOpen && root.hostKind === \"NODES\"" in ws_qml
+        and "id: gameEnginePane" in ws_qml
+        and "keepGameEngine" in ws_qml
+        and "paneLive: gameEnginePane.visible" in ws_qml
+        and "active: !root.settingsOpen && root.hostKind === \"GAME_ENGINE\"" not in ws_qml,
         "Unused workspace function panes are still kept alive.",
     )
     require(
@@ -1563,6 +1575,14 @@ def main() -> int:
         in a1_2_main,
         "Shared bottom-strip margin contract missing.",
     )
+    utility_loader_start = a1_2_main.index("id: utilitySurface")
+    utility_loader_end = a1_2_main.index(
+        "\n                }\n            }\n\n            TelemetryRail {",
+        utility_loader_start,
+    )
+    utility_loader = a1_2_main[
+        utility_loader_start:utility_loader_end
+    ]
     require(
         "id: composer" in a1_2_main
         and a1_2_main[
@@ -1573,12 +1593,8 @@ def main() -> int:
         "INPUT top is not bound to the same bottom origin as UTILITIES.",
     )
     require(
-        "id: utilitySurface" in a1_2_main
-        and a1_2_main[
-            a1_2_main.index("id: utilitySurface")
-            : a1_2_main.index("id: utilitySurface") + 280
-        ].count("anchors.bottomMargin: 0")
-        == 1,
+        "anchors.bottom: parent.bottom" in utility_loader
+        and utility_loader.count("anchors.bottomMargin: 0") == 1,
         "UtilitySurface is not kant-i-kant with the CHAT frame bottom.",
     )
     require(

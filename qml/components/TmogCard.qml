@@ -31,6 +31,7 @@ Item {
         border.color: root.borderColor
         border.width: 1
         radius: 4
+        antialiasing: true
     }
 
     Rectangle {
