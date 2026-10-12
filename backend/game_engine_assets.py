@@ -25,6 +25,7 @@ import copy
 import json
 import math
 import struct
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -55,9 +56,16 @@ MAX_MESHES = 32
 MAX_PRIMITIVES = 64
 MAX_VERTICES = 200_000
 MAX_JOINTS = 128
-MAX_ANIMATIONS = 32
+MAX_ANIMATIONS = 60
 MAX_AUTHORED_INSTANCES = 8
+# Full articulated rigs remain bounded to eight. Extra crowd residents use
+# compact rigs, never a full rig outside the near-character budget.
+# Player, six current physical NPCs and up to twenty-four life proxies fit
+# within this total while leaving the full-rig cap untouched.
+MAX_AUTHORED_CROWD_INSTANCES = 32
+MAX_CROWD_JOINTS = 32
 MAX_AUTHORED_ITEM_INSTANCES = 24
+MAX_STATIC_ITEM_DEFINITIONS = 256
 
 PROCEDURAL_CHARACTER_MODE = "PROCEDURAL_GEOMETRY"
 PROCEDURAL_CHARACTER_ASSET_ID = "gg-clay-crowd-character"
@@ -81,47 +89,235 @@ WORLD_PROP_ASSET_FAMILIES = (
     "world.lantern",
     "world.spawn_marker",
     "world.stress_pebble",
+    "world.market_stall",
+    "world.fish_rack",
+    "world.boat",
+    "world.bridge",
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = (PROJECT_ROOT / "qml" / "assets").resolve()
-DEFAULT_CHARACTER_ASSET_ID = "gg-clay-hero-a"
-DEFAULT_CHARACTER_FILENAME = "authored/gg-clay-hero-a.glb"
+@lru_cache(maxsize=1024)
+def inventory_icon(definition_id: str, appearance_index: int = 0) -> str:
+    """Resolve only packaged icons; unavailable item art uses the existing unknown image."""
+    key=str(definition_id);root=ASSET_ROOT/'authored/items/icons';names=[]
+    if key.startswith(('item.','container.')):
+        prefix,slug=key.split('.',1)
+        if slug and all(c.isascii() and (c.isalnum() or c=='_') for c in slug):
+            stem=('itemmesh-' if prefix=='item' else 'container-')+slug
+            if 0<appearance_index<36:names.append(stem+'-v'+str(appearance_index)+'.png')
+            names.append(stem+'.png')
+    for name in (*names,'unknown.png'):
+        path=root/name
+        if path.is_file() and path.resolve().is_relative_to(root):return path.as_uri()
+    return ''
+DEFAULT_CHARACTER_ASSET_ID = "gg-codex-original"
+DEFAULT_CHARACTER_FILENAME = "authored/characters/gg-crew-brinekip-articulated.glb"
 DEFAULT_CHARACTER_SOURCE = ASSET_ROOT / DEFAULT_CHARACTER_FILENAME
-DEFAULT_CROWD_CHARACTER_ASSET_ID = "kenney-blocky-character-a"
+DEFAULT_CROWD_CHARACTER_ASSET_ID = "gg-codex-character-flow"
 DEFAULT_CROWD_CHARACTER_SOURCE = (
-    ASSET_ROOT / "third_party" / "kenney-blocky" / "character-a.glb"
+    ASSET_ROOT / "authored" / "characters" / "gg-crew-copperwake-articulated.glb"
 )
+BLENDER_CHARACTER_SOURCES: dict[str, Path] = {
+    "gg-codex-original": DEFAULT_CHARACTER_SOURCE,
+    "gg-codex-character-flow": DEFAULT_CROWD_CHARACTER_SOURCE,
+    "gg-codex-cartoon-flow": ASSET_ROOT / "authored" / "characters" / "gg-crew-glassfin-articulated.glb",
+    "gg-codex-art-flow": ASSET_ROOT / "authored" / "characters" / "gg-crew-mosswake-articulated.glb",
+    "gg-codex-mossjaw": ASSET_ROOT / "authored" / "characters" / "gg-crew-mossjaw-articulated.glb",
+    "gg-codex-briarstride": ASSET_ROOT / "authored" / "characters" / "gg-crew-briarstride-articulated.glb",
+    "gg-codex-riftclaw": ASSET_ROOT / "authored" / "characters" / "gg-crew-riftclaw-articulated.glb",
+    "gg-codex-sculpt-flow": ASSET_ROOT / "authored" / "characters" / "gg-crew-tideclaw-articulated.glb",
+    "gg-codex-style-flow": ASSET_ROOT / "authored" / "characters" / "gg-crew-reefrunner-articulated.glb",
+}
 CAST_CHARACTER_SOURCES: dict[str, tuple[str, Path]] = {
-    "WANDERER": ("gg-clay-fisher", ASSET_ROOT / "authored" / "gg-clay-fisher.glb"),
-    "GUARDIAN": ("gg-clay-guard", ASSET_ROOT / "authored" / "gg-clay-guard.glb"),
-    "CRITTER": ("gg-clay-critter", ASSET_ROOT / "authored" / "gg-clay-critter.glb"),
+    "WANDERER": (
+        "gg-codex-character-flow",
+        BLENDER_CHARACTER_SOURCES["gg-codex-character-flow"],
+    ),
+    "GUARDIAN": (
+        "gg-codex-riftclaw",
+        BLENDER_CHARACTER_SOURCES["gg-codex-riftclaw"],
+    ),
+    "CRITTER": (
+        "gg-codex-mossjaw",
+        BLENDER_CHARACTER_SOURCES["gg-codex-mossjaw"],
+    ),
+}
+CROWD_CHARACTER_VARIANT_IDS = (
+    "gg-codex-character-flow",
+    "gg-codex-cartoon-flow",
+    "gg-codex-art-flow",
+    "gg-codex-briarstride",
+    "gg-codex-riftclaw",
+    "gg-codex-sculpt-flow",
+    "gg-codex-style-flow",
+)
+CROWD_LOD_SOURCES: dict[str, Path] = {
+    "gg-codex-character-flow-lod": ASSET_ROOT / "authored/characters/gg-crew-copperwake-compact.glb",
+    "gg-codex-cartoon-flow-lod": ASSET_ROOT / "authored/characters/gg-crew-glassfin-compact.glb",
+    "gg-codex-mossjaw-lod": ASSET_ROOT / "authored/characters/gg-crew-mossjaw-compact.glb",
+    "gg-crew-mosswake-crowd": ASSET_ROOT / "authored/characters/gg-crew-mosswake-compact.glb",
+    "gg-crew-tideclaw-crowd": ASSET_ROOT / "authored/characters/gg-crew-tideclaw-compact.glb",
+    "gg-crew-reefrunner-crowd": ASSET_ROOT / "authored/characters/gg-crew-reefrunner-compact.glb",
+    "gg-crew-briarstride-crowd": ASSET_ROOT / "authored/characters/gg-crew-briarstride-compact.glb",
+    "gg-crew-riftclaw-crowd": ASSET_ROOT / "authored/characters/gg-crew-riftclaw-compact.glb",
 }
 # World props authored in the EXT Blender desk.  The engine imports the GLB;
 # it does not keep a second Python silhouette for the same asset.
 AUTHORED_WORLD_SOURCES: dict[str, dict[str, Any]] = {
-    "PALM": {
-        "asset_id": "gg-clay-palm",
-        "source": ASSET_ROOT / "authored" / "world" / "gg-clay-palm.glb",
+    "HOUSE": {
+        "asset_id": "gg-sandover-stilt-hut",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-coastal-stilt-hut-v3.glb",
         "anchor": "FEET",
-        "height_m": 4.16,
+        "height_m": 3.68,
+        "style_id": "GG_SANDOVER_LOW_POLY",
     },
+    "WINDMILL": {
+        "asset_id": "gg-sandover-windmill",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-windmill.glb",
+        "anchor": "FEET",
+        "height_m": 5.18,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "WATER_WHEEL": {
+        "asset_id": "gg-sandover-waterwheel",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-waterwheel.glb",
+        "anchor": "FEET",
+        "height_m": 3.30,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "TIDE_BEACON": {
+        "asset_id": "gg-sandover-tide-beacon",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-tide-beacon.glb",
+        "anchor": "FEET",
+        "height_m": 2.92,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "PALM": {
+        "asset_id": "gg-sandover-palm",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-palm.glb",
+        "anchor": "FEET",
+        "height_m": 4.05,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "DOCK": {
+        "asset_id": "gg-sandover-cove-pier",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-cove-pier.glb",
+        "anchor": "FEET",
+        "height_m": 2.51,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "MANGROVE": {
+        "asset_id": "gg-sandover-mangrove",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-sandover-mangrove.glb",
+        "anchor": "FEET",
+        "height_m": 4.0,
+        "style_id": "GG_SANDOVER_LOW_POLY",
+    },
+    "LANTERN": {
+        "asset_id": "gg-clay-lantern-post",
+        "source": ASSET_ROOT / "authored" / "world" / "gg-clay-lantern-post.glb",
+        "anchor": "FEET",
+        "height_m": 2.0,
+    },
+}
+# Village houses are a small authored kit. Stable entity variants choose one
+# Blender source at scene construction so houses do not repeat one silhouette.
+AUTHORED_WORLD_VARIANTS: dict[str, tuple[dict[str, Any], ...]] = {
+    "HOUSE": (
+        AUTHORED_WORLD_SOURCES["HOUSE"],
+        {
+            "asset_id": "gg-sandover-roundhouse",
+            "source": ASSET_ROOT / "authored" / "world" / "gg-coastal-roundhouse-v3.glb",
+            "anchor": "FEET",
+            "height_m": 3.68,
+            "style_id": "GG_SANDOVER_LOW_POLY",
+        },
+        {
+            "asset_id": "gg-sandover-longhouse",
+            "source": ASSET_ROOT / "authored" / "world" / "gg-coastal-longhouse-v3.glb",
+            "anchor": "FEET",
+            "height_m": 3.68,
+            "style_id": "GG_SANDOVER_LOW_POLY",
+        },
+        {
+            "asset_id": "gg-sandover-market-hut",
+            "source": ASSET_ROOT / "authored" / "world" / "gg-coastal-market-hut-v3.glb",
+            "anchor": "FEET",
+            "height_m": 3.68,
+            "style_id": "GG_SANDOVER_LOW_POLY",
+        },
+    ),
 }
 
 # Static item meshes use the same local-only admission path as characters.
-# The unit scales keep authored glTF metres aligned with the existing item
-# visual states, whose primitive meshes are converted from Qt's 100-unit
-# built-ins by ``sceneScale`` in QML.
+# These original Blender GLBs cover the complete starter catalogue, including
+# the equipment shown on the player and the four ground pickups in Sandover.
 DEFAULT_STATIC_ITEM_ASSET_SPECS: dict[str, dict[str, Any]] = {
+    "itemmesh.enchant_scroll": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-enchant_scroll.glb",
+        "unit_scale": (1.0, 1.0, 1.0),
+    },
+    "itemmesh.island_compass": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-island_compass.glb",
+        "unit_scale": (2.8, 2.8, 2.8),
+    },
+    "itemmesh.sea_salt": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-sea_salt.glb",
+    },
+    "itemmesh.sun_herb": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-sun_herb.glb",
+    },
+    "itemmesh.field_ration": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-field_ration.glb",
+    },
+    "itemmesh.old_boot": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-old_boot.glb",
+    },
     "itemmesh.iron_saber": {
-        "source": ASSET_ROOT / "gg-authored-saber.gltf",
-        "unit_scale": (1.0, 0.5, 3.75),
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-iron_saber.glb",
+        "weapon_fx": {
+            "authored": {"base": [0.0, 0.18, 0.0], "tip": [0.035, 1.43, 0.0]},
+            "native": {"base": [0.0, -0.04, 0.0], "tip": [0.0, 0.65, 0.0]},
+        },
+    },
+    "itemmesh.tideguard_jacket": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-tideguard_jacket.glb",
+    },
+    "itemmesh.moon_shard": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-moon_shard.glb",
+    },
+    "itemmesh.sunken_crown": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-sunken_crown.glb",
+        "unit_scale": (2.0, 2.0, 2.0),
+    },
+    "itemmesh.drift_cloak": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-drift_cloak.glb",
+    },
+    "itemmesh.saltpath_boots": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-saltpath_boots.glb",
+    },
+    "itemmesh.goblin_totem": {
+        "source": ASSET_ROOT / "authored" / "items" / "itemmesh-goblin_totem.glb",
     },
     "container.supply_crate": {
-        "source": ASSET_ROOT / "gg-authored-crate.gltf",
-        "unit_scale": (0.5, 0.5, 0.5),
+        "source": ASSET_ROOT / "authored" / "items" / "container-supply_crate.glb",
     },
 }
+from backend.game_engine_asset_variations import WEAPON_FAMILIES
+for _family in WEAPON_FAMILIES:
+    DEFAULT_STATIC_ITEM_ASSET_SPECS['itemmesh.weapon_'+_family] = {
+        'source':ASSET_ROOT/'authored/items'/('weapon-'+_family+'.glb'),
+        'unit_scale':(.45,.45,.45) if _family=='pistol' else (1.,1.,1.),
+        'weapon_fx':{'authored':{'base':[0.,.34,0.],'tip':[.04,1.45,0.]},
+                     'native':{'base':[0.,.18,0.],'tip':[0.,1.,0.]}}
+    }
+for _produce in ('coconut','banana','apple','pineapple','grapes','juniper'):
+    DEFAULT_STATIC_ITEM_ASSET_SPECS['itemmesh.nature.'+_produce] = {
+        'source':ASSET_ROOT/'authored/nature'/(_produce+'.glb'), 'unit_scale':(1.,1.,1.)}
+from backend.game_engine_firearms import AMMO
+for _slug in AMMO:
+    DEFAULT_STATIC_ITEM_ASSET_SPECS['itemmesh.ammo_'+_slug]={'source':ASSET_ROOT/'authored/items'/('ammo-'+_slug+'.glb'),'unit_scale':(1.,1.,1.)}
 
 # The names are the stable game-side vocabulary.  An authored file may omit a
 # clip; in that case the root pose still works and the importer reports the
@@ -131,6 +327,14 @@ CLIP_BY_MOTION_STATE = {
     "WALK": "Walk",
     "SPRINT": "Sprint",
     "AIR": "Air",
+    "DOUBLE_JUMP": "DoubleJump",
+    "GRAPPLE": "Grapple",
+    "SWIM": "Swim",
+    "FLY": "Fly",
+    "HOVERBOARD": "Board",
+    "HOVERBOARD_AIR": "BoardAir",
+    "BOAT": "Skiff",
+    "SIT": "Sit", "SLEEP": "Sleep", "KNEEL": "Kneel",
 }
 
 # The character visual seam is deliberately one-model wide.  This is a data
@@ -192,11 +396,19 @@ SLOT_TO_ATTACHMENT_SOCKET = {
     "SHOULDERS": "CHEST",
     "BACK": "BACK",
     "CHEST": "CHEST",
+    "TABARD": "CHEST",
     "FEET": "FEET",
     "MAIN_HAND": "MAIN_HAND",
     "OFF_HAND": "OFF_HAND",
     "RANGED": "MAIN_HAND",
 }
+
+
+for _nature_tool in ("shears", "bucket", "brush", "net", "rod", "knife"):
+    DEFAULT_STATIC_ITEM_ASSET_SPECS["itemmesh.nature.tool_" + _nature_tool] = {
+        "source": ASSET_ROOT / "authored/nature" / ("tool-" + _nature_tool + ".glb"),
+        "asset_class": "TOOL",
+    }
 
 
 def _error(
@@ -270,7 +482,28 @@ def _extract_attachment_sockets(nodes: Any) -> dict[str, dict[str, Any]]:
     found: dict[str, dict[str, Any]] = {}
     if not isinstance(nodes, list):
         return found
-    for node in nodes:
+    parents={child:index for index,parent in enumerate(nodes) if isinstance(parent,dict)
+        for child in parent.get('children',[]) if isinstance(child,int) and 0<=child<len(nodes)}
+    def model_point(index):
+        # Socket translations are bone-local. Keep a model-space rest anchor
+        # for Qt importers that do not publish the empty as a QObject node.
+        point=[0.,0.,0.];visited=set()
+        while index not in visited and len(visited)<MAX_JOINTS:
+            visited.add(index);node=nodes[index]
+            matrix=node.get('matrix')
+            if isinstance(matrix,list) and len(matrix)==16:
+                point=[sum(float(matrix[k*4+j])*point[k] for k in range(3))+float(matrix[12+j]) for j in range(3)]
+            else:
+                scale=_safe_vec3(node.get('scale'),(1.,1.,1.));point=[point[i]*scale[i] for i in range(3)]
+                q=node.get('rotation',[0.,0.,0.,1.]);x,y,z,w=[float(v) for v in q]
+                u,v,t=point;tx=2*(y*t-z*v);ty=2*(z*u-x*t);tz=2*(x*v-y*u)
+                rotated=[u+w*tx+y*tz-z*ty,v+w*ty+z*tx-x*tz,t+w*tz+x*ty-y*tx]
+                translation=_safe_vec3(node.get('translation'))
+                point=[rotated[i]+translation[i] for i in range(3)]
+            if index not in parents:break
+            index=parents[index]
+        return [round(v,6) for v in point]
+    for index,node in enumerate(nodes):
         if not isinstance(node, dict):
             continue
         extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
@@ -284,6 +517,7 @@ def _extract_attachment_sockets(nodes: Any) -> dict[str, dict[str, Any]]:
         if name:
             row["node"] = name
         row["local_translation"] = _safe_vec3(node.get("translation"))
+        row['model_rest']=model_point(index)
         found[socket_id] = row
     return found
 
@@ -352,9 +586,12 @@ def _resolve_local_source(source: Any) -> tuple[Path | None, str | None]:
 
 
 def _read_json_document(path: Path) -> tuple[dict[str, Any] | None, bytes, str | None]:
+    from backend.game_workflow_common import read_file
     try:
-        source_bytes = path.read_bytes()
-    except OSError as exc:
+        _, source_bytes = read_file(path, MAX_SOURCE_BYTES)
+    except (OSError, ValueError) as exc:
+        if str(exc) == "FILE_TOO_LARGE":
+            return None, b"", "ASSET_SOURCE_TOO_LARGE"
         return None, b"", "ASSET_SOURCE_UNREADABLE:" + type(exc).__name__
     if len(source_bytes) > MAX_SOURCE_BYTES:
         return None, source_bytes, "ASSET_SOURCE_TOO_LARGE"
@@ -428,6 +665,7 @@ def _safe_count(accessor: dict[str, Any] | None) -> int:
 
 def _validate_buffer_uris(path: Path, document: dict[str, Any]) -> tuple[int, str | None]:
     """Validate referenced buffers without decoding arbitrary remote data."""
+    from backend import game_asset_resources as resources
     buffers = document.get("buffers", [])
     if not isinstance(buffers, list):
         return 0, "GLTF_BUFFERS_INVALID"
@@ -447,29 +685,22 @@ def _validate_buffer_uris(path: Path, document: dict[str, Any]) -> tuple[int, st
                 return total, "GLTF_BUFFER_URI_INVALID"
             if uri.startswith("data:"):
                 try:
-                    header, payload = uri.split(",", 1)
-                    if ";base64" in header.lower():
-                        actual = len(base64.b64decode(payload, validate=True))
-                    else:
-                        actual = len(unquote(payload).encode("utf-8"))
+                    actual = len(resources.data_uri(uri, MAX_REFERENCED_BYTES - total))
                 except (ValueError, UnicodeError):
                     return total, "GLTF_DATA_URI_INVALID"
                 if actual > MAX_REFERENCED_BYTES or actual < declared:
                     return total, "GLTF_DATA_URI_LENGTH_INVALID"
             else:
-                parsed = urlparse(uri)
-                if parsed.scheme or parsed.netloc or "\\" in uri:
-                    return total, "GLTF_EXTERNAL_URI_INVALID"
-                referenced = (path.parent / unquote(uri)).resolve(strict=False)
-                if not _path_inside(referenced, ASSET_ROOT):
-                    return total, "GLTF_EXTERNAL_URI_OUTSIDE_ALLOWLIST"
                 try:
+                    referenced = resources.reference(path, uri, ASSET_ROOT, MAX_REFERENCED_BYTES - total)
                     actual = referenced.stat().st_size
+                except ValueError as exc:
+                    return total, "GLTF_EXTERNAL_URI_OUTSIDE_ALLOWLIST" if "ROOT" in str(exc) else "GLTF_EXTERNAL_URI_INVALID"
                 except OSError:
                     return total, "GLTF_EXTERNAL_URI_MISSING"
                 if actual > MAX_REFERENCED_BYTES or actual < declared:
                     return total, "GLTF_EXTERNAL_URI_LENGTH_INVALID"
-        total += declared
+        total += actual if uri is not None else declared
         if total > MAX_REFERENCED_BYTES:
             return total, "GLTF_REFERENCED_DATA_TOO_LARGE"
     return total, None
@@ -483,6 +714,7 @@ def _validate_image_uris(path: Path, document: dict[str, Any]) -> tuple[int, str
     the same bundled allowlist as the model.  This prevents a seemingly local
     character from pulling arbitrary files into the renderer.
     """
+    from backend import game_asset_resources as resources
     images = document.get("images", [])
     if not isinstance(images, list):
         return 0, "GLTF_IMAGES_INVALID"
@@ -515,22 +747,15 @@ def _validate_image_uris(path: Path, document: dict[str, Any]) -> tuple[int, str
             return total, "GLTF_IMAGE_URI_INVALID"
         if uri.startswith("data:"):
             try:
-                header, payload = uri.split(",", 1)
-                if ";base64" in header.lower():
-                    actual = len(base64.b64decode(payload, validate=True))
-                else:
-                    actual = len(unquote(payload).encode("utf-8"))
+                actual = len(resources.data_uri(uri, MAX_REFERENCED_BYTES - total))
             except (ValueError, UnicodeError):
                 return total, "GLTF_IMAGE_DATA_URI_INVALID"
         else:
-            parsed = urlparse(uri)
-            if parsed.scheme or parsed.netloc or "\\" in uri:
-                return total, "GLTF_IMAGE_EXTERNAL_URI_INVALID"
-            referenced = (path.parent / unquote(uri)).resolve(strict=False)
-            if not _path_inside(referenced, ASSET_ROOT):
-                return total, "GLTF_IMAGE_OUTSIDE_ALLOWLIST"
             try:
+                referenced = resources.reference(path, uri, ASSET_ROOT, MAX_REFERENCED_BYTES - total)
                 actual = referenced.stat().st_size
+            except ValueError as exc:
+                return total, "GLTF_IMAGE_OUTSIDE_ALLOWLIST" if "ROOT" in str(exc) else "GLTF_IMAGE_EXTERNAL_URI_INVALID"
             except OSError:
                 return total, "GLTF_IMAGE_MISSING"
         if actual > MAX_REFERENCED_BYTES:
@@ -738,6 +963,8 @@ def _inspect_static_item_asset(
             number = 1.0
         safe_scale.append(round(number if math.isfinite(number) and number > 0.0 else 1.0, 4))
     view["unit_scale"] = safe_scale
+    if isinstance(spec.get("weapon_fx"), dict):
+        view["weapon_fx"] = copy.deepcopy(spec["weapon_fx"])
     if isinstance(view.get("budget"), dict):
         view["budget"]["max_authored_item_instances"] = MAX_AUTHORED_ITEM_INSTANCES
     if view.get("status") == "READY" and view.get("skinned"):
@@ -862,6 +1089,51 @@ def _world_prop_variant(entity_id: Any) -> int:
         return 0
 
 
+def _authored_world_prop_binding(
+    geometry_key: str,
+    asset_class: str,
+    source_key: str,
+    variant: int,
+) -> dict[str, Any] | None:
+    source_name = str(source_key or "").strip().upper()
+    variants = AUTHORED_WORLD_VARIANTS.get(source_name, ())
+    selected_variant = int(variant) % len(variants) if variants else 0
+    authored = (
+        variants[selected_variant]
+        if variants
+        else AUTHORED_WORLD_SOURCES.get(source_name)
+    )
+    authored_path = authored.get("source") if isinstance(authored, dict) else None
+    if not isinstance(authored_path, Path) or not authored_path.is_file():
+        return None
+    try:
+        relative_source = authored_path.relative_to(PROJECT_ROOT / "qml").as_posix()
+    except ValueError:
+        relative_source = "assets/" + authored_path.name
+    result = {
+        "schema": SCHEMA,
+        "id": geometry_key,
+        "asset_id": str(authored.get("asset_id") or geometry_key),
+        "geometry_key": geometry_key,
+        "asset_class": asset_class,
+        "variant": selected_variant if variants else int(variant) % 4,
+        "mode": "AUTHORED_STATIC",
+        "status": "READY",
+        "source": authored_path.as_uri(),
+        "relative_source": relative_source,
+        "anchor": str(authored.get("anchor") or "FEET"),
+        "height_m": float(authored.get("height_m") or 2.0),
+        "unit_scale": [1.0, 1.0, 1.0],
+        "style_id": str(authored.get("style_id") or PROCEDURAL_ASSET_STYLE_ID),
+        "style": dict(ASSET_KIT_STYLE_CONTRACT),
+        "format": "GLB",
+        "state": "WORLD",
+        "license": "ORIGINAL_BLENDER_AUTHORED",
+        "error": None,
+    }
+    return result if variants else _art_variant(result,int(variant)%4)
+
+
 def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
     """Describe one world asset family for the native geometry renderer.
 
@@ -872,6 +1144,9 @@ def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
     """
     wanted = str(entity_kind or "PROP").strip().upper()
     variant = _world_prop_variant(entity_id)
+    if 'ROCK' in wanted or 'BOULDER' in wanted:
+        import hashlib
+        variant=int.from_bytes(hashlib.blake2s(str(entity_id).encode(),digest_size=4).digest(),'little')%36
     if "RAMP" in wanted:
         geometry_key = "world.ramp"
         asset_class = "RAMP"
@@ -879,43 +1154,118 @@ def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
     elif any(token in wanted for token in ("HOUSE", "BUILDING", "STRUCTURE", "HUT")):
         geometry_key = "world.stilt_hut"
         asset_class = "HOUSE"
-        variant = 0
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "HOUSE",
+            variant,
+        )
+        if authored is not None:
+            return authored
+    elif "ROCK" in wanted or "BOULDER" in wanted:
+        geometry_key = "world.prop.rock"
+        asset_class = "ROCK"
+    elif "MANGROVE" in wanted:
+        geometry_key = "world.prop.mangrove"
+        asset_class = "MANGROVE"
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "MANGROVE",
+            variant,
+        )
+        if authored is not None:
+            return authored
     elif "PALM" in wanted or "TREE" in wanted:
         geometry_key = "world.palm"
         asset_class = "PALM"
-        variant = 0
-        authored = AUTHORED_WORLD_SOURCES.get("PALM") or {}
-        authored_path = authored.get("source")
-        if isinstance(authored_path, Path) and authored_path.is_file():
-            try:
-                relative_source = authored_path.relative_to(PROJECT_ROOT / "qml").as_posix()
-            except ValueError:
-                relative_source = "assets/" + authored_path.name
-            return {
-                "schema": SCHEMA,
-                "id": geometry_key,
-                "asset_id": str(authored.get("asset_id") or "gg-clay-palm"),
-                "geometry_key": geometry_key,
-                "asset_class": asset_class,
-                "variant": 0,
-                "mode": "AUTHORED_STATIC",
-                "status": "READY",
-                "source": authored_path.as_uri(),
-                "relative_source": relative_source,
-                "anchor": str(authored.get("anchor") or "FEET"),
-                "height_m": float(authored.get("height_m") or 4.16),
-                "unit_scale": [1.0, 1.0, 1.0],
-                "style_id": PROCEDURAL_ASSET_STYLE_ID,
-                "style": dict(ASSET_KIT_STYLE_CONTRACT),
-                "format": "GLB",
-                "state": "WORLD",
-                "license": "ORIGINAL_BLENDER_AUTHORED",
-                "error": None,
-            }
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "PALM",
+            variant,
+        )
+        if authored is not None:
+            return authored
     elif "DOCK" in wanted or "PIER" in wanted:
         geometry_key = "world.dock"
         asset_class = "DOCK"
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "DOCK",
+            variant,
+        )
+        if authored is not None:
+            return authored
         variant = 0
+    elif "WINDMILL" in wanted:
+        geometry_key = "world.windmill"
+        asset_class = "WINDMILL"
+        variant = 0
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "WINDMILL",
+            variant,
+        )
+        if authored is not None:
+            return authored
+    elif "WATER_WHEEL" in wanted or "WATERWHEEL" in wanted:
+        geometry_key = "world.water_wheel"
+        asset_class = "WATER_WHEEL"
+        variant = 0
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "WATER_WHEEL",
+            variant,
+        )
+        if authored is not None:
+            return authored
+    elif "TIDE_BEACON" in wanted:
+        geometry_key = "world.prop.shrine"
+        asset_class = "TIDE_BEACON"
+        variant = 0
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "TIDE_BEACON",
+            variant,
+        )
+        if authored is not None:
+            return authored
+    elif wanted in {"SETTLEMENT_ROADS", "SETTLEMENT_FENCES"}:
+        geometry_key = "world." + wanted.lower()
+        asset_class = wanted
+        variant = 0
+    elif "PATH" in wanted or "TRAIL" in wanted:
+        geometry_key = "world.path"
+        asset_class = "PATH"
+        variant = 0
+    elif "BRIDGE" in wanted or "BOARDWALK" in wanted:
+        geometry_key = "world.bridge"
+        asset_class = "BRIDGE"
+        variant = 0
+    elif "FISH_RACK" in wanted or "FISHING_RACK" in wanted:
+        geometry_key = "world.fish_rack"
+        asset_class = "FISH_RACK"
+        variant = 0
+    elif "STALL" in wanted or "MARKET" in wanted:
+        geometry_key = "world.market_stall"
+        asset_class = "MARKET_STALL"
+        variant = 0
+    elif "BOAT" in wanted or "CANOE" in wanted:
+        geometry_key = "world.boat"
+        asset_class = "BOAT"
+        variant = 0
+    elif "BARREL" in wanted or "KEG" in wanted:
+        geometry_key = "world.prop.barrel"
+        asset_class = "BARREL"
+        variant = 3
+    elif "ROCK" in wanted or "BOULDER" in wanted:
+        geometry_key = "world.prop.rock"
+        asset_class = "ROCK"
     elif "TOTEM" in wanted or "SHRINE" in wanted:
         geometry_key = "world.totem"
         asset_class = "TOTEM"
@@ -924,6 +1274,14 @@ def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
         geometry_key = "world.lantern"
         asset_class = "LANTERN"
         variant = 0
+        authored = _authored_world_prop_binding(
+            geometry_key,
+            asset_class,
+            "LANTERN",
+            variant,
+        )
+        if authored is not None:
+            return authored
     elif "SPAWN" in wanted:
         geometry_key = "world.spawn_marker"
         asset_class = "SPAWN_MARKER"
@@ -935,6 +1293,9 @@ def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
     else:
         geometry_key = WORLD_PROP_ASSET_FAMILIES[variant]
         asset_class = "PROP"
+        if geometry_key=='world.prop.rock':
+            import hashlib
+            variant=int.from_bytes(hashlib.blake2s(str(entity_id).encode(),digest_size=4).digest(),'little')%36
     return {
         "schema": SCHEMA,
         "id": geometry_key,
@@ -957,7 +1318,11 @@ def world_prop_asset(entity_kind: Any, entity_id: Any = "") -> dict[str, Any]:
 
 def default_catalog() -> dict[str, Any]:
     """Return the stable catalog exposed by the runtime snapshot."""
-    selected = inspect_asset(DEFAULT_CHARACTER_SOURCE, DEFAULT_CHARACTER_ASSET_ID)
+    blender_characters = {
+        asset_id: inspect_asset(source, asset_id)
+        for asset_id, source in BLENDER_CHARACTER_SOURCES.items()
+    }
+    selected = blender_characters[DEFAULT_CHARACTER_ASSET_ID]
     # The default character slot specifically requires skinning.  A valid but
     # static file is still reported, but is not allowed to replace the preview.
     if selected.get("status") == "READY" and not selected.get("skinned"):
@@ -969,14 +1334,30 @@ def default_catalog() -> dict[str, Any]:
             "code": "CHARACTER_SKIN_MISSING",
             "message": "The default character asset must contain a skin and JOINTS_0/WEIGHTS_0.",
         }
-    # The blocky CC0 importer remains available as a validated reference
-    # candidate, but it is intentionally not the live crowd style.  The live
-    # population uses the original vertex-colored clay mesh below so the
-    # visual contract is not tied to a third-party silhouette or texture pack.
-    crowd_selected = procedural_character_asset()
+    crowd_variants = [
+        blender_characters[asset_id]
+        for asset_id in CROWD_CHARACTER_VARIANT_IDS
+        if (
+            blender_characters.get(asset_id, {}).get("status") == "READY"
+            and blender_characters.get(asset_id, {}).get("skinned")
+        )
+    ]
+    crowd_lod_variants = [
+        inspected
+        for asset_id, source in CROWD_LOD_SOURCES.items()
+        for inspected in [inspect_asset(source, asset_id)]
+        if inspected.get("status") == "READY"
+        and inspected.get("skinned")
+        and inspected.get("skeleton", {}).get("joints", MAX_JOINTS) <= MAX_CROWD_JOINTS
+    ]
+    crowd_selected = (
+        crowd_variants[0]
+        if crowd_variants
+        else procedural_character_asset()
+    )
     cast: dict[str, dict[str, Any]] = {}
     for role, (asset_id, source) in CAST_CHARACTER_SOURCES.items():
-        view = inspect_asset(source, asset_id)
+        view = blender_characters.get(asset_id) or inspect_asset(source, asset_id)
         if view.get("status") == "READY" and view.get("skinned"):
             cast[role] = view
     static_items = {
@@ -989,22 +1370,31 @@ def default_catalog() -> dict[str, Any]:
         "selected": selected,
         "cast": cast,
         "crowd_selected": crowd_selected,
+        "crowd_variants": crowd_variants,
+        "crowd_lod_variants": crowd_lod_variants,
         "crowd_visual": {
-            "policy": "ORIGINAL_CLAY_LOW_POLY_CROWD",
-            "driver": "FIXED_STEP_POSE_GEOMETRY",
-            "license": "ORIGINAL_RUNTIME_GENERATED",
+            "policy": "ORIGINAL_GG_BLENDER_CODEX_CROWD",
+            "driver": "BLENDER_SKINNED_GLTF_WITH_FIXED_STEP_CLIPS",
+            "license": "USER_AUTHORED_GG_BLENDER_ASSETS",
             "source_url": "",
-            "reference_sources": [
-                "https://www.kenney.nl/assets/blocky-characters",
-                "https://quaternius.com/packs/rpgcharacters.html",
-            ],
-            "reference_policy": "INSPIRATION_ONLY_NO_SOURCE_COPY",
-            "max_active_models": MAX_AUTHORED_INSTANCES,
+            "reference_sources": [],
+            "reference_policy": "ORIGINAL_GG_BLENDER_MODELS_ONLY",
+            "variants": [row.get("id", "") for row in crowd_variants],
+            "max_active_full_rigs": MAX_AUTHORED_INSTANCES,
+            "max_active_models": (
+                MAX_AUTHORED_CROWD_INSTANCES
+                if crowd_lod_variants else MAX_AUTHORED_INSTANCES
+            ),
+            "lod_variants": [row.get("id", "") for row in crowd_lod_variants],
         },
         "character_style": dict(CHARACTER_STYLE_CONTRACT),
         "asset_kit": dict(ASSET_KIT_STYLE_CONTRACT),
         "procedural_asset_budget": PROCEDURAL_ASSET_MAX_FAMILIES,
         "instance_budget": MAX_AUTHORED_INSTANCES,
+        "crowd_instance_budget": (
+            MAX_AUTHORED_CROWD_INSTANCES
+            if crowd_lod_variants else MAX_AUTHORED_INSTANCES
+        ),
         "static_items": static_items,
         "item_instance_budget": MAX_AUTHORED_ITEM_INSTANCES,
         "fallback": {
@@ -1033,15 +1423,27 @@ def extend_static_items(
         result["static_items"] = static_items
     if not isinstance(specs, dict):
         return result
-    for asset_id, raw_spec in list(specs.items())[:MAX_AUTHORED_ITEM_INSTANCES]:
+    for asset_id, raw_spec in list(specs.items())[:MAX_STATIC_ITEM_DEFINITIONS]:
         if not isinstance(raw_spec, dict):
             continue
         wanted = str(asset_id or "").strip()[:96]
         if not wanted:
             continue
         static_items[wanted] = _inspect_static_item_asset(wanted, raw_spec)
-    result["static_items"] = dict(list(static_items.items())[:MAX_AUTHORED_ITEM_INSTANCES])
+    result["static_items"] = dict(list(static_items.items())[:MAX_STATIC_ITEM_DEFINITIONS])
     result["item_instance_budget"] = MAX_AUTHORED_ITEM_INSTANCES
+    return result
+
+
+def _art_variant(selected: dict[str,Any],variant: int) -> dict[str,Any]:
+    """Select a compiled silhouette; admission counts/rig/budget stay unchanged."""
+    if not variant or not selected.get('source'):return selected
+    path=Path(unquote(urlparse(str(selected['source'])).path))
+    if path.suffix!='.glb':return selected
+    candidate=ASSET_ROOT/'authored/variants'/path.parent.name/(path.stem+f'-v{variant}.glb')
+    if not candidate.is_file():return selected
+    result=dict(selected);result['source']=candidate.as_uri()
+    result['relative_source']=str(candidate.relative_to(ASSET_ROOT));result['art_variant']=variant
     return result
 
 
@@ -1052,6 +1454,8 @@ def entity_binding(
     instance_rank: int,
     *,
     asset_role: str = "DEFAULT",
+    variant_index: int | None = None,
+    clip_override: str = "",
 ) -> dict[str, Any]:
     """Map one simulation pose to an authored asset slot or explicit fallback."""
     state = str(motion_state or "IDLE").strip().upper()
@@ -1074,11 +1478,46 @@ def entity_binding(
         if isinstance(cast_row, dict) and cast_row.get("status") == "READY":
             selected = cast_row
     if role == "CROWD":
+        crowd_variants = catalog.get("crowd_variants") if isinstance(catalog, dict) else None
+        ready_variants = [
+            row
+            for row in crowd_variants
+            if isinstance(row, dict) and row.get("status") == "READY"
+        ] if isinstance(crowd_variants, list) else []
+        try:
+            variant_rank = int(instance_rank)
+        except (TypeError, ValueError):
+            variant_rank = 0
+        appearance=variant_rank if variant_index is None else max(0,int(variant_index))
+        if ready_variants:
+            selected = ready_variants[max(0, appearance) % len(ready_variants)]
         crowd_selected = catalog.get("crowd_selected") if isinstance(catalog, dict) else None
-        if isinstance(crowd_selected, dict):
+        if not ready_variants and isinstance(crowd_selected, dict):
             selected = crowd_selected
+        if variant_rank >= MAX_AUTHORED_INSTANCES:
+            lod_variants = catalog.get("crowd_lod_variants") if isinstance(catalog, dict) else None
+            ready_lod = [
+                row for row in lod_variants
+                if isinstance(row, dict)
+                and row.get("status") == "READY"
+                and row.get("skinned")
+                and row.get("skeleton", {}).get("joints", MAX_JOINTS) <= MAX_CROWD_JOINTS
+            ] if isinstance(lod_variants, list) else []
+            if ready_lod:
+                lod=ready_lod[(variant_rank - MAX_AUTHORED_INSTANCES) % len(ready_lod)]
+                if variant_index is not None:
+                    lod=next((r for r in ready_lod if r.get('source')==selected.get('source')),ready_lod[appearance%len(ready_lod)])
+                selected=lod
     budget = MAX_AUTHORED_INSTANCES
-    if isinstance(catalog, dict):
+    if role == "CROWD" and variant_rank >= MAX_AUTHORED_INSTANCES:
+        # A missing/invalid LOD asset cannot silently consume the high-detail
+        # budget or force sixteen 90-joint imports into the render scene.
+        lod_ids = set(CROWD_LOD_SOURCES)
+        if isinstance(selected, dict) and selected.get("id") in lod_ids:
+            budget = MAX_AUTHORED_CROWD_INSTANCES
+        else:
+            budget = MAX_AUTHORED_INSTANCES
+    elif isinstance(catalog, dict):
         try:
             budget = max(0, min(MAX_AUTHORED_INSTANCES, int(catalog.get("instance_budget", budget))))
         except (TypeError, ValueError):
@@ -1097,11 +1536,15 @@ def entity_binding(
         }
     )
     in_budget = 0 <= rank < budget
+    if role=='CROWD' and ready:
+        selected=_art_variant(selected,(appearance//max(1,len(ready_variants)))%36)
     if ready and in_budget:
         source = str(selected.get("source", ""))
         mode = str(selected.get("mode", "AUTHORED_SKINNED"))
         error = None
-        requested_clip = CLIP_BY_MOTION_STATE[state]
+        requested_clip = str(clip_override or CLIP_BY_MOTION_STATE[state]).strip()
+        if len(requested_clip) > 48:
+            requested_clip = CLIP_BY_MOTION_STATE[state]
         if mode == PROCEDURAL_CHARACTER_MODE:
             # The pose is generated from the same fixed-step state and phase;
             # it does not pretend to be a RuntimeLoader timeline clip.
@@ -1117,6 +1560,9 @@ def entity_binding(
             runtime_clip = available_clips.get(requested_clip.casefold(), "")
             clip = requested_clip if runtime_clip else ""
             clip_status = "READY" if clip else "ROOT_POSE_ONLY"
+            if not runtime_clip and requested_clip in ('Sit','Sleep','Kneel'):
+                # These are GG static rig poses, separate from GLB timelines.
+                clip=runtime_clip=requested_clip;clip_status='GG_STATIC_POSE'
     else:
         source = ""
         if ready and not in_budget and isinstance(selected, dict):
@@ -1160,6 +1606,7 @@ def entity_binding(
             if (
                 ready
                 and in_budget
+                and role == "DEFAULT"
                 and isinstance(selected, dict)
                 and isinstance(selected.get("attachment_sockets"), dict)
                 and str(selected.get("mode", "")) == "AUTHORED_SKINNED"
@@ -1182,18 +1629,55 @@ def item_binding(
     asset_id: Any,
     instance_rank: int,
     item_kind: Any = "ITEM",
+    *,appearance_index: int = 0,
 ) -> dict[str, Any]:
-    """Map every item visual to the bounded native clay asset kit.
-
-    Authored static glTF remains validated and exposed in ``static_items`` for
-    an explicit promotion later.  The live presentation uses the native kit
-    for every item family so a saber, chest, material and equipped object all
-    share the same low-poly/clay language and no item silently becomes a cube.
-    """
+    """Bind a validated Blender item model, with bounded native geometry as fallback."""
     wanted = str(asset_id or "item.unknown").strip()[:96] or "item.unknown"
     kind = str(item_kind or "ITEM").strip().upper()[:32] or "ITEM"
     static_items = catalog.get("static_items") if isinstance(catalog, dict) else None
     selected = static_items.get(wanted) if isinstance(static_items, dict) else None
+    if isinstance(selected,dict):selected=_art_variant(selected,int(appearance_index)%36)
+    if wanted=='itemmesh.weapon_sword' and isinstance(selected,dict):
+        from backend.game_engine_sword_designs import sword_effect
+        effect=sword_effect(appearance_index)
+        if effect:
+            selected=dict(selected)
+            selected['weapon_fx']=copy.deepcopy(selected.get('weapon_fx',{}))
+            selected['weapon_fx']['authored']=copy.deepcopy(effect)
+    if wanted in ('itemmesh.weapon_axe','itemmesh.weapon_shield') and isinstance(selected,dict):
+        from backend.game_engine_shield_axe_designs import equipment_visual
+        visual=equipment_visual(wanted.rsplit('_',1)[-1],appearance_index)
+        if visual:
+            selected=dict(selected)
+            selected['appearance_name']=visual['name']
+            for key in ('construction','wielding_reference','weapon_subtype'):
+                if key in visual:selected[key]=visual[key]
+            effect=visual.get('weapon_fx',{}).get('authored')
+            if effect:
+                selected['weapon_fx']=copy.deepcopy(selected.get('weapon_fx',{}))
+                selected['weapon_fx']['authored']=copy.deepcopy(effect)
+    if wanted=='itemmesh.weapon_pistol' and isinstance(selected,dict):
+        from backend.game_engine_pistol_designs import pistol_visual
+        visual=pistol_visual(appearance_index)
+        if visual:
+            selected=dict(selected)
+            selected['appearance_name']=visual['name']
+            for key in ('construction','weapon_subtype','muzzle_points','emissive_feature','wielding_reference'):
+                if key in visual:selected[key]=copy.deepcopy(visual[key])
+            effect=visual.get('weapon_fx',{}).get('authored')
+            if effect:
+                selected['weapon_fx']=copy.deepcopy(selected.get('weapon_fx',{}))
+                selected['weapon_fx']['authored']=copy.deepcopy(effect)
+    if wanted in ('itemmesh.weapon_wand','itemmesh.weapon_staff','itemmesh.weapon_mace','itemmesh.weapon_offhand') and isinstance(selected,dict):
+        from backend.game_engine_caster_designs import equipment_visual
+        visual=equipment_visual(wanted.rsplit('_',1)[-1],appearance_index)
+        if visual:
+            selected=dict(selected)
+            selected['appearance_name']=visual['name']
+            for key in ('construction','weapon_subtype','wielding_reference','emissive_feature','articulation'):
+                if key in visual:selected[key]=copy.deepcopy(visual[key])
+            selected['weapon_fx']=copy.deepcopy(selected.get('weapon_fx',{}))
+            selected['weapon_fx']['authored']=copy.deepcopy(visual['weapon_fx']['authored'])
     budget = MAX_AUTHORED_ITEM_INSTANCES
     if isinstance(catalog, dict):
         try:
@@ -1210,6 +1694,33 @@ def item_binding(
         rank = int(instance_rank)
     except (TypeError, ValueError):
         rank = -1
+    if (
+        isinstance(selected, dict)
+        and str(selected.get("status", "")) == "READY"
+        and str(selected.get("mode", "")) == "AUTHORED_STATIC"
+        and str(selected.get("source", ""))
+        and rank >= 0
+        and rank < budget
+    ):
+        authored = copy.deepcopy(selected)
+        authored.update(
+            {
+                "schema": SCHEMA,
+                "asset_id": wanted,
+                "geometry_key": wanted,
+                "asset_class": kind,
+                "id": wanted,
+                "mode": "AUTHORED_STATIC",
+                "status": "READY",
+                "instance_rank": rank,
+                "instance_budget": budget,
+                "style_id": "GG_SANDOVER_LOW_POLY",
+                "style": dict(ASSET_KIT_STYLE_CONTRACT),
+                "license": "ORIGINAL_BLENDER_AUTHORED",
+                "error": None,
+            }
+        )
+        return authored
     native = procedural_item_asset(wanted, kind)
     binding = {
         "schema": SCHEMA,
@@ -1228,6 +1739,8 @@ def item_binding(
         "style": dict(ASSET_KIT_STYLE_CONTRACT),
         "format": "QQUICK3D_GEOMETRY",
         "geometry": dict(native.get("geometry", {})),
+        "weapon_fx": copy.deepcopy(selected.get("weapon_fx", {}))
+            if isinstance(selected, dict) else {},
         "license": "ORIGINAL_RUNTIME_GENERATED",
         "error": None,
     }

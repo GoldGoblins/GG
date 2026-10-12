@@ -477,7 +477,7 @@ def main() -> int:
         'text: "MP"',
         'text: "TMOG"',
         'text: "OSINT"',
-        'text: "QIP"',
+        'text: "RESEARCH"',
         'text: "MEDIA"',
         'text: "DRAW"',
         'text: "GAME ENGINE"',
@@ -495,7 +495,7 @@ def main() -> int:
         'objectName: "workspaceMarketplacePane"',
         'objectName: "workspaceTmogPane"',
         'objectName: "workspaceOsintPane"',
-        'objectName: "workspaceQipPane"',
+        'objectName: "workspaceResearchPane"',
         'objectName: "workspaceMediaPane"',
         'objectName: "workspaceDrawPane"',
         'objectName: "workspaceGameEnginePane"',
@@ -768,7 +768,7 @@ def main() -> int:
         'leftLegend: "WORKSPACE"',
         "signal hostKindChangedByUser(string value)",
         'text: "New tab +"',
-        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW", "RESEARCH"]',
+        'model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "RESEARCH", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW"]',
     ):
         require(
             marker in settings_workspace,
@@ -1504,7 +1504,8 @@ def main() -> int:
         and "active: !root.settingsOpen && root.hostKind === \"MARKETPLACE\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"TMOG\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"OSINT\"" in ws_qml
-        and "active: !root.settingsOpen && root.hostKind === \"QIP\"" in ws_qml
+        and "keepResearch" in ws_qml
+        and 'visible: !root.settingsOpen && root.hostKind === "RESEARCH"' in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"DRAW\"" in ws_qml
         and "active: !root.settingsOpen && root.hostKind === \"NODES\"" in ws_qml
         and "id: gameEnginePane" in ws_qml

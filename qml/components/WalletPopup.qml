@@ -285,7 +285,7 @@ Rectangle {
         Text {
             text: root.observe
                 ? "Live Solana is watch-only. Sends stay on testnet/lab."
-                : "Paper and lab fills. Kaspa has its own chain switch."
+                : "Paper and lab fills. KAS is the other wallet on the same portfolio."
             width: parent.width
             wrapMode: Text.WordWrap
             color: root.muted

@@ -565,7 +565,15 @@ Item {
     property string engineTarget: "GROK_TUI"
     property string hostKind: "CODE"
     property bool keepGameEngine: false
+    property bool keepResearch: false
+    property string pendingResearchSection: ""
     onHostKindChanged: {
+        if (hostKind === "QIP") {
+            root.openResearch("WASM LAB")
+            return
+        }
+        if (hostKind === "RESEARCH")
+            keepResearch = true
         if (hostKind === "GAME_ENGINE")
             keepGameEngine = true
         if (root.hostKind !== "SITE")
@@ -853,7 +861,7 @@ Item {
         if (objectType === "OSINT_DESK")
             return "OSINT"
         if (objectType === "QIP_DESK")
-            return "QIP"
+            return "RESEARCH"
         if (objectType === "DRAW_DESK" || objectType === "IMAGE")
             return "DRAW"
         if (objectType === "PDF")
@@ -898,8 +906,23 @@ Item {
         return true
     }
 
+    function openResearch(section) {
+        root.pendingResearchSection = String(section || "")
+        root.setHostKind("RESEARCH")
+        if (researchPane.item) {
+            if (root.pendingResearchSection.length)
+                researchPane.item.page = root.pendingResearchSection
+            root.pendingResearchSection = ""
+            researchPane.item.refresh()
+        }
+    }
+
     function setHostKind(kind) {
         var requestedKind = String(kind || "").toUpperCase()
+        if (requestedKind === "QIP") {
+            root.openResearch("WASM LAB")
+            return
+        }
         if (!root.hostKindEnabled(requestedKind)) {
             if (requestedKind !== "CODE")
                 root.setHostKind("CODE")
@@ -3609,25 +3632,7 @@ Item {
                         surfaceHost: root.scratchHost()
                         frameBorder: root.frameBorder
                         frameRadius: root.frameRadius
-                    }
-                }
-            }
-
-            Loader {
-                id: qipPane
-                objectName: "workspaceQipPane"
-                z: 20
-                anchors.fill: parent
-                anchors.leftMargin: 2
-                anchors.rightMargin: 4
-                anchors.topMargin: 4
-                anchors.bottomMargin: 18
-                active: !root.settingsOpen && root.hostKind === "QIP"
-                visible: active
-                sourceComponent: Component {
-                    QipSurface {
-                        objectName: "workspaceQipPane"
-                        surfaceHost: root.scratchHost()
+                        onResearchRequested: function(section) { root.openResearch(section) }
                     }
                 }
             }
@@ -3766,15 +3771,21 @@ Item {
                 anchors.rightMargin: 4
                 anchors.topMargin: 4
                 anchors.bottomMargin: 18
-                active: !root.settingsOpen && root.hostKind === "RESEARCH"
-                visible: active
+                active: root.keepResearch || root.hostKind === "RESEARCH"
+                visible: !root.settingsOpen && root.hostKind === "RESEARCH"
                 sourceComponent: Component {
                     ResearchSurface {
                         objectName: "workspaceResearchPane"
                         surfaceHost: root.scratchHost()
                         frameBorder: root.frameBorder
                         frameRadius: root.frameRadius
+                        onDocumentationRequested: function(url) { root.goBrowse(url) }
                     }
+                }
+                onLoaded: {
+                    if (root.pendingResearchSection.length)
+                        item.page = root.pendingResearchSection
+                    root.pendingResearchSection = ""
                 }
             }
 
@@ -4195,17 +4206,17 @@ Item {
         }
 
         Text {
-            objectName: "workspaceKindQIP"
-            text: "QIP"
-            color: root.hostKind === "QIP" ? "#d8dee9" : "#a8b0b8"
+            objectName: "workspaceKindResearch"
+            text: "RESEARCH"
+            color: root.hostKind === "RESEARCH" ? "#d8dee9" : "#a8b0b8"
             font.family: "monospace"
             font.pixelSize: 12
-            font.bold: root.hostKind === "QIP"
+            font.bold: root.hostKind === "RESEARCH"
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.setHostKind("QIP")
+                onClicked: root.setHostKind("RESEARCH")
             }
         }
 
@@ -4317,27 +4328,6 @@ Item {
             }
         }
 
-        Text {
-            text: " | "
-            color: "#a8b0b8"
-            font.family: "monospace"
-            font.pixelSize: 12
-        }
-
-        Text {
-            objectName: "workspaceKindResearch"
-            text: "RESEARCH"
-            color: root.hostKind === "RESEARCH" ? "#d8dee9" : "#a8b0b8"
-            font.family: "monospace"
-            font.pixelSize: 12
-            font.bold: root.hostKind === "RESEARCH"
-
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.setHostKind("RESEARCH")
-            }
-        }
     }
 
     FileDialog {

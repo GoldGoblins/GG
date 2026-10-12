@@ -24,7 +24,7 @@ from typing import Any
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-STATE = Path.home() / ".local" / "state" / "goldgoblins" / "gg-ai-desktop"
+STATE = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop")
 VISUAL_LAYOUT_PATH = STATE / "visual-layout-v1.json"
 SCHEMA = "gg.ai-desktop.visual-layout.v1"
 SOURCE_SCHEMA = "gg.ai-desktop.visual-source-buffer.v1"

@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import math
 from typing import Any, Iterable
+from backend import game_engine_enchants as enchant_contract
 
 
 SCHEMA = "gg.game-engine.gear.v1"
@@ -35,6 +36,7 @@ GEAR_SLOTS = (
     "HEAD",
     "NECK",
     "SHOULDERS",
+    "SHIRT",
     "BACK",
     "CHEST",
     "WRISTS",
@@ -42,9 +44,12 @@ GEAR_SLOTS = (
     "WAIST",
     "LEGS",
     "FEET",
+    "RING_1",
+    "RING_2",
     "MAIN_HAND",
     "OFF_HAND",
     "RANGED",
+    "TABARD",
     "TRINKET_1",
     "TRINKET_2",
 )
@@ -60,6 +65,9 @@ SOCKETABLE_BASE_TYPES = frozenset(
         "BOW",
         "STAFF",
         "DAGGER",
+        "PISTOL",
+        "WAND",
+        "OFFHAND",
     }
 )
 INSERTABLE_KINDS = ("RUNE", "GEM", "JEWEL")
@@ -133,6 +141,7 @@ def starter_slot_table() -> dict[str, dict[str, Any]]:
         "HEAD": "ARMOR",
         "NECK": "JEWELRY",
         "SHOULDERS": "ARMOR",
+        "SHIRT": "COSMETIC",
         "BACK": "ARMOR",
         "CHEST": "ARMOR",
         "WRISTS": "ARMOR",
@@ -140,11 +149,14 @@ def starter_slot_table() -> dict[str, dict[str, Any]]:
         "WAIST": "ARMOR",
         "LEGS": "ARMOR",
         "FEET": "ARMOR",
+        "RING_1": "JEWELRY",
+        "RING_2": "JEWELRY",
         "MAIN_HAND": "WEAPON",
         "OFF_HAND": "UTILITY",
         "RANGED": "WEAPON",
         "TRINKET_1": "TRINKET",
         "TRINKET_2": "TRINKET",
+        "TABARD": "COSMETIC",
     }
     return {
         slot: {
@@ -160,7 +172,7 @@ def starter_slot_table() -> dict[str, dict[str, Any]]:
 
 def starter_gear_specs() -> dict[str, dict[str, Any]]:
     """Map authored item definitions to their equipment contract."""
-    return {
+    out = {
         "item.island_compass": {
             "slot": "OFF_HAND",
             "base_type": "COMPASS",
@@ -240,6 +252,14 @@ def starter_gear_specs() -> dict[str, dict[str, Any]]:
             },
         },
     }
+
+    from backend.game_engine_asset_variations import WEAPON_FAMILIES
+    for family in WEAPON_FAMILIES:
+        stats={'armor':6,'durability':80} if family=='shield' else {'spell_power':3,'energy':8,'durability':80} if family=='offhand' else {'damage':8,'attack_range':1.2,'spell_power':2,'durability':80} if family=='staff' else {'damage':6,'durability':80}
+        out['item.weapon_'+family]=dict(slot='OFF_HAND' if family in ('shield','offhand') else 'MAIN_HAND',
+            base_type=family.upper(),max_sockets=3,base_stats=stats,
+            palette='#91b7be')
+    return out
 
 
 def starter_runes() -> dict[str, dict[str, Any]]:
@@ -390,6 +410,8 @@ def starter_runewords() -> dict[str, dict[str, Any]]:
 
 def starter_enchantments() -> dict[str, dict[str, Any]]:
     return {
+        **copy.deepcopy(enchant_contract.CATALOG),
+        **copy.deepcopy(enchant_contract.GEAR_CATALOG),
         "enchant.aquatic_edge": {
             "id": "enchant.aquatic_edge",
             "name": "Aquatic Edge",
@@ -397,6 +419,7 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 2,
             "allowed_categories": ["WEAPON", "ARMOR"],
             "tags": ["ENCHANT", "WATER"],
+            "visual_fx": "WATER",
         },
         "enchant.treasure_sense": {
             "id": "enchant.treasure_sense",
@@ -405,6 +428,7 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 3,
             "allowed_categories": ["ARMOR", "TRINKET", "UTILITY"],
             "tags": ["ENCHANT", "LOOT"],
+            "visual_fx": "ARCANE",
         },
         "enchant.hardened_hide": {
             "id": "enchant.hardened_hide",
@@ -413,6 +437,7 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 4,
             "allowed_categories": ["ARMOR"],
             "tags": ["ENCHANT", "SURVIVAL"],
+            "visual_fx": "SMOKE",
         },
         "enchant.fieldcraft": {
             "id": "enchant.fieldcraft",
@@ -421,6 +446,7 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 3,
             "allowed_categories": ["ARMOR", "UTILITY"],
             "tags": ["ENCHANT", "CRAFTING"],
+            "visual_fx": "GAS",
         },
         "enchant.steady_hand": {
             "id": "enchant.steady_hand",
@@ -429,6 +455,7 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 2,
             "allowed_categories": ["WEAPON"],
             "tags": ["ENCHANT", "COMBAT"],
+            "visual_fx": "LIGHTNING",
         },
         "enchant.night_glimmer": {
             "id": "enchant.night_glimmer",
@@ -437,6 +464,49 @@ def starter_enchantments() -> dict[str, dict[str, Any]]:
             "value": 2,
             "allowed_categories": ["ARMOR", "UTILITY"],
             "tags": ["ENCHANT", "NIGHT"],
+            "visual_fx": "SHADOW",
+        },
+        "enchant.ember_edge": {
+            "id": "enchant.ember_edge", "name": "Ember Edge",
+            "stat": "damage", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "FIRE"], "visual_fx": "FIRE",
+        },
+        "enchant.smoke_edge": {
+            "id": "enchant.smoke_edge", "name": "Smoke Edge",
+            "stat": "damage", "value": 1,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "SMOKE"], "visual_fx": "SMOKE",
+        },
+        "enchant.venom_edge": {
+            "id": "enchant.venom_edge", "name": "Venom Edge",
+            "stat": "damage", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "GAS"], "visual_fx": "GAS",
+        },
+        "enchant.storm_edge": {
+            "id": "enchant.storm_edge", "name": "Storm Edge",
+            "stat": "crit", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "LIGHTNING"], "visual_fx": "LIGHTNING",
+        },
+        "enchant.arcane_edge": {
+            "id": "enchant.arcane_edge", "name": "Arcane Edge",
+            "stat": "crit", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "ARCANE"], "visual_fx": "ARCANE",
+        },
+        "enchant.shadow_edge": {
+            "id": "enchant.shadow_edge", "name": "Shadow Edge",
+            "stat": "crit", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "SHADOW"], "visual_fx": "SHADOW",
+        },
+        "enchant.sun_lance": {
+            "id": "enchant.sun_lance", "name": "Sun Lance",
+            "stat": "damage", "value": 2,
+            "allowed_categories": ["WEAPON"],
+            "tags": ["ENCHANT", "LASER"], "visual_fx": "LASER",
         },
     }
 
@@ -511,7 +581,7 @@ def starter_workstations() -> dict[str, dict[str, Any]]:
 
 
 def starter_recipes() -> dict[str, dict[str, Any]]:
-    return {
+    out = {
         "recipe.fiber_rope": {
             "id": "recipe.fiber_rope",
             "name": "Woven Rope",
@@ -587,6 +657,22 @@ def starter_recipes() -> dict[str, dict[str, Any]]:
             "tags": ["ENCHANTING", "ARCANE"],
         },
     }
+
+    from backend.game_engine_nature_catalog import PRODUCE
+    from backend.game_engine_asset_variations import WEAPON_FAMILIES
+    for key,spec in PRODUCE.items():
+        identity='recipe.cook_'+key
+        out[identity]=dict(id=identity,name='Cook '+spec[0]+' Ration',
+            inputs={'item.nature.'+key:3,'material.fresh_water':1},output={'item.field_ration':1},
+            station_id='station.campfire',profession='SURVIVAL',difficulty=1,tags=['COOKING','FOOD',key.upper()])
+    for family in WEAPON_FAMILIES:
+        identity='recipe.weapon_'+family
+        out[identity]=dict(id=identity,name='Craft '+family.title(),
+            inputs={'material.wood':2,'material.iron_ingot':1,'material.fiber':1},
+            output={'item.weapon_'+family:1},station_id='station.workbench',profession='SURVIVAL',difficulty=2,tags=['WEAPON','CRAFT'])
+    from backend.game_engine_firearms import crafting_recipes
+    out.update(crafting_recipes())
+    return out
 
 
 def starter_professions() -> dict[str, dict[str, Any]]:
@@ -665,6 +751,7 @@ def tables_from_content(content: dict[str, Any] | None = None) -> dict[str, Any]
         "recipes": MAX_ASSET_ROWS,
         "professions": MAX_PROFESSIONS,
         "insertables": MAX_INSERTABLES,
+        "item_sets": 64,
     }
     for key, row_limit in row_limits.items():
         value = source.get(key)
@@ -720,11 +807,11 @@ def _normalize_stats(value: Any, *, limit: int = MAX_GEAR_MODIFIERS) -> dict[str
 
 def _base_category(base_type: Any) -> str:
     normalized = _bounded_text(base_type).upper()
-    if normalized in {"SWORD", "AXE", "MACE", "BOW", "STAFF", "DAGGER"}:
+    if normalized in {"SWORD", "AXE", "MACE", "BOW", "STAFF", "WAND", "DAGGER", "PISTOL"}:
         return "WEAPON"
     if normalized in {"HELM"}:
         return "HELM"
-    if normalized in {"CHEST_ARMOR", "SHIELD"}:
+    if normalized in {"CHEST_ARMOR", "SHIELD", "OFFHAND"}:
         return "ARMOR"
     return "UTILITY"
 
@@ -770,6 +857,13 @@ def _runeword_match(gear: dict[str, Any], tables: dict[str, Any]) -> dict[str, A
         if count == len(sequence) == len(expected) and sequence == expected and base_type in allowed:
             return copy.deepcopy(runeword)
     return None
+
+
+def _enchant_metadata(enchant_id: str) -> dict:
+    definition = enchant_contract.definition(enchant_id)
+    return {key: copy.deepcopy(definition[key]) for key in
+            ('colors', 'description', 'tier', 'families', 'required_level')
+            if key in definition}
 
 
 def recalculate_gear(gear: dict[str, Any], tables: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -821,7 +915,9 @@ def recalculate_gear(gear: dict[str, Any], tables: dict[str, Any] | None = None)
                 "name": _bounded_text(enchant.get("name"), enchant.get("id"), 64),
                 "stat": _bounded_text(enchant.get("stat"), limit=48).lower(),
                 "value": _number(enchant.get("value", 1)),
+                "visual_fx": _bounded_text(enchant.get("visual_fx"), limit=16).upper(),
             }
+            row.update(_enchant_metadata(row["id"]))
             safe_enchants.append(row)
             _add_stat(stats, row["stat"], row["value"])
             modifiers.append(_modifier_row("ENCHANT", row["id"], row["stat"], row["value"]))
@@ -993,7 +1089,9 @@ def apply_enchant(
         "name": _bounded_text(definition.get("name"), wanted, 64),
         "stat": _bounded_text(definition.get("stat"), limit=48).lower(),
         "value": _number(definition.get("value", 1)),
+        "visual_fx": _bounded_text(definition.get("visual_fx"), limit=16).upper(),
     }
+    row.update(_enchant_metadata(wanted))
     enchantments.append(row)
     recalculate_gear(gear, source)
     return True, {"action": "ENCHANT", "enchantment": copy.deepcopy(row), "stats": copy.deepcopy(gear.get("stats", {}))}

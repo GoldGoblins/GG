@@ -44,16 +44,9 @@ MAX_SQL = 64_000
 ROOT = Path(
     os.environ.get(
         "GG_RESEARCH_DESK_ROOT",
-        str(
-            Path.home()
-            / ".local"
-            / "state"
-            / "goldgoblins"
-            / "gg-ai-desktop"
-            / "research-desk"
-        ),
+        "/home/GG/.local/state/goldgoblins/gg-ai-desktop/research-desk",
     )
-).expanduser()
+)
 DB_NAME = "research-desk.sqlite3"
 _LOCK = threading.RLock()
 
@@ -258,6 +251,7 @@ def empty_snapshot() -> dict[str, Any]:
         "projects": [],
         "tasks": [],
         "evidence": [],
+        "sources": [],
         "methods": [],
         "skills": [],
         "runs": [],
@@ -272,6 +266,7 @@ def snapshot() -> dict[str, Any]:
         projects = _rows(connection, "projects", 32)
         tasks = _rows(connection, "tasks", 96)
         evidence = _rows(connection, "evidence", 96)
+        sources = _rows(connection, "sources", 96)
         methods = _rows(connection, "methods", 96)
         skills = _rows(connection, "skills", 64)
         runs = _rows(connection, "runs", 64)
@@ -286,6 +281,7 @@ def snapshot() -> dict[str, Any]:
         "projects": projects,
         "tasks": tasks,
         "evidence": evidence,
+        "sources": sources,
         "methods": methods,
         "skills": skills,
         "runs": runs,
@@ -440,6 +436,8 @@ def match_methods(query: str, limit: int = 6) -> list[dict[str, Any]]:
         rows = _rows(connection, "methods", 96)
     ranked: list[tuple[int, dict[str, Any]]] = []
     for row in rows:
+        if row.get("status") == "RETIRED":
+            continue
         hay = _tokens(str(row.get("name") or "") + " " + str(row.get("trigger_text") or "") + " " + str(row.get("steps_json") or ""))
         score = len(wanted & hay)
         if score:

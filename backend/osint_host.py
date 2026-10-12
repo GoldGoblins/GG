@@ -5,11 +5,12 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import threading
+import time
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from backend import osint_contract
+from backend import osint_contract, osint_nearby, research_desk
 
 _EMPTY_UI: dict[str, Any] = {
     "page": "OVERVIEW",
@@ -21,6 +22,7 @@ _EMPTY_UI: dict[str, Any] = {
     "selected": None,
     "view": None,
     "sidebarCollapsed": False,
+    "streamMode": "NEWS",
 }
 
 
@@ -30,6 +32,7 @@ class OsintHost(QObject):
     updated = Signal(str)
     stateChanged = Signal(str)
     flightLookedUp = Signal(str)
+    nearbyUpdated = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -44,6 +47,12 @@ class OsintHost(QObject):
         )
         self._closed = False
         self._ui: dict[str, Any] = dict(_EMPTY_UI)
+        self._nearby_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gg-nearby")
+        self._nearby_future: Future[Any] | None = None
+        self._nearby_active = False
+        self._nearby_generation = 0
+        self._nearby_at = 0.0
+        self._nearby_raw = json.dumps({"status": "PAUSED", "rows": [], "sources": []})
 
     @Slot(str, result=str)
     def snapshot(self, page: str = "OVERVIEW") -> str:
@@ -90,6 +99,53 @@ class OsintHost(QObject):
                 },
                 separators=(",", ":"),
             )
+
+    @Slot(bool)
+    def setNearbyActive(self, enabled: bool) -> None:
+        with self._lock:
+            enabled = bool(enabled) and not self._closed
+            if enabled != self._nearby_active:
+                self._nearby_active = enabled
+                self._nearby_generation += 1
+                self._nearby_at = 0.0
+                self._nearby_raw = json.dumps({"status": "WAITING" if enabled else "PAUSED", "rows": [], "sources": []})
+        if enabled:
+            self.nearbySnapshot()
+
+    @Slot(result=str)
+    def nearbySnapshot(self) -> str:
+        with self._lock:
+            if self._nearby_active and self._nearby_future is None and time.monotonic() - self._nearby_at >= 5:
+                token = self._nearby_generation
+                self._nearby_future = self._nearby_executor.submit(osint_nearby.collect)
+                self._nearby_future.add_done_callback(lambda future: self._nearby_finished(future, token))
+            return self._nearby_raw
+
+    def _nearby_finished(self, future: Future[Any], token: int) -> None:
+        try:
+            payload = future.result()
+        except Exception:
+            payload = {"status": "UNAVAILABLE", "rows": [], "sources": []}
+        with self._lock:
+            if self._nearby_future is future:
+                self._nearby_future = None
+            if self._closed or not self._nearby_active or token != self._nearby_generation:
+                return
+            self._nearby_at = time.monotonic()
+            self._nearby_raw = json.dumps(payload, separators=(",", ":"))
+            raw = self._nearby_raw
+        self.nearbyUpdated.emit(raw)
+
+    @Slot(str, str, result=str)
+    def recordEvidence(self, kind: str, event_id: str) -> str:
+        payload = osint_contract.observation_evidence(kind, event_id)
+        if payload.get("status") == "OBSERVATION_READY":
+            try:
+                result = research_desk.add_evidence(payload)
+                payload = {"status": result["status"]}
+            except Exception as exc:
+                payload = {"status": "ERROR", "error": type(exc).__name__}
+        return json.dumps(payload, separators=(",", ":"))
 
     @Slot(str, result=str)
     def planRoute(self, spec_json: str = "{}") -> str:
@@ -180,9 +236,18 @@ class OsintHost(QObject):
                 osint_contract.collect_snapshot,
                 str(page or "OVERVIEW"),
                 True,
+                self._publish_partial,
             )
             self._future.add_done_callback(self._finished)
         return True
+
+    def _publish_partial(self, payload: dict[str, Any]) -> None:
+        raw = json.dumps(payload, separators=(",", ":"))
+        with self._lock:
+            if self._closed:
+                return
+            self._raw = raw
+        self.updated.emit(raw)
 
     def _finished(self, future: Future[Any]) -> None:
         try:
@@ -195,6 +260,7 @@ class OsintHost(QObject):
                     "schema": osint_contract.SCHEMA,
                     "scope": osint_contract.SAFE_SCOPE,
                     "status": "ERROR",
+                    "fetching": False,
                     "error": type(exc).__name__,
                 },
                 separators=(",", ":"),
@@ -216,8 +282,11 @@ class OsintHost(QObject):
             if self._closed:
                 return
             self._closed = True
+            self._nearby_active = False
+            self._nearby_generation += 1
             future = self._future
             self._future = None
         if future is not None:
             future.cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._nearby_executor.shutdown(wait=False, cancel_futures=True)

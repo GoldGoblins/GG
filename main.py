@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+from collections.abc import Callable
 # EXT hosts Blender as a native child of this window.  That only works when
 # the desktop itself is X11/XWayland, same as a QML pane — not a Tool overlay.
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
@@ -24,10 +25,44 @@ import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
-from PySide6.QtQml import QQmlApplicationEngine
+_HEADLESS_ENTRY_FLAGS = {
+    "--selfdev-controller",
+    "--selfdev-controller-synthetic",
+    "--selfdev-selftest",
+}
+
+if (
+    __name__ == "__main__"
+    and (len(sys.argv) < 2 or sys.argv[1] not in _HEADLESS_ENTRY_FLAGS)
+):
+    # Start the QML window before importing the desktop's large service graph.
+    # startup.py imports this module after the first in-app loading frame lands.
+    from startup import launch
+
+    raise SystemExit(launch(sys.argv))
+
+try:
+    from PySide6.QtCore import (
+        QObject,
+        QProcess,
+        QTimer,
+        QUrl,
+        Qt,
+        Signal,
+        Slot,
+    )
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtQml import QQmlApplicationEngine
+except Exception:
+    if __name__ == "__main__":
+        print(
+            "FAIL: PySide6/Qt missing. Fedora: dnf install python3-pyside6 qt6-qtwebengine",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    raise
+
 from backend import shell_load
 
 from backend import local_ai_contract as contract
@@ -5950,10 +5985,16 @@ def _chat_identity_workspace_context(workspace_object_id: str) -> dict[str, obje
 
 
 class ChatBridge(QObject):
-    def __init__(self, root: QObject, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        root: QObject,
+        parent: QObject | None = None,
+        *,
+        defer_startup: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._root = root
-        self._machine_graph = _build_workbench_machine_graph()
+        self._machine_graph = None
         self._process: QProcess | None = None
         self._state: dict[str, str] | None = None
         self._orchestrator_assigned_participant = ""
@@ -5972,30 +6013,48 @@ class ChatBridge(QObject):
         self._selfdev_stdout_buffer = ""
         self._ledger_error = ""
         self._task_ledger: control_contract.TaskLedger | None = None
+        self._resident_information_state = None
+        self._context_snapshot_json = ""
+        self._context_snapshot_error = "CONTEXT_SNAPSHOT_NOT_SYNCED"
+        self._resident_chat = None
+
+        if not defer_startup:
+            self.initialize_startup_machine_graph()
+            self.initialize_startup_information_state()
+            self.initialize_startup_task_state()
+            self.initialize_startup_resident_chat()
+
+    def initialize_startup_machine_graph(self) -> None:
+        self._machine_graph = _build_workbench_machine_graph()
+
+    def initialize_startup_information_state(self) -> None:
         self._resident_information_state = (
             resident_state.WorkbenchResidentInformationState.bootstrap_workbench_sources(
                 repo_root=REPO_ROOT,
                 limited_target_relative_path=(
                     write_contract.TARGET_RELATIVE_PATH
                 ),
-                limited_producer_path=(
-                    WRITE_RUNNER_PATH
-                ),
+                limited_producer_path=WRITE_RUNNER_PATH,
                 limited_producer_contract_path=(
-                    REPO_ROOT / "projects" / "gg-ai-desktop" / "backend" / "write_contract.py"
+                    REPO_ROOT
+                    / "projects"
+                    / "gg-ai-desktop"
+                    / "backend"
+                    / "write_contract.py"
                 ),
-                control_target_relative_path=(
-                    control_contract.TARGET_RELATIVE_PATH
-                ),
-                control_producer_path=(
-                    CONTROL_APPLY_RUNNER_PATH
-                ),
+                control_target_relative_path=control_contract.TARGET_RELATIVE_PATH,
+                control_producer_path=CONTROL_APPLY_RUNNER_PATH,
                 control_producer_contract_path=(
-                    REPO_ROOT / "projects" / "gg-ai-desktop" / "backend" / "control_plane_contract.py"
+                    REPO_ROOT
+                    / "projects"
+                    / "gg-ai-desktop"
+                    / "backend"
+                    / "control_plane_contract.py"
                 ),
             )
         )
 
+    def initialize_startup_task_state(self) -> None:
         try:
             runtime = Path(f"/run/user/{os.getuid()}").resolve(strict=True)
             self._task_ledger = control_contract.TaskLedger(
@@ -6015,11 +6074,11 @@ class ChatBridge(QObject):
             self._block_unrecoverable_autonomy_records()
         except Exception as exc:
             self._ledger_error = type(exc).__name__ + ":" + str(exc)
-        self._context_snapshot_json = ""
-        self._context_snapshot_error = "CONTEXT_SNAPSHOT_NOT_SYNCED"
+
+    def initialize_startup_resident_chat(self) -> None:
         self._resident_chat = ResidentChatTransport(
             self,
-            root,
+            self._root,
             self._set_bridge_activity,
         )
         surface_host = getattr(self._resident_chat, "_surface_host", None)
@@ -11856,20 +11915,290 @@ class ChatBridge(QObject):
             self._state = None
             self._set_bridge_activity(False, "")
 
-def wait_for_workspace_surface(root: QObject, timeout_ms: int = 4000) -> QObject | None:
-    deadline = time.monotonic() + (timeout_ms / 1000.0)
-    app = QCoreApplication.instance()
-    found = root.findChild(QObject, "workspaceSurface")
-    while time.monotonic() < deadline:
-        if app is not None:
-            app.processEvents()
-        found = root.findChild(QObject, "workspaceSurface")
-        if found is not None and root.property("shellLoading") is False:
-            return found
-    return found
+class DesktopStartupCoordinator(QObject):
+    """Finish local bridge setup after the desktop loading view is visible."""
+
+    def __init__(
+        self,
+        root: QObject,
+        app: QApplication,
+    ) -> None:
+        super().__init__(app)
+        self._root = root
+        self._app = app
+        self._frame_swapped = None
+        self._first_frame_seen = False
+        self._bridge_setup_scheduled = False
+        self._workspace_wait_started = 0.0
+        self._startup_steps: list[tuple[str, Callable[[], None]]] = []
+        self._startup_step_index = 0
+        self._chat_bridge: ChatBridge | None = None
+        self._live_aid_bridge: LiveAidQtBridge | None = None
+
+    def start(self) -> bool:
+        frame_swapped = getattr(self._root, "frameSwapped", None)
+        if frame_swapped is None:
+            self._fail("Qt did not expose the desktop render signal")
+            return False
+        try:
+            frame_swapped.connect(
+                self._on_first_frame,
+                Qt.ConnectionType.QueuedConnection,
+            )
+            self._frame_swapped = frame_swapped
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            self._fail("Could not connect the desktop render signal: " + str(exc))
+            return False
+        return True
+
+    @Slot()
+    def _on_first_frame(self) -> None:
+        if self._first_frame_seen:
+            return
+        self._first_frame_seen = True
+        if self._frame_swapped is not None:
+            try:
+                self._frame_swapped.disconnect(self._on_first_frame)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
+            self._frame_swapped = None
+        self._set_qml_status(
+            "LOADING DESKTOP…",
+            "Preparing workspace and utility surfaces",
+        )
+        self._workspace_wait_started = time.monotonic()
+        QTimer.singleShot(0, self._wait_for_workspace)
+
+    @Slot()
+    def _wait_for_workspace(self) -> None:
+        if self._bridge_setup_scheduled:
+            return
+        workspace_surface = self._root.findChild(QObject, "workspaceSurface")
+        workspace_ready = bool(self._root.property("_workspaceLoaderReady"))
+        utility_ready = bool(self._root.property("_utilityLoaderReady"))
+        if workspace_surface is None or not workspace_ready or not utility_ready:
+            if bool(self._root.property("workspaceLoadFailed")):
+                self._fail("Workspace surface reported a QML load error")
+                return
+            if time.monotonic() - self._workspace_wait_started >= 30.0:
+                if workspace_surface is None or not workspace_ready:
+                    self._fail("Workspace surface did not finish loading")
+                else:
+                    self._fail("Utility surface did not finish loading")
+                return
+            QTimer.singleShot(35, self._wait_for_workspace)
+            return
+
+        self._bridge_setup_scheduled = True
+        self._set_qml_status(
+            "STARTING LOCAL SERVICES…",
+            "Connecting chat, task ledger and desktop bridges",
+        )
+        # Give Qt Quick a turn to paint the new stage before bridge setup does
+        # its synchronous local store reads and recovery work.
+        QTimer.singleShot(100, self._initialize_bridges)
+
+    @Slot()
+    def _initialize_bridges(self) -> None:
+        workspace_surface = self._root.findChild(QObject, "workspaceSurface")
+        if workspace_surface is None:
+            self._bridge_setup_scheduled = False
+            self._wait_for_workspace()
+            return
+
+        self._startup_steps = [
+            ("Create Live Aid bridge", self._create_live_aid_bridge),
+            ("Create chat bridge", self._create_chat_bridge),
+            ("Build workbench command graph", self._initialize_machine_graph),
+            (
+                "Verify local source and runner fingerprints",
+                self._initialize_information_state,
+            ),
+            (
+                "Load task ledger and recover pending work",
+                self._initialize_task_state,
+            ),
+            (
+                "Connect saved chat sessions and desktop surfaces",
+                self._initialize_resident_chat,
+            ),
+            ("Wire chat, task and stop signals", self._wire_bridge_signals),
+        ]
+        self._startup_step_index = 0
+        self._run_startup_step()
+
+    def _create_live_aid_bridge(self) -> None:
+        self._live_aid_bridge = LiveAidQtBridge(REPO_ROOT, self._app)
+        if not self._root.setProperty("liveAidBackend", self._live_aid_bridge):
+            raise RuntimeError("Main window rejected Live Aid bridge property")
+
+        workspace_surface = self._root.findChild(QObject, "workspaceSurface")
+        if workspace_surface is None:
+            raise RuntimeError("WorkspaceSurface disappeared during startup")
+        if not workspace_surface.setProperty(
+            "liveAidBackend",
+            self._live_aid_bridge,
+        ):
+            raise RuntimeError("WorkspaceSurface rejected Live Aid bridge property")
+
+    def _create_chat_bridge(self) -> None:
+        self._chat_bridge = ChatBridge(
+            self._root,
+            self._app,
+            defer_startup=True,
+        )
+
+    def _require_chat_bridge(self) -> ChatBridge:
+        if self._chat_bridge is None:
+            raise RuntimeError("Chat bridge container is not ready")
+        return self._chat_bridge
+
+    def _initialize_machine_graph(self) -> None:
+        self._require_chat_bridge().initialize_startup_machine_graph()
+
+    def _initialize_information_state(self) -> None:
+        self._require_chat_bridge().initialize_startup_information_state()
+
+    def _initialize_task_state(self) -> None:
+        self._require_chat_bridge().initialize_startup_task_state()
+
+    def _initialize_resident_chat(self) -> None:
+        self._require_chat_bridge().initialize_startup_resident_chat()
+
+    def _wire_bridge_signals(self) -> None:
+        bridge = self._require_chat_bridge()
+        bridge_signal = getattr(self._root, "bridgeSubmit", None)
+        context_snapshot_signal = getattr(
+            self._root,
+            "contextSnapshotSync",
+            None,
+        )
+        stop_signal = getattr(self._root, "bridgeStop", None)
+        assignment_set_signal = getattr(
+            self._root,
+            "bridgeAssignmentSet",
+            None,
+        )
+        assignment_clear_signal = getattr(
+            self._root,
+            "bridgeAssignmentClear",
+            None,
+        )
+
+        if bridge_signal is None:
+            raise RuntimeError("QML bridgeSubmit signal is unavailable")
+        if context_snapshot_signal is None:
+            raise RuntimeError("QML contextSnapshotSync signal is unavailable")
+        if stop_signal is None:
+            raise RuntimeError("QML bridgeStop signal is unavailable")
+        if assignment_set_signal is None:
+            raise RuntimeError("QML bridgeAssignmentSet signal is unavailable")
+        if assignment_clear_signal is None:
+            raise RuntimeError("QML bridgeAssignmentClear signal is unavailable")
+
+        bridge_signal.connect(bridge.submit)
+        context_snapshot_signal.connect(bridge.syncContextSnapshot)
+        stop_signal.connect(bridge.stopActive)
+        assignment_set_signal.connect(bridge._setOrchestratorAssignment)
+        assignment_clear_signal.connect(bridge._clearOrchestratorAssignment)
+        self._app._gg_chat_bridge = bridge  # type: ignore[attr-defined]
+        self._app._gg_live_aid_bridge = self._live_aid_bridge  # type: ignore[attr-defined]
+
+    def _run_startup_step(self) -> None:
+        if self._startup_step_index >= len(self._startup_steps):
+            self._finish_startup()
+            return
+
+        label, callback = self._startup_steps[self._startup_step_index]
+        self._root.setProperty(
+            "startupStepNumber",
+            self._startup_step_index + 1,
+        )
+        self._root.setProperty("startupStepCount", len(self._startup_steps) + 1)
+        self._root.setProperty("startupStepBusy", True)
+        self._set_qml_status("STARTING LOCAL SERVICES…", str(label))
+        QTimer.singleShot(
+            100,
+            lambda: self._perform_startup_step(
+                self._startup_step_index,
+                str(label),
+                callback,
+            ),
+        )
+
+    def _perform_startup_step(
+        self,
+        step_index: int,
+        label: str,
+        callback: Callable[[], None],
+    ) -> None:
+        if step_index != self._startup_step_index:
+            return
+        started = time.monotonic()
+        try:
+            callback()
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            self._root.setProperty("startupStepBusy", False)
+            append_log = getattr(self._root, "appendShellLog", None)
+            if callable(append_log):
+                append_log(
+                    "startup · "
+                    + label
+                    + " · failed after "
+                    + f"{elapsed:.2f}s"
+                )
+            self._fail(type(exc).__name__ + ": " + str(exc))
+            return
+
+        elapsed = time.monotonic() - started
+        append_log = getattr(self._root, "appendShellLog", None)
+        if callable(append_log):
+            append_log("startup · " + label + " · " + f"{elapsed:.2f}s")
+        self._root.setProperty("startupStepBusy", False)
+        self._startup_step_index += 1
+        service_progress = round(
+            self._startup_step_index
+            * 100
+            / max(1, len(self._startup_steps) + 1)
+        )
+        self._root.setProperty("startupServiceProgress", service_progress)
+        if self._startup_step_index >= len(self._startup_steps):
+            self._finish_startup()
+            return
+        QTimer.singleShot(100, self._run_startup_step)
+
+    def _finish_startup(self) -> None:
+        self._root.setProperty("startupStepNumber", len(self._startup_steps) + 1)
+        self._root.setProperty("startupStepCount", len(self._startup_steps) + 1)
+        self._root.setProperty("startupStepBusy", True)
+        self._set_qml_status(
+            "FINISHING STARTUP…",
+            "Binding workspace and utility surfaces",
+        )
+        QTimer.singleShot(100, self._mark_startup_ready)
+
+    @Slot()
+    def _mark_startup_ready(self) -> None:
+        if not self._root.setProperty("startupReady", True):
+            self._fail("Main window rejected startup-ready state")
+
+    def _set_qml_status(self, label: str, current: str) -> None:
+        self._root.setProperty("shellLoadLabel", label)
+        self._root.setProperty("shellLoadCurrent", current)
+
+    def _fail(self, reason: str) -> None:
+        self._root.setProperty("startupStepBusy", False)
+        self._root.setProperty("startupFailed", True)
+        self._set_qml_status("STARTUP FAILED", reason)
+        self._root.setProperty("shellLoading", True)
+        append_log = getattr(self._root, "appendShellLog", None)
+        if callable(append_log):
+            append_log("startup · " + reason)
 
 
-def main() -> int:
+def initialize_loaded_window(root: QObject, app: QApplication) -> None:
+    """Attach desktop configuration and services to the visible QML window."""
     config = load_config()
     integrations = config["integrations"]
     safety = config["safety"]
@@ -12061,95 +12390,39 @@ def main() -> int:
     ):
         raise RuntimeError("Task-scoped mandate requirement mismatch.")
 
-    app = QApplication(sys.argv)
+    for name, value in qml_initial_properties(config).items():
+        if not root.setProperty(name, value):
+            raise RuntimeError("Main window rejected startup property: " + name)
+
+    root.setProperty("shellLoadLabel", "PREPARING DESKTOP…")
+    root.setProperty(
+        "shellLoadCurrent",
+        "Loading workspace surfaces and local services",
+    )
+    startup = DesktopStartupCoordinator(root, app)
+    app._gg_startup_coordinator = startup  # type: ignore[attr-defined]
+    if not startup.start():
+        return
+    if not root.setProperty("startupModulesReady", True):
+        raise RuntimeError("Main window rejected startup module state")
+
+
+def main() -> int:
+    """Compatibility entry for callers that already imported this module."""
+    app = QApplication.instance() or QApplication(sys.argv)
     desk_font = QFont("monospace")
     desk_font.setStyleHint(QFont.StyleHint.Monospace)
     app.setFont(desk_font)
     engine = QQmlApplicationEngine()
-    engine.setInitialProperties(
-        qml_initial_properties(config)
-    )
     engine.load(QUrl.fromLocalFile(str(QML_PATH)))
-
     roots = engine.rootObjects()
-
     if not roots:
         return 2
 
     root = roots[0]
-
-    live_aid_bridge = LiveAidQtBridge(REPO_ROOT, app)
-    if not root.setProperty(
-        "liveAidBackend",
-        live_aid_bridge,
-    ):
-        raise RuntimeError(
-            "Main window rejected Live Aid bridge property."
-        )
-    workspace_surface = wait_for_workspace_surface(root)
-
-    if workspace_surface is None:
-        raise RuntimeError(
-            "WorkspaceSurface object is unavailable for Live Aid."
-        )
-
-    if not workspace_surface.setProperty(
-        "liveAidBackend",
-        live_aid_bridge,
-    ):
-        raise RuntimeError(
-            "WorkspaceSurface rejected Live Aid bridge property."
-        )
-
-    bridge = ChatBridge(root, app)
-    bridge_signal = getattr(root, "bridgeSubmit", None)
-    context_snapshot_signal = getattr(
-        root,
-        "contextSnapshotSync",
-        None,
-    )
-    stop_signal = getattr(root, "bridgeStop", None)
-    assignment_set_signal = getattr(
-        root,
-        "bridgeAssignmentSet",
-        None,
-    )
-    assignment_clear_signal = getattr(
-        root,
-        "bridgeAssignmentClear",
-        None,
-    )
-
-    if bridge_signal is None:
-        raise RuntimeError("QML bridgeSubmit signal is unavailable.")
-    if context_snapshot_signal is None:
-        raise RuntimeError(
-            "QML contextSnapshotSync signal is unavailable."
-        )
-    if stop_signal is None:
-        raise RuntimeError("QML bridgeStop signal is unavailable.")
-    if assignment_set_signal is None:
-        raise RuntimeError(
-            "QML bridgeAssignmentSet signal is unavailable."
-        )
-    if assignment_clear_signal is None:
-        raise RuntimeError(
-            "QML bridgeAssignmentClear signal is unavailable."
-        )
-
-    bridge_signal.connect(bridge.submit)
-    context_snapshot_signal.connect(
-        bridge.syncContextSnapshot
-    )
-    stop_signal.connect(bridge.stopActive)
-    assignment_set_signal.connect(
-        bridge._setOrchestratorAssignment
-    )
-    assignment_clear_signal.connect(
-        bridge._clearOrchestratorAssignment
-    )
-    app._gg_chat_bridge = bridge  # type: ignore[attr-defined]
-    app._gg_live_aid_bridge = live_aid_bridge  # type: ignore[attr-defined]
+    app._gg_qml_engine = engine  # type: ignore[attr-defined]
+    root.showMaximized()
+    initialize_loaded_window(root, app)
 
     return app.exec()
 

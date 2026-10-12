@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from backend import crypto_trader
+from backend import crypto_trader, crypto_backtest
 from backend.crypto_indicators import rsi, stoch_kd
 from backend.crypto_trader import (
     BAR_SEC,
@@ -141,22 +141,11 @@ def _normalise_forecast(raw: Any, fallback_last: float) -> dict[str, Any]:
 
 
 def _add_timesfm_paths() -> None:
-    """Make the isolated downloaded CPU runtime visible to the desktop process."""
-    site_override = os.environ.get("GG_TIMESFM_SITE")
-    source_override = os.environ.get("GG_TIMESFM_SOURCE")
-    candidates = [
-        site_override,
-        "/tmp/gg-crypto-env/lib64/python3.14/site-packages",
-        "/tmp/gg-crypto-env/lib/python3.14/site-packages",
-    ]
-    source_candidates = [source_override, "/tmp/gg-crypto-upstream/timesfm/src"]
-    for raw in candidates + source_candidates:
-        if raw and Path(raw).is_dir() and raw not in sys.path:
-            sys.path.insert(0, raw)
-
-
-_TIMESFM_PROVIDER: Any = None
-_TIMESFM_INIT_ERROR = ""
+    """Use installed packages or explicitly configured source paths."""
+    for key in ("GG_TIMESFM_SITEPACKAGES", "GG_TIMESFM_SOURCE"):
+        candidate = os.environ.get(key, "")
+        if candidate and Path(candidate).is_dir() and candidate not in sys.path:
+            sys.path.insert(0, candidate)
 
 
 def _timesfm_provider(config: HybridConfig) -> tuple[Any, str, str]:
@@ -164,6 +153,8 @@ def _timesfm_provider(config: HybridConfig) -> tuple[Any, str, str]:
     global _TIMESFM_PROVIDER, _TIMESFM_INIT_ERROR
     if not config.use_timesfm:
         return None, "disabled", "GG_TIMESFM_OFF"
+    if os.environ.get("GG_TIMESFM_ALLOW_NONCOMMERCIAL_RESEARCH") != "1":
+        return None, "naive-fallback", "TIMESFM3_NONCOMMERCIAL_RESEARCH_OPT_IN_REQUIRED"
     if _TIMESFM_PROVIDER is not None:
         return _TIMESFM_PROVIDER, "timesfm3", _TIMESFM_INIT_ERROR
     if _TIMESFM_INIT_ERROR:
@@ -173,7 +164,7 @@ def _timesfm_provider(config: HybridConfig) -> tuple[Any, str, str]:
         import numpy as np
         from timesfm3 import ModelConfig, TimesFM3Evaluator
 
-        cache_dir = os.environ.get("GG_TIMESFM_CACHE", "/tmp/gg-timesfm-hf")
+        cache_dir = os.environ.get("GG_TIMESFM_CACHE", str(Path.home() / ".cache/goldgoblins/timesfm"))
         model_config = ModelConfig(
             checkpoint_path="google/timesfm-3.0-pytorch",
             per_core_batch_size=1,
@@ -268,22 +259,26 @@ class PaperPositionExecutor:
             self.peak_px = float(self.entry_px)
 
     def check(
-        self, i: int, high: float, low: float, close: float
+        self, i: int, high: float, low: float, close: float, open_price: float | None = None
     ) -> tuple[str, float] | None:
+        if i <= self.entry_i:
+            return None
         entry = max(1e-12, float(self.entry_px))
         stop = entry * (1.0 - self.config.stop_loss_bps / 10_000.0)
         take = entry * (1.0 + self.config.take_profit_bps / 10_000.0)
         if low <= stop:
-            return "stop_loss", stop
+            gap = open_price if open_price is not None and low <= open_price <= high else close
+            return "stop_loss", min(stop, gap) if high < stop or (open_price is not None and gap < stop) else stop
         if high >= take:
             return "take_profit", take
         activation = entry * (1.0 + self.config.trailing_activation_bps / 10_000.0)
-        if high >= activation:
-            self.peak_px = max(self.peak_px, float(high))
         if self.peak_px >= activation:
             trail = self.peak_px * (1.0 - self.config.trailing_delta_bps / 10_000.0)
             if low <= trail:
-                return "trailing_stop", trail
+                gap = open_price if open_price is not None and low <= open_price <= high else close
+                return "trailing_stop", min(trail, gap) if high < trail or (open_price is not None and gap < trail) else trail
+        if high >= activation:
+            self.peak_px = max(self.peak_px, float(high))
         if i - self.entry_i >= self.config.time_limit_bars:
             return "time_limit", max(1e-12, float(close))
         return None
@@ -358,16 +353,8 @@ def _forecast_indices(start: int, n: int, config: HybridConfig) -> set[int]:
         return set()
     stride = max(1, int(config.forecast_stride))
     max_calls = max(1, int(config.max_forecast_calls))
-    span = n - start
-    if math.ceil(span / stride) > max_calls:
-        stride = max(stride, math.ceil(span / max_calls))
-    points = list(range(start, n, stride))
-    if n - 1 not in points:
-        if len(points) < max_calls:
-            points.append(n - 1)
-        elif points:
-            points[-1] = n - 1
-    return set(points[:max_calls])
+    # Extending history cannot move forecasts that were made in the past.
+    return set(range(start, min(n, start + stride * max_calls), stride))
 
 
 def _combined_signal(
@@ -442,12 +429,15 @@ def run_backtest(
     else:
         times = times[:n]
 
+    begin = crypto_backtest.start_index(src)
+    resume = crypto_backtest.restored("hybrid")
+    bar_sec = int(BAR_SEC[primary])
     prepared = _prepare_mtf(frames)
     engine = _ForecastEngine(cfg, forecast_provider)
     forecast_at = _forecast_indices(80, n, cfg)
-    latest_forecast = naive_forecast(closes[:81], cfg.forecast_horizon)
-    last_forecast_i = 79
-    seed_i = 80 if n > 80 else n - 1
+    latest_forecast = naive_forecast(closes[:begin + 1], cfg.forecast_horizon)
+    last_forecast_i = begin - 1
+    seed_i = begin
     seed_px = _price_atoms(closes[seed_i])
     if seed_px <= 0:
         raise RuntimeError("CRYPTO_PRICE")
@@ -459,10 +449,10 @@ def run_backtest(
     initial_tactical_spend_usd = start_usd * tactical_bps // 10_000
     initial_spend_usd = core_spend_usd + initial_tactical_spend_usd
     core_net_usd = core_spend_usd * (
-        10_000 - crypto_trader.FEE_BPS
+        10_000 - crypto_backtest.EXECUTION_BPS
     ) // 10_000
     tactical_net_usd = initial_tactical_spend_usd * (
-        10_000 - crypto_trader.FEE_BPS
+        10_000 - crypto_backtest.EXECUTION_BPS
     ) // 10_000
     core_sol = core_net_usd * SOL_SCALE // seed_px
     position_sol = tactical_net_usd * SOL_SCALE // seed_px
@@ -475,6 +465,7 @@ def run_backtest(
     )
     lots: list[dict[str, Any]] = []
     equity: list[dict[str, Any]] = []
+    accounting: list[dict[str, Any]] = []
     buys = 0
     sells = 0
     signal_buys = 0
@@ -507,6 +498,7 @@ def run_backtest(
         total_position_sol = core_sol + position_sol
         position_usd = total_position_sol * price_atoms // SOL_SCALE
         mark_usd = cash_usd + position_usd
+        accounting.append({"ts": ts, "usd": mark_usd / USD_SCALE})
         peak_equity_usd = max(peak_equity_usd, mark_usd)
         min_equity_usd = min(min_equity_usd, mark_usd)
         max_drawdown_usd = max(max_drawdown_usd, peak_equity_usd - mark_usd)
@@ -523,14 +515,32 @@ def run_backtest(
                 }
             )
 
-    for i in range(80, n):
+    if resume:
+        if resume["config"] != cfg.as_dict():
+            raise ValueError("CRYPTO_PAPER_PARAMETERS_CHANGED")
+        core_sol = resume["core_sol"]
+        position_sol = resume["position_sol"]
+        cash_usd = resume["cash_usd"]
+        cost_usd = resume["cost_usd"]
+        fills_today = resume["fills_today"]
+        current_day = resume["current_day"]
+        latest_forecast = resume["latest_forecast"]
+        executor = crypto_backtest.executor_from(resume.get("executor"), times, bar_sec, cfg)
+        cooldown_until_i = (int(resume["cooldown_until_ts"]) - times[0]) // bar_sec
+        last_forecast_i = (int(resume["last_forecast_ts"]) - times[0]) // bar_sec
+    start = n - 1 if resume else begin
+    anchor_ts = int(resume.get("anchor_ts", times[begin]))
+    for i in range(start, n):
         ts = int(times[i])
         day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         if current_day and day != current_day:
             day_hist.append(fills_today)
             fills_today = 0
         current_day = day
-        if i in forecast_at:
+        forecast_due = i in forecast_at
+        if crypto_backtest.STREAM.get():
+            forecast_due = not resume or ((ts - anchor_ts) // bar_sec) % max(1, cfg.forecast_stride) == 0
+        if forecast_due:
             left = max(0, i + 1 - max(8, cfg.context_bars))
             latest_forecast = engine.forecast(closes[left : i + 1])
             latest_forecast = dict(latest_forecast)
@@ -551,7 +561,7 @@ def run_backtest(
             signal_sells += 1
 
         if position_sol > 0 and executor is not None:
-            barrier = executor.check(i, highs[i], lows[i], closes[i])
+            barrier = executor.check(i, highs[i], lows[i], closes[i], (src.get("opens") or [None] * n)[i])
             if barrier is not None:
                 reason, exit_px = barrier
             elif signal["side"] == "sell":
@@ -561,7 +571,7 @@ def run_backtest(
             if reason:
                 exit_atoms = _price_atoms(exit_px)
                 usd_net = (position_sol * exit_atoms // SOL_SCALE) * (
-                    10_000 - crypto_trader.FEE_BPS
+                    10_000 - crypto_backtest.EXECUTION_BPS
                 ) // 10_000
                 profit_usd = usd_net - cost_usd
                 realized_pnl_usd += profit_usd
@@ -613,7 +623,7 @@ def run_backtest(
             if spend < max(1, int(cfg.min_quote_usd)):
                 spend = 0
             sol_got = (
-                spend * (10_000 - crypto_trader.FEE_BPS) // 10_000
+                spend * (10_000 - crypto_backtest.EXECUTION_BPS) // 10_000
             ) * SOL_SCALE // max(1, entry_atoms)
             if sol_got > 0:
                 spent = spend
@@ -659,6 +669,7 @@ def run_backtest(
         start_sol=start_sol,
     )
     report: dict[str, Any] = {
+        "accounting": accounting,
         "bars": n,
         "from": 80,
         "fills": buys + sells,
@@ -709,6 +720,7 @@ def run_backtest(
         "timesfm_actual_calls": engine.actual_calls,
         "timesfm_fallback_calls": engine.fallback_calls,
         "timesfm_error": engine.error,
+        "timesfm_license": "TimesFM 3 requires explicit noncommercial research opt-in; local models only, no automatic download.",
         "start_sol": format_units(start_sol, 9),
         "day_book": _day_book(lots),
         "chart": _backtest_chart(
@@ -778,4 +790,15 @@ def run_backtest(
     )
     if persist:
         save_backtest(report)
+    crypto_backtest.checkpoint(report, "hybrid", {"config": cfg.as_dict(), "anchor_ts": anchor_ts,
+        "executor": crypto_backtest.executor_state(executor),
+        "cooldown_until_ts": times[0] + cooldown_until_i * bar_sec,
+        "last_forecast_ts": times[0] + last_forecast_i * bar_sec,
+        "core_sol": core_sol,
+        "position_sol": position_sol,
+        "cash_usd": cash_usd,
+        "cost_usd": cost_usd,
+        "fills_today": fills_today,
+        "current_day": current_day,
+        "latest_forecast": latest_forecast}, lots, core_sol + position_sol, cash_usd)
     return report

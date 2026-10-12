@@ -12,6 +12,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
+import hashlib
+import re
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 import threading
 import time
 from pathlib import Path
@@ -61,6 +65,14 @@ CELESTRAK_URL = (
 )
 NOAA_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
 BBC_URL = "https://feeds.bbci.co.uk/news/world/rss.xml"
+SVT_URL = "https://www.svt.se/rss.xml"
+EKOT_URL = "https://api.sr.se/api/rss/program/83"
+NEWS_FEEDS = (
+    {"id": "svt", "provider": "SVT NYHETER", "language": "sv", "url": SVT_URL},
+    {"id": "ekot", "provider": "SR EKOT", "language": "sv", "url": EKOT_URL},
+    {"id": "bbc", "provider": "BBC WORLD", "language": "en", "url": BBC_URL},
+)
+_news_feed_cache: dict[str, list[dict[str, Any]]] = {}
 GDELT_URL = "https://api.gdeltproject.org/api/v1/gkg_geojson?TIMESPAN=180"
 OSIRIS_REPOSITORY_URL = "https://github.com/simplifaisoul/osiris"
 DEFLOCK_URL = "https://deflock.org/"
@@ -104,7 +116,7 @@ SOURCE_CATALOG = (
     {
         "id": "news",
         "label": "NEWS",
-        "provider": "BBC WORLD",
+        "provider": "SVT / SR EKOT / BBC WORLD",
         "url": BBC_URL,
     },
     {
@@ -129,7 +141,7 @@ SOURCE_CATALOG = (
 
 ALLOWED_SOURCE_URLS = frozenset(
     str(source["url"]) for source in SOURCE_CATALOG
-) | frozenset({TFL_CAM_URL, FIN_CAM_URL, DEFLOCK_URL})
+) | frozenset({TFL_CAM_URL, FIN_CAM_URL, DEFLOCK_URL, SVT_URL, EKOT_URL})
 MAP_API_HOSTS = frozenset(
     {
         "nominatim.openstreetmap.org",
@@ -273,6 +285,14 @@ PLACE_COORDS: tuple[tuple[str, float, float], ...] = tuple(
             ("italy", 42.8, 12.6),
             ("poland", 52.1, 19.4),
             ("sweden", 60.1, 18.6),
+            ("sverige", 60.1, 18.6),
+            ("stockholm", 59.3, 18.1),
+            ("göteborg", 57.7, 12.0),
+            ("malmö", 55.6, 13.0),
+            ("uppsala", 59.9, 17.6),
+            ("kiruna", 67.9, 20.2),
+            ("ukraina", 49.0, 32.0),
+            ("ryssland", 55.8, 37.6),
             ("norway", 60.5, 8.5),
             ("finland", 64.0, 26.0),
             ("turkey", 39.0, 35.2),
@@ -309,6 +329,8 @@ _sources: dict[str, dict[str, Any]] = {
         "count": 0,
         "error": "",
         "last_updated": "",
+        "last_attempt_at": "",
+        "last_success_at": "",
     }
     for source in SOURCE_CATALOG
 }
@@ -546,11 +568,16 @@ def _read_map_api(url: str, timeout: float = 8.0) -> bytes:
 
 def geocode_place(query: str, gps: dict[str, Any] | None = None) -> dict[str, Any]:
     text = _bounded_text(query, 120)
+    if text.lower() == "gps" and not gps:
+        raise OSError("GPS fix missing")
     if gps and (not text or text.lower() == "gps"):
         lat = _float(gps.get("lat"))
         lon = _float(gps.get("lon"))
-        if lat is None or lon is None:
+        if lat is None or lon is None or abs(lat) > 90 or abs(lon) > 180:
             raise OSError("GPS fix missing")
+        stamp = _float(gps.get("timestamp"))
+        if stamp is not None and (time.time() * 1000 - stamp > 120000 or stamp > time.time() * 1000 + 10000):
+            raise OSError("GPS fix expired")
         return {"lat": round(lat, 5), "lon": round(lon, 5), "name": "GPS"}
     if not text:
         raise OSError("empty place")
@@ -573,6 +600,26 @@ def geocode_place(query: str, gps: dict[str, Any] | None = None) -> dict[str, An
     }
 
 
+def _normalize_route_steps(route: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    cumulative = 0.0
+    for leg in (route.get("legs") or [])[:MAX_ROUTE_PLACES]:
+        for step in (leg.get("steps") or []):
+            if len(steps) >= 2048:
+                return steps
+            maneuver = step.get("maneuver") or {}
+            pair = maneuver.get("location") or []
+            if len(pair) == 2:
+                lat, lon = _float(pair[1]), _float(pair[0])
+                if lat is not None and lon is not None and abs(lat) <= 90 and abs(lon) <= 180:
+                    steps.append({"at_m": round(cumulative, 1), "name": _bounded_text(step.get("name"), 100),
+                                  "type": _bounded_text(maneuver.get("type"), 40),
+                                  "modifier": _bounded_text(maneuver.get("modifier"), 40),
+                                  "exit": maneuver.get("exit"), "lat": lat, "lon": lon})
+            cumulative += max(0.0, _float(step.get("distance"), 0.0) or 0.0)
+    return steps
+
+
 def plan_driving_route(
     places: list[str],
     gps: dict[str, Any] | None = None,
@@ -591,7 +638,7 @@ def plan_driving_route(
             _read_map_api(
                 "https://router.project-osrm.org/route/v1/driving/"
                 + path
-                + "?overview=full&geometries=geojson",
+                + "?overview=full&geometries=geojson&steps=true",
                 timeout=12.0,
             ).decode("utf-8", errors="replace")
         )
@@ -609,6 +656,7 @@ def plan_driving_route(
         "error": "",
         "points": points,
         "geometry": route.get("geometry"),
+        "steps": _normalize_route_steps(route),
         "distance_m": _float(route.get("distance"), 0.0) or 0.0,
         "duration_s": _float(route.get("duration"), 0.0) or 0.0,
     }
@@ -1009,43 +1057,107 @@ def _risk_score(text: str) -> int:
     return min(10, 1 + sum(1 for word in words if word in lowered) * 2)
 
 
-def _normalize_news(root: ET.Element) -> list[dict[str, Any]]:
+class _NewsText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in ("script", "style"):
+            self.hidden += 1
+        elif tag in ("p", "br", "div"):
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style"):
+            self.hidden = max(0, self.hidden - 1)
+        self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def _news_text(value: str, limit: int = 400) -> str:
+    parser = _NewsText()
+    parser.feed(str(value or "")[:12000])
+    return _bounded_text(" ".join("".join(parser.parts).split()), limit)
+
+
+def _news_date(value: str) -> tuple[str, float]:
+    try:
+        try:
+            date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        return date.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), date.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return "", 0.0
+
+
+def _normalize_news(root: ET.Element, feed: dict[str, str] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for node in root.iter():
-        if _local_name(node.tag) != "item":
+        atom = _local_name(node.tag) == "entry"
+        if not atom and _local_name(node.tag) != "item":
             continue
-        title = _child_text(node, "title")
+        title = _news_text(_child_text(node, "title"), 300)
         if not title:
             continue
-        description = _child_text(node, "description")
-        rows.append(
-            {
-                "id": _bounded_text(_child_text(node, "guid") or title, 100),
-                "title": title,
-                "description": description,
-                "source": "BBC WORLD",
-                "published": _child_text(node, "pubDate"),
-                "url": _child_text(node, "link"),
-                "risk_score": _risk_score(title + " " + description),
-                "type": "news",
-            }
-        )
+        description = _news_text(_child_text(node, "summary" if atom else "description"))
+        url = _child_text(node, "link")
+        if atom:
+            url = next((child.attrib.get("href", "") for child in node
+                        if _local_name(child.tag) == "link" and child.attrib.get("rel", "alternate") == "alternate"), "")
+        if urlparse(url).scheme not in ("https", "http"):
+            url = ""
+        if feed and feed["id"] == "svt" and not urlparse(url).path.startswith("/nyheter/"):
+            continue
+        published, epoch = _news_date(_child_text(node, "published" if atom else "pubDate"))
+        identifier = _child_text(node, "id" if atom else "guid") or url or title
+        if feed:
+            identifier = feed["id"] + ":" + hashlib.sha256(identifier.encode()).hexdigest()[:24]
+        rows.append({
+            "id": _bounded_text(identifier, 100), "title": title, "description": description,
+            "source": feed["provider"] if feed else "BBC WORLD",
+            "language": feed["language"] if feed else "en",
+            "source_url": feed["url"] if feed else BBC_URL,
+            "published": published, "published_epoch": epoch, "url": url,
+            "risk_score": _risk_score(title + " " + description), "type": "news",
+        })
         geo = _geocode_text(title + " " + description)
         if geo:
-            rows[-1]["lat"] = geo[0]
-            rows[-1]["lon"] = geo[1]
-            rows[-1]["place"] = geo[2]
+            rows[-1].update(lat=geo[0], lon=geo[1], place=geo[2], location_precision="PLACE_NAME_ESTIMATE")
         if len(rows) >= MAX_NEWS_ROWS:
             break
     return rows
 
 
+def _build_news_stream() -> list[dict[str, Any]]:
+    # Keep publisher diversity without inventing a relevance/verification score.
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    per_source: dict[str, int] = {}
+    for row in sorted(_collections.get("news", []), key=lambda row: row.get("published_epoch", 0), reverse=True):
+        source = str(row.get("source") or "NEWS")
+        key = str(row.get("url") or row.get("id") or row.get("title"))
+        if key in seen or per_source.get(source, 0) >= MAX_STREAM_ROWS:
+            continue
+        seen.add(key)
+        per_source[source] = per_source.get(source, 0) + 1
+        stamp, epoch = _news_date(str(row.get("collected_at") or ""))
+        stale = bool(row.get("feed_stale")) or (bool(epoch) and time.time() - epoch > CACHE_TTL_SECONDS)
+        items.append({**row, "feed_stale": stale, "kind": "news", "time": row.get("published", ""), "summary": row.get("description", "")})
+    return items[:MAX_STREAM_ROWS * len(NEWS_FEEDS)]
+
+
 def _geocode_text(text: str) -> tuple[float, float, str] | None:
-    lowered = f" {text.lower()} "
+    lowered = text.lower()
     for name, lat, lon in PLACE_COORDS:
-        if f" {name} " in lowered or lowered.startswith(name + " ") or lowered.endswith(" " + name + " "):
-            return lat, lon, name
-        if name in lowered:
+        if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", lowered):
             return lat, lon, name
     return None
 
@@ -1093,7 +1205,9 @@ def _build_stream() -> list[dict[str, Any]]:
                     f"{int(row.get('alt_m') or 0)} m · "
                     f"{int(row.get('heading') or 0)}°"
                 ),
-                source="OPENSKY",
+                source=str(row.get("source") or (
+                    "ADS-B SAMPLE" if _sources["aircraft"].get("region") == "ADS-B SAMPLE" else "OPENSKY"
+                )),
                 time=str(row.get("last_contact") or ""),
                 url="",
                 lat=row.get("lat"),
@@ -1351,6 +1465,8 @@ def _collect_adsb_sample() -> list[dict[str, Any]]:
             if not key or key in seen:
                 continue
             seen.add(key)
+            row["source"] = urlparse(url).hostname or "ADS-B SAMPLE"
+            row["source_url"] = url
             rows.append(row)
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="gg-adsb") as pool:
@@ -1402,7 +1518,32 @@ def _collect_solar() -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def _collect_news() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    return _normalize_news(_read_xml(BBC_URL)), {}
+    rows: list[dict[str, Any]] = []
+    health: list[dict[str, Any]] = []
+    successes = 0
+    with ThreadPoolExecutor(max_workers=len(NEWS_FEEDS), thread_name_prefix="gg-news") as pool:
+        futures = {pool.submit(_read_xml, feed["url"]): feed for feed in NEWS_FEEDS}
+        for future in as_completed(futures):
+            feed = futures[future]
+            stamp = _utc_now()
+            try:
+                values = sorted(_normalize_news(future.result(), feed), key=lambda row: row["published_epoch"], reverse=True)[:MAX_NEWS_ROWS // len(NEWS_FEEDS)]
+                if not values:
+                    raise ValueError("No usable news entries")
+                values = [{**row, "collected_at": stamp, "feed_stale": False} for row in values]
+                with _lock:
+                    _news_feed_cache[feed["id"]] = values
+                successes += 1
+                health.append({**feed, "status": "OK", "last_success_at": stamp, "count": len(values)})
+            except Exception as exc:
+                with _lock:
+                    values = [{**row, "feed_stale": True} for row in _news_feed_cache.get(feed["id"], [])]
+                health.append({**feed, "status": "ERROR", "error": _bounded_text(exc, 160),
+                               "last_success_at": values[0].get("collected_at", "") if values else "", "count": len(values)})
+            rows.extend(values)
+    errors = "; ".join(row["provider"] + ": " + row["error"] for row in health if row["status"] == "ERROR")
+    rows.sort(key=lambda row: row.get("published_epoch", 0), reverse=True)
+    return rows, {"feeds": sorted(health, key=lambda row: row["id"]), "error": errors, "stale": not successes}
 
 
 def _collect_gdelt() -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2056,14 +2197,41 @@ def _render_rows(
     return [dict(row) for row in _sample_rows(visible, cap)]
 
 
+def _source_health(row: dict[str, Any]) -> dict[str, Any]:
+    """Age collection time, never refresh cached data's success timestamp."""
+    result = dict(row)
+    age: float | None = None
+    stamp = str(row.get("last_success_at") or "")
+    if stamp:
+        try:
+            age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(
+                stamp.replace("Z", "+00:00")
+            )).total_seconds())
+        except (ValueError, TypeError):
+            pass
+    reference = row.get("status") == "REFERENCE"
+    expired = age is None or age >= CACHE_TTL_SECONDS
+    if row.get("status") == "OK" and expired:
+        result["status"] = "STALE"
+    result["age_seconds"] = None if age is None else round(age)
+    result["stale"] = not reference and (
+        expired or result.get("status") != "OK"
+    )
+    result["freshness"] = "REFERENCE" if reference else (
+        "NOT_FETCHED" if not stamp else ("STALE" if result["stale"] else "FRESH")
+    )
+    return result
+
+
 def _snapshot_locked(page: str, view: Any = None) -> dict[str, Any]:
-    source_rows = [dict(row) for row in _sources.values()]
+    source_rows = [_source_health(row) for row in _sources.values()]
     healthy = sum(1 for row in source_rows if row["status"] in ("OK", "REFERENCE"))
     live = sum(1 for row in source_rows if row["status"] == "OK")
     failed = sum(1 for row in source_rows if row["status"] == "ERROR")
+    degraded = sum(1 for row in source_rows if row["status"] in ("STALE", "PARTIAL"))
     if live == len(_COLLECTORS):
         status = "LIVE"
-    elif live > 0:
+    elif live > 0 or degraded > 0:
         status = "DEGRADED"
     elif failed > 0:
         status = "OFFLINE"
@@ -2108,7 +2276,7 @@ def _snapshot_locked(page: str, view: Any = None) -> dict[str, Any]:
         "page": str(page or "OVERVIEW").upper(),
         "status": status,
         "generated_at": _last_generated_at,
-        "stale": bool(failed or not _last_generated_at),
+        "stale": any(row["stale"] for row in source_rows),
         "source_count": len(source_rows),
         "healthy_sources": healthy,
         "counts": catalog_counts,
@@ -2119,6 +2287,7 @@ def _snapshot_locked(page: str, view: Any = None) -> dict[str, Any]:
         "solar": dict(_solar),
         "conflicts": [dict(row) for row in REFERENCE_ZONES],
         "stream": _build_stream(),
+        "news_stream": _build_news_stream(),
         "sources": source_rows,
         "histories": {key: list(value) for key, value in _histories.items()},
         "focus": {
@@ -2177,78 +2346,144 @@ def viewport_snapshot(view: Any = None) -> dict[str, Any]:
         return _snapshot_locked("MAP", view if isinstance(view, dict) else {})
 
 
-def collect_snapshot(page: str = "OVERVIEW", force: bool = False) -> dict[str, Any]:
-    """Collect allowlisted feeds concurrently and return a native snapshot."""
-    global _last_collect_at, _last_generated_at, _solar, _alpr_total
+def observation_evidence(kind: str, event_id: str) -> dict[str, Any]:
+    """Resolve collected records, never UI claims or aggregate map markers."""
+    kind = str(kind or "").strip().lower()
+    event_id = str(event_id or "")
+    with _lock:
+        rows = REFERENCE_ZONES if kind == "conflicts" else _collections.get(kind, [])
+        row = next((dict(item) for item in rows if str(item.get("id") or "") == event_id), None)
+        if not row or not event_id or row.get("cluster") or kind not in _sources:
+            return {"status": "OBSERVATION_NOT_FOUND"}
+        source = _source_health(_sources[kind])
+    reference = kind == "conflicts"
+    title = str(row.get("title") or row.get("callsign") or row.get("place") or row.get("label") or row.get("name") or kind)
+    summary = str(row.get("summary") or row.get("description") or row.get("category") or "Source-reported record; not independently corroborated.")
+    if reference:
+        summary = "Reference watchlist location; not a verified live incident."
+    origin = str(row.get("source_url") or source["url"])
+    provider = str(row.get("source") or source["provider"])
+    details = {
+        "event_id": event_id,
+        "collection": kind,
+        "source": provider,
+        "feed_url": origin,
+        "event_time": str(row.get("time") or row.get("published") or row.get("last_contact") or ""),
+        "collected_at": row.get("collected_at") or source.get("last_success_at") or "",
+        "source_status": source["status"],
+        "freshness": "REFERENCE" if reference else ("STALE" if row.get("feed_stale") else source["freshness"]),
+        "location_precision": row.get("location_precision") or (
+            "REFERENCE_LOCATION" if reference else "SOURCE_REPORTED"
+        ),
+        "verification": "NOT_INDEPENDENTLY_CORROBORATED",
+    }
+    for key in ("lat", "lon", "magnitude", "depth_km", "alt_m", "speed_mps", "heading", "media_kind", "availability"):
+        if key in row:
+            details[key] = row[key]
+    return {
+        "status": "OBSERVATION_READY",
+        "kind": "OSINT_REFERENCE" if reference else "OSINT_OBSERVATION",
+        "title": _bounded_text(title, 180),
+        "claim": _bounded_text(summary, 12000),
+        "source_url": str(row.get("url") or origin),
+        "observed_at": "REFERENCE" if reference else str(row.get("collected_at") or source.get("last_success_at") or "UNKNOWN"),
+        "provenance": "REFERENCE" if reference else "SOURCE_REPORTED",
+        "confidence": 0.5,
+        "details": details,
+    }
+
+
+def _commit_source(source_id: str, result: Any, error: str, stamp: str) -> None:
+    """Called under _lock as each collector finishes."""
+    global _solar, _alpr_total
+    row = _sources[source_id]
+    row["last_attempt_at"] = stamp
+    if source_id == "conflicts":
+        row["status"] = "REFERENCE"
+        row["count"] = len(REFERENCE_ZONES)
+        row["error"] = ""
+        return
+    if error:
+        row["status"] = "ERROR"
+        row["error"] = error
+        return
+    rows, extras = result or ([], {})
+    if extras.get("stale"):
+        row["status"] = "STALE"
+        row["error"] = str(extras.get("error") or "Feed unavailable; retaining last successful data")
+        if source_id == "news":
+            row["feeds"] = extras.get("feeds", [])
+            _collections["news"] = rows[:MAX_NEWS_ROWS]
+            _rebuild_geo_lod("news", _collections["news"])
+        # The collector returned our own cache, not a new observation.
+        return
+    row["last_updated"] = stamp
+    row["last_success_at"] = stamp
+    if source_id in _collections:
+        limit = {
+            "aircraft": MAX_AIRCRAFT_CATALOG,
+            "news": MAX_NEWS_ROWS,
+            "gdelt": MAX_GDELT_ROWS,
+            "cameras": MAX_CAMERA_ROWS,
+        }.get(source_id, MAX_ROWS)
+        _collections[source_id] = rows[:limit]
+        if source_id == "cameras":
+            _rebuild_camera_index(_collections[source_id])
+        elif source_id in ("aircraft", "news", "gdelt"):
+            _rebuild_geo_lod(source_id, _collections[source_id])
+        _history_push(source_id, len(_collections[source_id]))
+        row["count"] = len(_collections[source_id])
+    if source_id == "solar":
+        _solar = dict(extras.get("solar") or {})
+        _history_push("solar", int(round(float(_solar.get("kp_index") or 0) * 10)))
+        row["count"] = 1 if _solar else 0
+    if source_id == "aircraft":
+        region = extras.get("region")
+        if region:
+            row["region"] = str(region)
+    if source_id == "news":
+        row["feeds"] = extras.get("feeds", [])
+        row["status"] = "PARTIAL" if extras.get("error") else "OK"
+        row["error"] = str(extras.get("error") or "")
+        return
+    if source_id == "cameras":
+        _alpr_total = int(extras.get("total") or len(rows))
+        row["count"] = _alpr_total
+        row["status"] = "PARTIAL" if extras.get("error") else "OK"
+        row["error"] = str(extras.get("error") or "")
+        return
+    row["status"] = "OK"
+    row["error"] = ""
+
+
+def collect_snapshot(page: str = "OVERVIEW", force: bool = False,
+                     on_update: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    """Publish bounded feed results progressively; preserve data on failures."""
+    global _last_collect_at, _last_generated_at
     now = time.monotonic()
     with _lock:
-        if (
-            not force
-            and _last_generated_at
-            and now - _last_collect_at < CACHE_TTL_SECONDS
-        ):
-            return _snapshot_locked(page)
-
-    results: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
-    errors: dict[str, str] = {}
+        if not force and _last_generated_at and now - _last_collect_at < CACHE_TTL_SECONDS:
+            return {**_snapshot_locked(page), "fetching": False}
+    last_publish = 0.0
     with ThreadPoolExecutor(max_workers=len(_COLLECTORS), thread_name_prefix="gg-osiris") as pool:
-        futures = {
-            pool.submit(collector): source_id
-            for source_id, collector in _COLLECTORS.items()
-        }
+        futures = {pool.submit(collector): source_id for source_id, collector in _COLLECTORS.items()}
         for future in as_completed(futures):
             source_id = futures[future]
+            result, error = None, ""
             try:
-                results[source_id] = future.result()
-            except Exception as exc:  # a dead public feed must not kill the UI
-                errors[source_id] = _bounded_text(exc, 160)
-
-    stamp = _utc_now()
+                result = future.result()
+            except Exception as exc:
+                error = _bounded_text(exc, 160)
+            stamp = _utc_now()
+            with _lock:
+                _commit_source(source_id, result, error, stamp)
+                _last_generated_at = stamp
+                publish = on_update and (source_id == "news" or time.monotonic() - last_publish >= 0.35)
+                partial = {**_snapshot_locked(page), "fetching": True} if publish else None
+            if partial is not None:
+                on_update(partial)
+                last_publish = time.monotonic()
     with _lock:
+        _commit_source("conflicts", None, "", _utc_now())
         _last_collect_at = time.monotonic()
-        _last_generated_at = stamp
-        for source in SOURCE_CATALOG:
-            source_id = str(source["id"])
-            row = _sources[source_id]
-            row["last_updated"] = stamp
-            if source_id == "conflicts":
-                row["status"] = "REFERENCE"
-                row["count"] = len(REFERENCE_ZONES)
-                row["error"] = ""
-                continue
-            if source_id in errors:
-                row["status"] = "ERROR"
-                row["error"] = errors[source_id]
-                continue
-            rows, extras = results.get(source_id, ([], {}))
-            if source_id in _collections:
-                limit = {
-                    "aircraft": MAX_AIRCRAFT_CATALOG,
-                    "news": MAX_NEWS_ROWS,
-                    "gdelt": MAX_GDELT_ROWS,
-                    "cameras": MAX_CAMERA_ROWS,
-                }.get(source_id, MAX_ROWS)
-                _collections[source_id] = rows[:limit]
-                if source_id == "cameras":
-                    _rebuild_camera_index(_collections[source_id])
-                elif source_id in ("aircraft", "news", "gdelt"):
-                    _rebuild_geo_lod(source_id, _collections[source_id])
-                _history_push(source_id, len(_collections[source_id]))
-                row["count"] = len(_collections[source_id])
-            if source_id == "solar":
-                _solar = dict(extras.get("solar") or {})
-                _history_push("solar", int(round(float(_solar.get("kp_index") or 0) * 10)))
-                row["count"] = 1 if _solar else 0
-            if source_id == "aircraft":
-                region = extras.get("region")
-                if region:
-                    row["region"] = str(region)
-            if source_id == "cameras":
-                _alpr_total = int(extras.get("total") or len(rows))
-                row["count"] = _alpr_total
-                row["status"] = "OK"
-                row["error"] = str(extras.get("error") or "")
-                continue
-            row["status"] = "OK"
-            row["error"] = ""
-    return empty_snapshot(page)
+        return {**_snapshot_locked(page), "fetching": False}

@@ -1,5 +1,5 @@
 /* MapLibre GL JS 5.24.0 (BSD-3-Clause), local runtime.
-   Dark OSM/CARTO raster basemap + local Natural Earth land fallback. */
+   OpenFreeMap vector basemap + local Natural Earth fallback + optional Mapterhorn DEM. */
 'use strict';
 (() => {
     const status = document.getElementById('status');
@@ -16,6 +16,17 @@
     const TRACKS_MIN_ZOOM = 4.0;
     const home = {center: [18, 22], zoom: 1.65, bearing: 0, pitch: 0};
     const remoteStyle = 'https://tiles.openfreemap.org/styles/dark';
+    // Start the optional basemap request while the local globe initializes.
+    const remoteStylePromise = fetch(remoteStyle).then(response => response.ok ? response.json() : null).catch(() => null);
+    const TERRAIN_MIN_ZOOM = 6;
+    const BUILDINGS_MIN_ZOOM = 14;
+    let terrainEnabled = false, buildingsEnabled = false, terrainFailed = false;
+    let updateFrame = null;
+    const sourcePackets = new Map();
+    let conflictPacket = '', lastPointPacket = '';
+    let positionPacket = '', followingPosition = false, routeIndex = null, lastFollowPoint = null;
+    const performanceStats = {sourceUploads: 0, pointCommits: 0};
+    window.osintPerformance = performanceStats;
     let map, pending = [], catalogCounts = {}, restored = null, loaded = false, projection = 'globe';
     let lastRenderCount = 0;
     let moving = false;
@@ -24,6 +35,7 @@
     let lastMapError = '';
     window.osintMapReady = false;
     window.osintMapError = '';
+    window.osintPositionState = {enabled: false, status: "POSITION OFF", fresh: false, following: false};
 
     function finite(value) {
         return Number.isFinite(value);
@@ -83,6 +95,7 @@
                     summary: String(point.summary || ''),
                     place: String(point.place || ''),
                     source: String(point.source || kind).toUpperCase(),
+                    location_precision: String(point.location_precision || ''),
                     city: String(point.city || ''),
                     country: String(point.country || ''),
                     live_video: Boolean(point.live_video),
@@ -269,13 +282,28 @@
     function applyPoints() {
         if (!loaded)
             return;
+        const inputPacket = JSON.stringify(pending) + '|' + (map.getZoom() >= TRACKS_MIN_ZOOM);
+        if (inputPacket === lastPointPacket) {
+            report();
+            return;
+        }
+        lastPointPacket = inputPacket;
         const data = collections();
         lastRenderCount = data.points.features.length;
-        map.getSource('events').setData(data.points);
-        map.getSource('tracks').setData(data.tracks);
-        map.getSource('fires').setData(data.fires);
-        map.getSource('quakes').setData(data.quakes);
-        syncConflicts(data.conflicts.features);
+        for (const [id, value] of Object.entries({events: data.points, tracks: data.tracks, fires: data.fires, quakes: data.quakes})) {
+            const packet = JSON.stringify(value);
+            if (sourcePackets.get(id) !== packet) {
+                map.getSource(id).setData(value);
+                sourcePackets.set(id, packet);
+                performanceStats.sourceUploads++;
+            }
+        }
+        const packet = JSON.stringify(data.conflicts.features);
+        if (packet !== conflictPacket) {
+            syncConflicts(data.conflicts.features);
+            conflictPacket = packet;
+        }
+        performanceStats.pointCommits++;
         if (currentPopup && lastPick && finite(Number(lastPick.lat)) && finite(Number(lastPick.lon))) {
             const hit = pending.find(point => validPoint(point)
                 && String(point.id || point.callsign || '') === String(lastPick.id || lastPick.callsign || ''));
@@ -288,13 +316,92 @@
         report();
     }
 
+    function schedulePoints() {
+        if (!loaded || updateFrame !== null)
+            return;
+        updateFrame = requestAnimationFrame(() => {
+            updateFrame = null;
+            if (!moving)
+                applyPoints();
+        });
+    }
+
+    function syncRelief() {
+        if (!loaded)
+            return;
+        const previousTerrain = map.getTerrain();
+        const minimum = previousTerrain && previousTerrain.source === 'gg-terrain' ? TERRAIN_MIN_ZOOM - 0.5 : TERRAIN_MIN_ZOOM;
+        const active = terrainEnabled && !terrainFailed && map.getZoom() >= minimum;
+        if (active && !map.getSource('gg-terrain')) {
+            map.addSource('gg-terrain', {
+                type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
+                encoding: 'terrarium', tileSize: 512, maxzoom: 12,
+                attribution: 'Mapterhorn terrain · https://mapterhorn.com/attribution/'
+            });
+            if (typeof map.setSourceTileLodParams === 'function')
+                map.setSourceTileLodParams(12, 1.25, 'gg-terrain');
+        }
+        if (active && !map.getLayer('gg-hillshade')) {
+            const before = map.getStyle().layers.find(layer => layer.type === 'symbol')
+                || overlayLayers().find(layer => map.getLayer(layer.id));
+            map.addLayer({id: 'gg-hillshade', type: 'hillshade', source: 'gg-terrain', minzoom: TERRAIN_MIN_ZOOM,
+                paint: {'hillshade-exaggeration': 0.6, 'hillshade-shadow-color': '#15202d',
+                    'hillshade-highlight-color': '#9eaaa0', 'hillshade-accent-color': '#596c71'}
+            }, before && before.id);
+        }
+        if (map.getLayer('gg-hillshade')) {
+            const visibility = active ? 'visible' : 'none';
+            if ((map.getLayer('gg-hillshade').layout || {}).visibility !== visibility)
+                map.setLayoutProperty('gg-hillshade', 'visibility', visibility);
+        }
+        const terrain = map.getTerrain();
+        if (active && (!terrain || terrain.source !== 'gg-terrain'))
+            map.setTerrain({source: 'gg-terrain', exaggeration: 1});
+        else if (!active && terrain)
+            map.setTerrain(null);
+        if (buildingsEnabled && !map.getLayer('gg-buildings')) {
+            const layer = map.getStyle().layers.find(layer => layer['source-layer'] === 'building');
+            if (layer) {
+                const before = overlayLayers().find(layer => map.getLayer(layer.id));
+                map.addLayer({id: 'gg-buildings', source: layer.source, 'source-layer': 'building',
+                    type: 'fill-extrusion', minzoom: BUILDINGS_MIN_ZOOM,
+                    paint: {'fill-extrusion-color': '#606d78', 'fill-extrusion-opacity': 0.8,
+                        'fill-extrusion-height': ['coalesce', ['get', 'render_height'], ['get', 'height'], 0],
+                        'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0]}
+                }, before && before.id);
+            }
+        }
+        if (map.getLayer('gg-buildings')) {
+            const visibility = buildingsEnabled ? 'visible' : 'none';
+            if ((map.getLayer('gg-buildings').layout || {}).visibility !== visibility)
+                map.setLayoutProperty('gg-buildings', 'visibility', visibility);
+        }
+        window.osintTerrainStatus = terrainFailed ? 'TERRAIN UNAVAILABLE' : !terrainEnabled ? 'TERRAIN OFF'
+            : active ? 'TERRAIN ON' : 'TERRAIN · ZOOM ≥6';
+        document.getElementById('terrain-credit').hidden = !active;
+    }
+
+    window.setOsintTerrain = enabled => {
+        terrainEnabled = Boolean(enabled);
+        terrainFailed = false;
+        syncRelief();
+        if (loaded && terrainEnabled)
+            map.easeTo({pitch: 55, duration: 500});
+    };
+    window.setOsintBuildings = enabled => {
+        buildingsEnabled = Boolean(enabled);
+        syncRelief();
+        if (loaded && buildingsEnabled)
+            map.easeTo({pitch: 55, duration: 500});
+    };
+
     window.setOsintPoints = (points, counts) => {
         pending = Array.isArray(points) ? points : [];
         catalogCounts = counts && typeof counts === 'object' ? counts : {};
         // A 10k-feature source update must never compete with a pan/zoom
         // frame.  Keep the newest snapshot and commit it on moveend.
         if (!moving)
-            applyPoints();
+            schedulePoints();
     };
     window.getOsintView = () => loaded ? {
         lng: map.getCenter().lng,
@@ -303,12 +410,14 @@
         bearing: map.getBearing(),
         pitch: map.getPitch(),
         bounds: map.getBounds().toArray(),
-        projection
+        projection, detailActive: detailActive(), terrainEnabled, buildingsEnabled, terrainStatus: window.osintTerrainStatus || "TERRAIN OFF"
     } : null;
     window.restoreOsintView = view => {
         restored = view;
         if (!loaded || !view || !finite(view.lng) || !finite(view.lat))
             return;
+        terrainEnabled = Boolean(view.terrainEnabled);
+        buildingsEnabled = Boolean(view.buildingsEnabled);
         setProjection(view.projection === 'mercator' ? 'mercator' : 'globe');
         map.jumpTo({
             center: [view.lng, view.lat],
@@ -316,6 +425,7 @@
             bearing: finite(view.bearing) ? view.bearing : 0,
             pitch: finite(view.pitch) ? view.pitch : 0
         });
+        syncRelief();
     };
 
     function setProjection(value) {
@@ -399,6 +509,22 @@
                     'circle-color': '#e0b15a',
                     'circle-opacity': 0.18
                 }
+            },
+            {
+                id: 'self-accuracy', type: 'fill', source: 'self-position', minzoom: 6,
+                filter: ['==', ['geometry-type'], 'Polygon'],
+                paint: {'fill-color': '#50c8ff', 'fill-opacity': 0.09}
+            },
+            {
+                id: 'self-halo', type: 'circle', source: 'self-position',
+                filter: ['==', ['geometry-type'], 'Point'],
+                paint: {'circle-radius': 13, 'circle-color': '#50c8ff', 'circle-opacity': 0.2}
+            },
+            {
+                id: 'self-position', type: 'circle', source: 'self-position',
+                filter: ['==', ['geometry-type'], 'Point'],
+                paint: {'circle-radius': 6, 'circle-color': ['match', ['get', 'fresh'], 'yes', '#50c8ff', '#78848c'],
+                    'circle-stroke-color': '#eefaff', 'circle-stroke-width': 2}
             },
             {
                 id: 'route',
@@ -493,7 +619,7 @@
     }
 
     function ensureOverlays() {
-        for (const id of ['tracks', 'fires', 'quakes', 'events', 'focus', 'route', 'waypoints']) {
+        for (const id of ['tracks', 'fires', 'quakes', 'events', 'focus', 'route', 'waypoints', 'self-position']) {
             if (!map.getSource(id))
                 map.addSource(id, {type: 'geojson', data: empty});
         }
@@ -503,6 +629,8 @@
             if (!map.getLayer(layer.id))
                 map.addLayer(layer);
         }
+        map.moveLayer("self-halo");
+        map.moveLayer("self-position");
     }
 
     function bindMapEvents() {
@@ -510,9 +638,16 @@
             return;
         eventsBound = true;
         map.on('movestart', () => { moving = true; });
+        map.on('dragstart', () => { followingPosition = false; publishPositionState(); });
+        map.on('zoom', () => {
+            if (map.getTerrain() && map.getZoom() < TERRAIN_MIN_ZOOM - 0.5)
+                syncRelief();
+        });
         map.on('moveend', () => {
             moving = false;
-            applyPoints();
+            syncRelief();
+            syncPositionContext();
+            schedulePoints();
             report();
         });
         const pickEventLayer = event => {
@@ -541,6 +676,7 @@
     let remoteTried = false;
 
     function finishLoad() {
+        const wasLoaded = loaded;
         map.setProjection({type: projection});
         paintSky();
         ensureOverlays();
@@ -549,8 +685,11 @@
         lastMapError = '';
         window.osintMapError = '';
         window.osintMapReady = true;
-        if (restored)
+        if (restored && !wasLoaded)
             window.restoreOsintView(restored);
+        syncRelief();
+        syncPositionContext();
+        paintOwnPosition();
         applyPoints();
         if (window.osintRoutePayload && window.osintRoutePayload.ok) {
             const points = (window.osintRoutePayload.points || []).map(lonLat);
@@ -568,22 +707,26 @@
 
     function adoptRemoteStyle() {
         remoteTried = true;
-        fetch(remoteStyle)
-            .then(response => {
-                if (!response.ok)
-                    throw new Error('style ' + response.status);
-                return response.json();
-            })
-            .then(style => {
-                if (!map)
-                    return;
-                usingFallback = false;
-                map.setStyle(style, {diff: false});
-                map.once('style.load', () => finishLoad());
-            })
-            .catch(() => {
-                /* Stay on local land; remote tiles are optional. */
-        });
+        remoteStylePromise.then(style => {
+            if (!map || !style)
+                return;
+            usingFallback = false;
+            map.once('style.load', () => finishLoad());
+            map.setStyle(style, {
+                diff: true,
+                transformStyle: (previous, next) => {
+                    const ids = new Set(['tracks', 'fires', 'quakes', 'events', 'focus', 'route', 'waypoints', 'self-position', 'alpr', 'gg-terrain']);
+                    const sources = {...next.sources};
+                    for (const id of ids) {
+                        if (previous.sources[id])
+                            sources[id] = previous.sources[id];
+                    }
+                    return {...next, sources,
+                        layers: [...next.layers, ...previous.layers.filter(layer => ids.has(layer.source) && layer.id !== 'gg-buildings')],
+                        ...(previous.terrain ? {terrain: previous.terrain} : {})};
+                }
+            });
+        }).catch(() => { /* Local land stays usable when remote tiles fail. */ });
     }
 
     function mapErrorMessage(error) {
@@ -607,7 +750,14 @@
         if (map)
             map.remove();
         loaded = false;
+        sourcePackets.clear();
+        conflictPacket = "";
+        positionPacket = "";
+        lastPointPacket = "";
+        if (updateFrame !== null) cancelAnimationFrame(updateFrame);
+        updateFrame = null;
         eventsBound = false;
+        terrainFailed = false;
         moving = false;
         usingFallback = Boolean(fallback);
         lastMapError = '';
@@ -641,6 +791,11 @@
                 }
             });
             map.on('error', event => {
+                if (event.sourceId === 'gg-terrain') {
+                    terrainFailed = true;
+                    syncRelief();
+                    return;
+                }
                 const message = mapErrorMessage(event);
                 if (!message)
                     return;
@@ -906,6 +1061,8 @@
 
     window.setOsintRoute = payload => {
         window.osintRoutePayload = payload && payload.ok ? payload : null;
+        routeIndex = GgOsintNav.prepareRoute(window.osintRoutePayload);
+        syncPositionContext();
         if (!payload || !payload.ok || !payload.geometry) {
             setRouteData(null);
             window.osintRouteMeta = (payload && payload.error) || 'Routing unavailable.';
@@ -956,6 +1113,8 @@
                 duration_s: route.duration
             };
             window.osintRoutePayload = built;
+            routeIndex = GgOsintNav.prepareRoute(built);
+            syncPositionContext();
             setRouteData(route.geometry, points);
             const km = (route.distance / 1000).toFixed(1);
             const min = Math.round(route.duration / 60);
@@ -970,28 +1129,108 @@
     window.clearOsintRoute = () => {
         setRouteData(null);
         window.osintRoutePayload = null;
+        routeIndex = null;
+        followingPosition = false;
+        syncPositionContext();
         window.osintRouteMeta = '';
     };
 
-    window.locateOsintGps = () => {
-        if (!navigator.geolocation) {
-            window.osintRouteMeta = 'Geolocation not available.';
-            return;
+    function detailActive() {
+        return Boolean(loaded && ((window.osintNavOpen && window.osintRoutePayload && window.osintRoutePayload.ok) || map.getZoom() >= 15));
+    }
+    const positionTracker = GgOsintNav.createPositionTracker({
+        geolocation: navigator.geolocation,
+        context: () => ({hidden: document.hidden, ready: loaded, detailed: detailActive()}),
+        onFix: fix => {
+            window.osintGps = fix;
+            paintOwnPosition();
+            if (followingPosition && loaded) {
+                const progress = GgOsintNav.progress(fix, routeIndex);
+                const heading = fix.speed_mps > 1.4 && fix.heading !== null ? fix.heading : progress && progress.bearing;
+                const pair = [fix.lon, fix.lat];
+                if (!lastFollowPoint || GgOsintNav.distance(lastFollowPoint, pair) >= 3) {
+                    lastFollowPoint = pair;
+                    setProjection('mercator');
+                    map.easeTo({center: pair, zoom: Math.max(15.5, Math.min(17, map.getZoom())),
+                        pitch: 50, ...(heading !== null && heading !== undefined ? {bearing: heading} : {}), duration: 500});
+                }
+            }
+            publishPositionState();
         }
-        window.osintRouteMeta = 'LOCATING…';
-        navigator.geolocation.getCurrentPosition(position => {
-            window.osintGps = {
-                lat: position.coords.latitude,
-                lon: position.coords.longitude
-            };
-            window.osintRouteMeta = 'GPS ready · use as FROM';
-            window.focusOsintPoint({lat: window.osintGps.lat, lon: window.osintGps.lon, zoom: 11});
-        }, () => { window.osintRouteMeta = 'GPS denied.'; },
-        {enableHighAccuracy: true, timeout: 8000});
+    });
+    let progressCache = {timestamp: null, route: null, value: null};
+    function publishPositionState() {
+        const state = positionTracker.getState();
+        const useful = state.fresh && window.osintNavOpen && routeIndex;
+        if (!useful) progressCache = {timestamp: null, route: null, value: null};
+        else if (progressCache.timestamp !== state.fix.timestamp || progressCache.route !== routeIndex)
+            progressCache = {timestamp: state.fix.timestamp, route: routeIndex, value: GgOsintNav.progress(state.fix, routeIndex)};
+        window.osintPositionState = {...state, following: followingPosition,
+            detailActive: detailActive(), progress: progressCache.value};
+    }
+    function syncPositionContext() {
+        positionTracker.update();
+        publishPositionState();
+    }
+    function paintOwnPosition() {
+        if (!loaded || !map.getSource('self-position')) return;
+        const fix = window.osintGps;
+        const features = [];
+        if (fix) {
+            const fresh = positionTracker.getState().fresh;
+            features.push({type: 'Feature', geometry: {type: 'Point', coordinates: [fix.lon, fix.lat]},
+                properties: {fresh: fresh ? 'yes' : 'no'}});
+            const ring = [];
+            const radiusKm = fix.accuracy_m / 1000;
+            // Large provider estimates stay in the label; never draw a falsely smaller circle.
+            if (radiusKm > 0 && radiusKm <= 50) {
+                for (let i = 0; i <= 48; i++) ring.push(destination(fix.lon, fix.lat, i * 360 / 48, radiusKm));
+                features.push({type: 'Feature', geometry: {type: 'Polygon', coordinates: [ring]}, properties: {}});
+            }
+        }
+        const data = {type: 'FeatureCollection', features};
+        const packet = JSON.stringify(data);
+        if (packet !== positionPacket) {
+            positionPacket = packet;
+            map.getSource('self-position').setData(data);
+        }
+    }
+    window.restoreOsintPosition = value => {
+        const fix = positionTracker.restoreFix(value);
+        if (fix) window.osintGps = fix;
+        publishPositionState();
+        paintOwnPosition();
     };
+    window.getOsintPositionState = () => {
+        publishPositionState();
+        paintOwnPosition();
+        return window.osintPositionState;
+    };
+    window.setOsintPositionEnabled = enabled => {
+        if (!enabled) followingPosition = false;
+        positionTracker.setEnabled(enabled);
+        publishPositionState();
+        paintOwnPosition();
+    };
+    window.locateOsintGps = () => window.setOsintPositionEnabled(true);
+    window.setOsintFollowing = enabled => {
+        followingPosition = Boolean(enabled);
+        lastFollowPoint = null;
+        if (followingPosition) positionTracker.setEnabled(true);
+        publishPositionState();
+        if (followingPosition && window.osintGps && positionTracker.getState().fresh)
+            window.focusOsintPoint({lat: window.osintGps.lat, lon: window.osintGps.lon, zoom: 15.5});
+    };
+    window.setOsintNavOpen = enabled => {
+        window.osintNavOpen = Boolean(enabled);
+        if (!enabled) followingPosition = false;
+        syncPositionContext();
+    };
+    document.addEventListener('visibilitychange', syncPositionContext);
+    window.addEventListener('pagehide', () => positionTracker.stop());
 
     document.getElementById('nav').onclick = () => {
-        window.osintNavOpen = !window.osintNavOpen;
+        window.setOsintNavOpen(!window.osintNavOpen);
         document.getElementById('nav').setAttribute('aria-pressed', String(window.osintNavOpen));
         if (window.osintNavOpen)
             setProjection('mercator');

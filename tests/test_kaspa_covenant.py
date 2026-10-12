@@ -68,11 +68,30 @@ def main() -> int:
     host = (PROJECT / "backend" / "crypto_host.py").read_text(encoding="utf-8")
     if "kaspa_covenant.snapshot()" not in host:
         raise AssertionError("crypto_host missing kaspa snapshot")
+    if "KASUSDT" not in host or "def set_portfolio_asset" not in host:
+        raise AssertionError("SOL and KAS must share one portfolio tape")
+    if "CRYPTO_KLINE_SYMBOL" not in host:
+        raise AssertionError("kline symbol guard missing")
+    slots = (PROJECT / "backend" / "chat_surface_host.py").read_text(encoding="utf-8")
+    if "def cryptoSetPortfolioAsset" not in slots or "def cryptoRefreshKasChart" not in slots:
+        raise AssertionError("portfolio asset slot missing")
+    try:
+        from backend import crypto_host
+
+        crypto_host.fetch_klines("15m", 8, symbol="BTCUSDT")
+        raise AssertionError("foreign kline symbol must fail closed")
+    except RuntimeError as exc:
+        if "CRYPTO_KLINE_SYMBOL" not in str(exc):
+            raise
     qml = (PROJECT / "qml" / "components" / "CryptoSurface.qml").read_text(
         encoding="utf-8"
     )
     if '"KASPA"' not in qml:
-        raise AssertionError("CryptoSurface missing KASPA page")
+        raise AssertionError("CryptoSurface missing KASPA wallet")
+    if 'visible: root.page === "KASPA"' in qml:
+        raise AssertionError("Kaspa must live on the portfolio, not its own page")
+    if "pickAsset" not in qml or "kas_chart" not in qml:
+        raise AssertionError("currency switch missing")
     if "sidebarCollapsed" not in qml or "function navIcon" not in qml:
         raise AssertionError("crypto chrome should match TMOG/OSINT sidebar")
     if "function menuKids" not in qml or "function pickChild" not in qml:

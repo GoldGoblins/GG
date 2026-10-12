@@ -21,15 +21,21 @@ Item {
     property string routeMeta: ""
     property string savedRoute: ""
     property var gpsFix: null
+    property bool positionEnabled: false
+    property var positionState: ({enabled: false, status: "POSITION OFF", fresh: false, following: false})
     signal viewportChanged(var view)
     function applySavedState() {
         if (!browser.item || !browser.item.ready)
             return
         root.push()
+        root.setNavOpen(root.navOpen)
         if (root.savedView)
             browser.item.runJavaScript("window.restoreOsintView(" + JSON.stringify(root.savedView) + ")")
         if (root.savedRoute)
             browser.item.runJavaScript("window.setOsintRoute && window.setOsintRoute(" + String(root.savedRoute) + ")")
+        if (root.gpsFix)
+            browser.item.runJavaScript("window.restoreOsintPosition(" + JSON.stringify(root.gpsFix) + ")")
+        root.setPositionEnabled(root.positionEnabled)
     }
     function push() {
         if (browser.item && browser.item.ready)
@@ -58,9 +64,17 @@ Item {
             "window.setOsintRoute && window.setOsintRoute(" + String(raw || "{}") + ")"
         )
     }
-    function locateGps() {
+    function setPositionEnabled(on) {
+        root.positionEnabled = !!on
         if (browser.item && browser.item.ready)
-            browser.item.runJavaScript("window.locateOsintGps && window.locateOsintGps()")
+            browser.item.runJavaScript("window.setOsintPositionEnabled(" + (on ? "true" : "false") + ")")
+    }
+    function locateGps() { root.setPositionEnabled(true) }
+    function setFollowing(on) {
+        if (on)
+            root.positionEnabled = true
+        if (browser.item && browser.item.ready)
+            browser.item.runJavaScript("window.setOsintFollowing(" + (on ? "true" : "false") + ")")
     }
     function clearRoute() {
         if (browser.item && browser.item.ready)
@@ -69,7 +83,7 @@ Item {
     function setNavOpen(on) {
         navOpen = !!on
         if (browser.item && browser.item.ready)
-            browser.item.runJavaScript("window.osintNavOpen = " + (on ? "true" : "false"))
+            browser.item.runJavaScript("window.setOsintNavOpen(" + (on ? "true" : "false") + ")")
     }
     function sampleViewport() {
         if (!browser.item || !browser.item.ready)
@@ -77,8 +91,10 @@ Item {
         browser.item.runJavaScript(
             "window.getOsintView && window.getOsintView()",
             function(value) {
-                if (value)
+                if (value) {
+                    root.savedView = value
                     root.viewportChanged(value)
+                }
             }
         )
     }
@@ -100,6 +116,18 @@ Item {
             + ")"
         )
     }
+    function setTerrain(on) {
+        if (browser.item && browser.item.ready) {
+            browser.item.runJavaScript("window.setOsintTerrain(" + (on ? "true" : "false") + ")")
+            root.sampleViewport()
+        }
+    }
+    function setBuildings(on) {
+        if (browser.item && browser.item.ready) {
+            browser.item.runJavaScript("window.setOsintBuildings(" + (on ? "true" : "false") + ")")
+            root.sampleViewport()
+        }
+    }
     function resetView() {
         if (browser.item && browser.item.ready)
             browser.item.runJavaScript("window.resetOsintView && window.resetOsintView()")
@@ -109,7 +137,7 @@ Item {
     Loader {
         id: browser
         anchors.fill: parent
-        active: root.Window.window !== null
+        active: root.Window.window !== null && root.visible
         sourceComponent: Component {
             WebEngineView {
                 objectName: "osintMapWebEngine"
@@ -149,13 +177,16 @@ Item {
                 onNewWindowRequested: function(request) { }
                 onContextMenuRequested: function(request) { request.accepted = true }
                 onFeaturePermissionRequested: function(securityOrigin, feature) {
-                    if (feature === WebEngineView.Geolocation)
+                    if (feature === WebEngineView.Geolocation && root.positionEnabled)
                         grantFeaturePermission(securityOrigin, feature, true)
                     else
                         grantFeaturePermission(securityOrigin, feature, false)
                 }
                 onPermissionRequested: function(permission) {
-                    permission.grant()
+                    if (permission.permissionType === WebEnginePermission.Geolocation && root.positionEnabled)
+                        permission.grant()
+                    else
+                        permission.deny()
                 }
                 onLoadingChanged: function(request) {
                     pageReady = request.status === WebEngineView.LoadSucceededStatus
@@ -180,28 +211,24 @@ Item {
         onTriggered: root.sampleViewport()
     }
     Timer {
-        interval: 2500
+        interval: root.positionEnabled ? 1000 : 2500
         running: browser.item !== null
         repeat: true
         onTriggered: {
             if (browser.item && browser.item.ready) {
-                browser.item.runJavaScript("window.getOsintView && window.getOsintView()", function(value) {
-                    if (value) {
-                        root.savedView = value
-                        root.viewportChanged(value)
-                    }
-                })
                 browser.item.runJavaScript(
-                    "({nav: !!window.osintNavOpen, pick: window.takeOsintPick && window.takeOsintPick(), meta: window.osintRouteMeta || '', gps: window.osintGps || null, route: window.osintRoutePayload || null})",
+                    "({nav: !!window.osintNavOpen, pick: window.takeOsintPick && window.takeOsintPick(), meta: window.osintRouteMeta || '', position: window.getOsintPositionState && window.getOsintPositionState(), gps: window.osintGps || null, route: window.osintRoutePayload || null})",
                     function(value) {
                         if (!value)
                             return
                         root.navOpen = !!value.nav
                         root.routeMeta = String(value.meta || "")
-                        if (value.gps)
-                            root.gpsFix = value.gps
-                        if (value.route)
-                            root.savedRoute = JSON.stringify(value.route)
+                        if (value.position) {
+                            root.positionState = value.position
+                            root.positionEnabled = !!value.position.enabled
+                            root.gpsFix = value.position.fix || value.gps || null
+                        }
+                        root.savedRoute = value.route ? JSON.stringify(value.route) : ""
                         var pick = value.pick
                         if (pick && Number(pick.seq) !== root.lastPickSeq) {
                             root.lastPickSeq = Number(pick.seq)

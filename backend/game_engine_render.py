@@ -1,8 +1,8 @@
 """Render-budget contracts for the low-cost-first GAME ENGINE pipeline.
 
-The contract separates policy from the active QtQuick3D fallback.  Optional
-upscalers and native instancing can be probed later without making the potato
-profile depend on a vendor driver or a heavyweight engine runtime.
+The contract separates policy from the active QtQuick3D renderer. Flora uses
+native instancing; optional upscalers remain separate so the potato profile
+does not depend on a vendor driver or a heavyweight engine runtime.
 """
 
 from __future__ import annotations
@@ -18,13 +18,43 @@ DOS_2D = "DOS_2D"
 PRESENTATION_MODES = (RICH_3D, DOS_2D)
 PROFILES = {
     "POTATO": {
+        # At the normal third-person distance the host uses a 4-cell render
+        # radius (81 terrain cells), expanding to this cap only as the editor
+        # camera zooms out.
         "resolution_scale": 0.67,
         "anti_aliasing": "NONE",
         "upscaler": "NONE",
         "shadow_policy": "BLOB_AND_BAKED",
         "max_visible_instances": 48,
         "max_visible_particles": 32,
+        "max_render_radius": 5,
+        "world_view_distance_m": 1400,
+        "max_dynamic_lights": 2,
+        "max_light_beacons": 12,
         "texture_budget_mb": 128,
+    },
+    "PS2_CLASSIC": {
+        # A deliberately restrained console-era pass: native vertex color,
+        # shared key/fill and a capped local-light pool, no temporal history,
+        # AO or filmic post-processing.
+        # Qt still selects its normal RHI backend; this is a render policy,
+        # not a second engine or a claim of hardware-level PS2 emulation.
+        "resolution_scale": 0.82,
+        "anti_aliasing": "NONE",
+        "upscaler": "NONE",
+        "shadow_policy": "BAKED_AND_BLOB",
+        "ambient_occlusion": False,
+        "temporal_aa": False,
+        "tonemap": "LINEAR",
+        "point_light": True,
+        "max_visible_instances": 128,
+        "max_visible_particles": 256,
+        "max_render_radius": 7,
+        "world_view_distance_m": 3200,
+        "max_dynamic_lights": 6,
+        "max_light_beacons": 24,
+        "water_vertex_grid": 33,
+        "texture_budget_mb": 256,
     },
     "BALANCED": {
         "resolution_scale": 1.0,
@@ -33,6 +63,10 @@ PROFILES = {
         "shadow_policy": "BAKED_PLUS_ONE_DYNAMIC",
         "max_visible_instances": 96,
         "max_visible_particles": 128,
+        "max_render_radius": 10,
+        "world_view_distance_m": 4000,
+        "max_dynamic_lights": 8,
+        "max_light_beacons": 32,
         "texture_budget_mb": 512,
     },
     "MODERN": {
@@ -42,6 +76,10 @@ PROFILES = {
         "shadow_policy": "CACHED_CASCADES",
         "max_visible_instances": 160,
         "max_visible_particles": 256,
+        "max_render_radius": 10,
+        "world_view_distance_m": 6000,
+        "max_dynamic_lights": 10,
+        "max_light_beacons": 40,
         "texture_budget_mb": 1024,
     },
     "CINEMATIC": {
@@ -51,6 +89,10 @@ PROFILES = {
         "shadow_policy": "BAKED_CINEMATIC_PLUS_CONTACT",
         "max_visible_instances": 192,
         "max_visible_particles": 512,
+        "max_render_radius": 10,
+        "world_view_distance_m": 9000,
+        "max_dynamic_lights": 10,
+        "max_light_beacons": 48,
         "texture_budget_mb": 2048,
     },
 }
@@ -77,8 +119,8 @@ def optional_layers() -> list[dict[str, str]]:
         },
         {
             "name": "GPU_TIMESTAMPS",
-            "status": "NOT_CONNECTED",
-            "activation": "NATIVE_RHI_PROFILING_BRIDGE",
+            "status": "QT_WINDOW_OPTIONAL_NOT_ENABLED_BY_DEFAULT",
+            "activation": "QQUICK_GRAPHICS_CONFIGURATION_SET_TIMESTAMPS",
         },
     ]
 
@@ -159,15 +201,23 @@ def build_render_view(
             "visible_particles": visible_particles,
         },
         "instancing": {
-            "strategy": "BOUNDED_QML_REPEATER3D_FALLBACK",
-            "native_bridge": "OPTIONAL_QQUICK3D_INSTANCING_SUBCLASS",
-            "per_tick_allocations": 0,
+            "strategy": "BOUNDED_QML_MODELS_FOR_WORLD_ENTITIES",
+            "native_bridge": "QQUICK3D_INSTANCING_LINKED_FOR_FLORA",
+        },
+        "particle_rendering": {
+            "strategy": "BOUNDED_ALPHA_AND_ADDITIVE_CROSSED_BILLBOARD_BATCHES",
+            "visible_count": visible_particles,
+            "geometry_batches": 1 if visible_particles else 0,
+            "geometry_batches_status": "HOST_PARTICLES_ONLY;_CLIENT_ADDS_BOUNDED_WORLD_FX",
+            "client_geometry_batches_max": 2,
         },
         "measurement": {
             "kind": "CPU_HOST_SNAPSHOT_TIMING",
             "snapshot_build_ms": round(max(0.0, float(snapshot_build_ms)), 4),
             "gpu_timestamp_queries": "NOT_CONNECTED",
+            "scene_counters": "QT_VIEW3D_RENDER_STATS_IN_PERF_INSPECTOR",
         },
-        "estimated_draw_calls": 3,
-        "honesty": "POLICY_AND_CPU_MEASUREMENT;_GPU_TIMINGS_REQUIRE_NATIVE_RENDER_BRIDGE",
+        "draw_calls": None,
+        "draw_calls_status": "CLIENT_QT_VIEW3D_COUNTER_NOT_IN_SERVER_SNAPSHOT",
+        "honesty": "HOST_CPU_TIMING;_SCENE_COUNTERS_CLIENT_SIDE;_OPTIONAL_GPU_TIMING_IS_WHOLE_WINDOW",
     }

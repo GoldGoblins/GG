@@ -10,11 +10,15 @@ validated authored mesh instead of the current native QtQuick3D primitive.
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 from typing import Any, Iterable
 
 from backend import game_engine_assets as assets_catalog
 from backend import game_engine_gear as gear_catalog
+from backend import game_engine_enchants as enchant_contract
+from backend import game_engine_firearms as firearms_contract
+from backend import game_engine_nature_catalog as nature_catalog
 
 SCHEMA = "gg.game-engine.items.v1"
 VERSION = 1
@@ -28,12 +32,12 @@ RARITIES = (
     "LEGENDARY",
     "ARTIFACT",
 )
-LOCATIONS = ("GROUND", "CONTAINER", "INVENTORY", "EQUIPPED", "POCKET", "DESTROYED")
+LOCATIONS = ("GROUND", "CONTAINER", "INVENTORY", "EQUIPPED", "POCKET", "BANK", "MAIL", "AUCTION", "DESTROYED")
 PLAYER_OWNED_LOCATIONS = frozenset({"INVENTORY", "EQUIPPED"})
 MAX_WORLD_INSTANCES = 96
 MAX_INVENTORY_SLOTS = 64
 MAX_CONTAINER_ITEMS = 16
-MAX_EQUIPPED_ITEMS = 8
+MAX_EQUIPPED_ITEMS = 19
 MAX_POCKET_ITEMS = 64
 INTERACTION_RADIUS_M = 3.75
 
@@ -181,7 +185,7 @@ def _visual_states(
 
 def starter_definitions() -> dict[str, dict[str, Any]]:
     """Return the first rich item catalogue as fresh authoring data."""
-    return {
+    out = {
         "item.island_compass": {
             "id": "item.island_compass",
             "name": "Island Compass",
@@ -297,7 +301,7 @@ def starter_definitions() -> dict[str, dict[str, Any]]:
                 ground_offset=0.38,
                 ground_float=0.1,
                 spin_deg_s=34.0,
-                equipped_scale=(0.07, 0.55, 0.07),
+                equipped_scale=(0.22, 0.55, 0.22),
             ),
         },
         "item.tideguard_jacket": {
@@ -424,6 +428,26 @@ def starter_definitions() -> dict[str, dict[str, Any]]:
         },
     }
 
+    from backend.game_engine_asset_variations import WEAPON_FAMILIES
+    for family in WEAPON_FAMILIES:
+        key='item.weapon_'+family;asset_id='itemmesh.weapon_'+family
+        out[key]=dict(id=key,name=family.title(),kind='ARMOR' if family in ('shield','offhand') else 'WEAPON',
+            rarity='UNCOMMON',level=2,stack_limit=1,equip_slot='OFF_HAND' if family in ('shield','offhand') else 'MAIN_HAND',
+            tags=['EQUIPMENT',family.upper()],asset_id=asset_id,
+            visual=_visual_states(asset_id,'#Cube',(1.,1.,1.),(0.,0.,0.),
+                ground_offset=.2,ground_float=.05,spin_deg_s=12.,equipped_scale=(1.,1.,1.)))
+        if family=='pistol':
+            out[key]['name']='Firearm'
+            out[key]['equip_slots']=['MAIN_HAND','OFF_HAND']
+            out[key]['visual']['states']['EQUIPPED']['rotation']=[0.,-90.,0.]
+        if family=='mace':out[key]['equip_slots']=['MAIN_HAND','OFF_HAND']
+    for slug,ammo in firearms_contract.AMMO.items():
+        asset_id='itemmesh.ammo_'+slug
+        out[ammo['id']]=dict(id=ammo['id'],name=ammo['name'],kind='AMMUNITION',rarity='COMMON',level=1,
+            stack_limit=999,equip_slot='',tags=['AMMUNITION',slug.upper()],asset_id=asset_id,
+            visual=_visual_states(asset_id,'#Sphere',(.7,.7,.7),(0.,0.,0.),ground_offset=.15,ground_float=.02,spin_deg_s=9.))
+    return out
+
 
 def starter_containers() -> dict[str, dict[str, Any]]:
     return {
@@ -482,6 +506,32 @@ def catalog_from_content(content: dict[str, Any] | None = None) -> dict[str, Any
     """Build a fresh item catalogue while allowing authored content overrides."""
     source = content if isinstance(content, dict) else {}
     defaults = starter_definitions()
+    scroll = copy.deepcopy(defaults['item.island_compass'])
+    scroll.update(id='item.enchant_scroll', name='Enchanting Scroll', kind='SCROLL',
+                  rarity='UNCOMMON', stack_limit=1, level=1, equip_slot='',
+                  tags=['ENCHANTING', 'CONSUMABLE'], asset_id='itemmesh.enchant_scroll',
+                  visual=_visual_states('itemmesh.enchant_scroll', '#Cylinder', (.3,.3,.3),
+                      (0.,0.,0.), ground_offset=.35, ground_float=.08, spin_deg_s=12.))
+    defaults['item.enchant_scroll'] = scroll
+    letter = copy.deepcopy(defaults['item.island_compass'])
+    letter.update(id='item.gg_letter', name='Letter', kind='ITEM', rarity='COMMON',
+                  stack_limit=1, equip_slot='', tags=['NO_TRADE'], equip_slots=[])
+    defaults['item.gg_letter'] = letter
+    charter=copy.deepcopy(letter)
+    charter.update(id='item.guild_charter',name='Guild Charter',kind='QUEST',tags=['NO_TRADE','GUILD_CHARTER'])
+    defaults['item.guild_charter']=charter
+    tabard=copy.deepcopy(letter)
+    tabard.update(id='item.guild_tabard',name='Guild Tabard',kind='ARMOR',equip_slot='TABARD',equip_slots=['TABARD'],
+        tags=['NO_TRADE','GUILD_TABARD'],asset_id='itemmesh.guild_tabard',
+        visual=_visual_states('itemmesh.guild_tabard','#Cube',(.55,.70,.025),(0.,0.,0.),ground_offset=.35,ground_float=0.,spin_deg_s=0.))
+    defaults['item.guild_tabard']=tabard
+    paper=copy.deepcopy(letter)
+    paper.update(id='item.gg_wrapping_paper',name='Wrapping Paper',kind='ITEM',tags=['GIFT_WRAPPER'],stack_limit=20)
+    defaults['item.gg_wrapping_paper']=paper
+    gift=copy.deepcopy(paper)
+    gift.update(id='item.gg_wrapped_gift',name='Wrapped Gift',tags=[],stack_limit=1)
+    defaults['item.gg_wrapped_gift']=gift
+    defaults.update(nature_catalog.item_definitions(defaults["item.sun_herb"]))
     source_items = source.get("items", {})
     items: dict[str, dict[str, Any]] = {}
     for item_id, default in defaults.items():
@@ -516,6 +566,8 @@ def catalog_from_content(content: dict[str, Any] | None = None) -> dict[str, Any
         if isinstance(source_tables, dict)
         else starter_loot_tables()
     )
+    for key, table in nature_catalog.loot_tables().items():
+        loot_tables.setdefault(key, table)
     return {
         "schema": SCHEMA,
         "version": VERSION,
@@ -658,10 +710,11 @@ def make_instance(
         "rarity_color": rarity_style(item.get("rarity"))["color"],
         "level": max(1, _safe_int(item.get("level"), 1)),
         "quantity": safe_quantity,
+        "slot_index": -1,
         "location": normalized_location,
         "owner_id": owner[:64],
         "container_id": str(container_id or "")[:64],
-        "equipped_slot": slot[:32],
+        "equipped_slot": slot[:32] if normalized_location=="EQUIPPED" else "",
         "condition": 1.0,
         "craft_quality": "STANDARD",
         "position": _safe_position(position),
@@ -675,16 +728,39 @@ def make_instance(
         ),
         "container_state": "CLOSED" if str(item.get("kind")) == "CONTAINER" else "",
         "contents": [],
+        **({'magazine':firearms_contract.normalize_magazine({},firearms_contract.profile(instance_id))} if definition_id=='item.weapon_pistol' else {}),
     }
+
+
+def saved_gift_payload_valid(raw: Any) -> bool:
+    if not isinstance(raw,dict) or raw.get('definition_id')!='item.gg_wrapped_gift':return True
+    import json
+    try:return len(json.dumps(raw.get('gift',raw.get('gift_quarantine')),allow_nan=False))<=16384
+    except (ValueError,TypeError,OverflowError,RecursionError):return False
+
+
+def normalize_custody_origin(value: Any) -> dict[str, str]:
+    """Preserve a physical item's bounded local-character lineage exactly."""
+    if not isinstance(value,dict) or set(value)!={'character','instance'}:
+        raise ValueError('LOCAL_CUSTODY_ORIGIN_INVALID')
+    character=value['character'];instance=value['instance']
+    if (not isinstance(character,str) or len(character)!=32 or any(c not in '0123456789abcdef' for c in character)
+            or not isinstance(instance,str) or not 1<=len(instance)<=64 or any(ord(c)<32 for c in instance)):
+        raise ValueError('LOCAL_CUSTODY_ORIGIN_INVALID')
+    return dict(character=character,instance=instance)
 
 
 def normalize_instance(catalog: dict[str, Any], raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict) or not raw.get("instance_id"):
         return None
+    if not saved_gift_payload_valid(raw):raise ValueError('WRAPPED_GIFT_PAYLOAD_INVALID')
+    custody=normalize_custody_origin(raw['custody_origin']) if 'custody_origin' in raw else None
+    definition_id = raw.get("definition_id", raw.get("base_item_id", "item.island_compass"))
+    known_definition = definition(catalog, definition_id) is not None
     result = make_instance(
         catalog,
         raw.get("instance_id"),
-        raw.get("definition_id", raw.get("base_item_id", "item.island_compass")),
+        definition_id,
         location=str(raw.get("location", "INVENTORY")),
         quantity=_safe_int(raw.get("quantity"), 1),
         owner_id=str(raw.get("owner_id", "player")),
@@ -693,6 +769,65 @@ def normalize_instance(catalog: dict[str, Any], raw: Any) -> dict[str, Any] | No
         position=raw.get("position"),
         visual_phase=_safe_float(raw.get("visual_phase")),
     )
+    # A shared stash can contain content from another character's loaded pack.
+    # Preserve the bounded authored identity until that pack is available here.
+    if not known_definition:
+        result["name"] = str(raw.get("name") or result["name"])[:96]
+        result["kind"] = str(raw.get("kind") or result["kind"])[:32]
+        result["rarity"] = normalize_rarity(raw.get("rarity"))
+        result["rarity_color"] = rarity_style(result["rarity"])["color"]
+        result["level"] = max(1, _safe_int(raw.get("level"), 1))
+        result["quantity"] = max(1, min(999, _safe_int(raw.get("quantity"), 1)))
+    if definition_id == 'item.enchant_scroll':
+        scroll_id = str(raw.get('scroll_enchant_id', ''))[:96]
+        scroll = enchant_contract.definition(scroll_id)
+        if scroll:
+            result['scroll_enchant_id'] = scroll['id']
+            result['name'] = (scroll['name'] + ' Scroll')[:96]
+            result['level'] = scroll['required_level']
+            result['rarity'] = 'ARTIFACT' if scroll['tier'] == 3 else 'RARE' if scroll['tier'] == 2 else 'UNCOMMON'
+            result['rarity_color'] = rarity_style(result['rarity'])['color']
+    if definition_id=='item.weapon_pistol':
+        result['magazine']=firearms_contract.normalize_magazine(raw.get('magazine'),firearms_contract.profile(result['instance_id']))
+    result["condition"] = max(0.0, min(1.0, _safe_float(raw.get("condition"), 1.0)))
+    if custody is not None:result['custody_origin']=custody
+    result["slot_index"] = _safe_int(raw.get("slot_index"), -1)
+    source=raw.get('source_actor_id')
+    if isinstance(source,str) and 0<len(source)<=64:
+        result['source_actor_id']=source
+        result['loot_claimed']=raw.get('loot_claimed') is True or result['location'] not in ('GROUND','CONTAINER','DESTROYED')
+    if isinstance(raw.get('bound_to'),str) and 0<len(raw['bound_to'])<=128:
+        result['bound_to']=raw['bound_to']
+    if definition_id=='item.gg_wrapped_gift':
+        gift=raw.get('gift',raw.get('gift_quarantine'));original=gift.get('original') if isinstance(gift,dict) else None
+        import json
+        try:bounded=len(json.dumps(gift,allow_nan=False))<=16384
+        except (ValueError,TypeError):bounded=False
+        if (bounded and isinstance(original,dict) and original.get('definition_id') not in ('item.gg_wrapped_gift','item.gg_wrapping_paper')
+                and 'gift' not in original and 'gift_quarantine' not in original and original.get('quantity')==1 and not original.get('bound_to')):
+            normalized=normalize_instance(catalog,original)
+            if normalized:result['gift']=dict(original=normalized,sender=str(gift.get('sender',''))[:48])
+        if 'gift' not in result:
+            result['gift_invalid']=True
+            if bounded:result['gift_quarantine']=copy.deepcopy(gift)
+    if result['definition_id']=='item.gg_letter' and isinstance(raw.get('letter'),dict):
+        result['letter']={k:str(raw['letter'].get(k,''))[:4096 if k=='body' else 128] for k in ('subject','body','sender')}
+    if result['definition_id']=='item.guild_charter' and isinstance(raw.get('petition'),dict):
+        petition=raw['petition'];signers=petition.get('signers');owner=petition.get('owner');title=petition.get('title')
+        if (isinstance(title,str) and 1<=len(title)<=48 and title==title.strip() and '  ' not in title
+                and not any(ord(c)<32 for c in title) and isinstance(owner,str) and 1<=len(owner)<=64
+                and isinstance(signers,list) and len(signers)<=9
+                and all(isinstance(p,str) and 1<=len(p)<=64 for p in signers)
+                and len(set(signers))==len(signers) and owner not in signers
+                and type(petition.get('max_signatures')) is int and 1<=petition['max_signatures']<=9
+                and len(signers)<=petition['max_signatures']):
+            result['petition']=copy.deepcopy({k:petition[k] for k in ('title','owner','signers','max_signatures')})
+    if result['definition_id']=='item.guild_tabard':
+        values=raw.get('guild_emblem')
+        if (type(raw.get('guild_id')) is int and 1<=raw['guild_id']<2**31
+                and isinstance(values,list) and len(values)==5
+                and all(type(v) is int and 0<=v<n for v,n in zip(values,(170,17,6,17,51)))):
+            result.update(guild_id=raw['guild_id'],guild_emblem=list(values))
     for key in (
         "seed",
         "base_item_id",
@@ -743,6 +878,8 @@ def transition_instance(
     if destination == "EQUIPPED" and not str(equipped_slot or instance.get("equipped_slot", "")):
         return False, {"error": "ITEM_EQUIP_SLOT_REQUIRED"}
     instance["location"] = destination
+    if instance.get('source_actor_id') and destination not in ('GROUND','CONTAINER','DESTROYED'):
+        instance['loot_claimed']=True
     if owner_id is not None:
         instance["owner_id"] = str(owner_id)[:64]
     if container_id is not None:
@@ -761,9 +898,43 @@ def transition_instance(
         "instance_id": str(instance["instance_id"]),
         "location": destination,
         "owner_id": str(instance.get("owner_id", "")),
+        "bound": bool(instance.get('bound_to')),
         "container_id": str(instance.get("container_id", "")),
         "equipped_slot": str(instance.get("equipped_slot", "")),
     }
+
+
+def item_appearance_index(instance_id: Any) -> int:
+    return int.from_bytes(hashlib.blake2s(str(instance_id).encode(),digest_size=4).digest(),'little')%36
+
+
+def firearm_visual(instance: dict[str, Any]) -> dict[str, Any]:
+    if instance.get('definition_id')!='item.weapon_pistol':return {}
+    from backend.game_engine_pistol_designs import pistol_visual
+    return pistol_visual(item_appearance_index(instance.get('instance_id','')))
+
+
+def equipment_wielding(instance: dict[str, Any]) -> str:
+    family=str(instance.get('definition_id','')).removeprefix('item.weapon_')
+    if family=='sword':
+        from backend.game_engine_sword_designs import sword_wielding
+        return sword_wielding(item_appearance_index(instance.get('instance_id','')))
+    if family in ('wand','staff','mace','offhand'):
+        from backend.game_engine_caster_designs import design
+        return design(family,item_appearance_index(instance.get('instance_id','')))['wielding_reference']
+    if family=='axe':
+        from backend.game_engine_shield_axe_designs import AXES
+        return AXES[item_appearance_index(instance.get('instance_id',''))][-1]
+    return str(firearm_visual(instance).get('wielding_reference','1H'))
+
+
+def allowed_equip_slots(catalog: dict[str, Any], definition_id: Any, instance_id: Any = '') -> list[str]:
+    """Authored compatibility; never infer a second hand from weapon rarity."""
+    row=definition(catalog,definition_id) or {}
+    if instance_id and equipment_wielding(dict(definition_id=definition_id,instance_id=instance_id))=='2H':return ['MAIN_HAND']
+    slots=row.get('equip_slots')
+    if not isinstance(slots,list):slots=[row.get('equip_slot','')]
+    return list(dict.fromkeys(str(slot) for slot in slots if str(slot) in gear_catalog.GEAR_SLOTS))
 
 
 def instance_view(
@@ -773,6 +944,13 @@ def instance_view(
     sim_time: float = 0.0,
     include_visual: bool = True,
 ) -> dict[str, Any]:
+    item_definition = definition(catalog, instance.get("definition_id")) or {}
+    item_gear = (
+        item_definition.get("gear")
+        if isinstance(item_definition.get("gear"), dict)
+        else {}
+    )
+    equip_slot = str(item_definition.get("equip_slot") or item_gear.get("slot") or "")
     result = {
         "instance_id": str(instance.get("instance_id", "")),
         "definition_id": str(instance.get("definition_id", "")),
@@ -782,21 +960,57 @@ def instance_view(
         "rarity_color": str(instance.get("rarity_color", rarity_style(instance.get("rarity"))["color"])),
         "level": max(1, _safe_int(instance.get("level"), 1)),
         "quantity": max(1, _safe_int(instance.get("quantity"), 1)),
+        "stack_limit": max(1, _safe_int(item_definition.get("stack_limit"), 1)),
+        "slot_index": _safe_int(instance.get("slot_index"), -1),
         "location": str(instance.get("location", "INVENTORY")),
         "owner_id": str(instance.get("owner_id", "")),
+        "bound": bool(instance.get('bound_to')),
         "container_id": str(instance.get("container_id", "")),
         "equipped_slot": str(instance.get("equipped_slot", "")),
+        "equip_slot": equip_slot,
+        "equip_slots": allowed_equip_slots(catalog,instance.get('definition_id'),instance.get('instance_id')),
         "condition": round(max(0.0, min(1.0, _safe_float(instance.get("condition"), 1.0))), 3),
         "craft_quality": str(instance.get("craft_quality", "STANDARD"))[:16].upper(),
+        "visual_phase": _safe_float(instance.get('visual_phase')),
         "position": _safe_position(instance.get("position")),
         "affixes": copy.deepcopy(instance.get("affixes", [])[:2]) if isinstance(instance.get("affixes"), list) else [],
         "enchantments": copy.deepcopy(instance.get("enchantments", [])[:2]) if isinstance(instance.get("enchantments"), list) else [],
         "gear": gear_catalog.gear_view(instance.get("gear")),
         "attachment": assets_catalog.attachment_for_slot(
-            instance.get("equipped_slot")
-            or (definition(catalog, instance.get("definition_id")) or {}).get("equip_slot")
+            instance.get("equipped_slot") or equip_slot
         ),
     }
+    firearm=firearm_visual(instance)
+    family=str(instance.get('definition_id','')).removeprefix('item.weapon_')
+    if family=='sword':
+        from backend.game_engine_sword_designs import sword_name, sword_wielding
+        variant=item_appearance_index(instance.get('instance_id',''))
+        result['name']=sword_name(variant)
+        result['appearance_index']=variant
+        result['wielding_reference']=sword_wielding(variant)
+    if family in ('wand','staff','mace','offhand'):
+        from backend.game_engine_caster_designs import design
+        authored=design(family,item_appearance_index(instance.get('instance_id','')))
+        result['name']=authored['name']
+        result['appearance_index']=item_appearance_index(instance.get('instance_id',''))
+        result['wielding_reference']=authored['wielding_reference']
+        result['weapon_subtype']='caster_focus' if family=='offhand' else family
+    if firearm:
+        result['name']=firearm['name']
+        result['wielding_reference']=firearm['wielding_reference']
+        result['weapon_subtype']=firearm['weapon_subtype']
+        result['firearm']=firearms_contract.profile(instance['instance_id'])
+        result['magazine']=firearms_contract.normalize_magazine(instance.get('magazine'),result['firearm'])
+    result['icon']=assets_catalog.inventory_icon(result['definition_id'],result.get('appearance_index',0))
+    if instance.get('definition_id') == 'item.gg_letter' and isinstance(instance.get('letter'), dict):
+        result['letter'] = copy.deepcopy(instance['letter'])
+    if instance.get('definition_id')=='item.guild_charter' and isinstance(instance.get('petition'),dict):
+        result['petition']=copy.deepcopy(instance['petition'])
+    if instance.get('definition_id')=='item.guild_tabard':
+        result.update(guild_id=instance.get('guild_id',0),guild_emblem=copy.deepcopy(instance.get('guild_emblem')))
+    if instance.get('definition_id')=='item.gg_wrapped_gift':
+        result.update(wrapped=True,gift_sender=str((instance.get('gift') or {}).get('sender',''))[:48])
+        result['gift_invalid']=instance.get('gift_invalid') is True
     for key in ("seed", "base_item_id", "roll_table_id", "roll", "origin"):
         if key in instance:
             result[key] = (
@@ -804,6 +1018,9 @@ def instance_view(
                 if key in {"seed", "roll"}
                 else str(instance.get(key, ""))[:96]
             )
+    if instance.get('scroll_enchant_id'):
+        result['scroll_enchant_id'] = str(instance['scroll_enchant_id'])[:96]
+        result['scroll_description'] = enchant_contract.definition(result['scroll_enchant_id']).get('description', '')
     if result["kind"] == "CONTAINER":
         result["container_state"] = str(instance.get("container_state", "CLOSED"))
         result["contents"] = list(instance.get("contents", []))[:MAX_CONTAINER_ITEMS]
@@ -828,6 +1045,9 @@ def instance_view(
             )
         )
         result["visual"]["attachment"] = copy.deepcopy(result["attachment"])
+        if family=='sword':
+            from backend.game_engine_sword_designs import sword_grip_offset
+            result['visual']['grip_offset']=sword_grip_offset(item_appearance_index(instance.get('instance_id','')))
         result["visual"]["state"] = str(result.get("location") or "INVENTORY")
     return result
 

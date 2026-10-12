@@ -2,15 +2,64 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
+import QtQuick.Window
 import QtQuick3D
 import QtQuick3D.AssetUtils
 import QtQuick3D.Helpers
+import "../game/WorldFx.js" as WorldFx
+import "../game/WorldAtmosphere.js" as WorldAtmosphere
+import "../game/FlailPhysics.js" as FlailPhysics
+import "LocalServiceState.js" as LocalServiceState
 
 Item {
     id: root
     objectName: "workspaceGameEnginePane"
 
+    // The workbench preview and the standalone player share this renderer and
+    // simulation, but the standalone window owns its own HUD and menus.
+    property var actionBarWidget: null
+    property var actionDrag: ({})
+    property real actionDragX: 0
+    property real actionDragY: 0
+    property var worldHoverInfo: ({})
+    property real worldMouseX: 0
+    property real worldMouseY: 0
+    property bool worldMouseInside: false
+    property double lastHoverAt: 0
+    property real snapshotBridgeMs: 0
+    property real snapshotBindingsMs: 0
+    property real snapshotModelsMs: 0
+    readonly property var actionState: root.renderStatus.actions || root.status.actions || ({})
+    readonly property string abilityCatalogJson: JSON.stringify(root.actionState.abilities || [])
+    readonly property var abilityCatalog: JSON.parse(root.abilityCatalogJson)
+    property bool standalonePlayerMode: false
+    property bool controlsLocked: false
+    signal gameMenuRequested()
+
     property var surfaceHost: null
+    readonly property var nativeScenePresentation: surfaceHost && surfaceHost.gameEnginePresentation
+        ? surfaceHost.gameEnginePresentation() : null
+    readonly property var originalWorldActors: nativeScenePresentation ? nativeScenePresentation.worldActors : null
+    property var localServiceState: ({})
+    property var benillaWorld: surfaceHost && surfaceHost.gameEngineBenillaWorld ? surfaceHost.gameEngineBenillaWorld() : null
+    readonly property bool originalWorldActive: !!benillaWorld && benillaWorld.active
+    property string worldLoadMessage: ""
+    property var mountedWorldState: ({status:"GG",message:""})
+    function selectBenillaWorld(manifest) {
+        if (!surfaceHost || !surfaceHost.gameEngineLoadBenillaWorld) return
+        var result=JSON.parse(surfaceHost.gameEngineLoadBenillaWorld(String(manifest)))
+        worldLoadMessage=result.ok ? "" : String(result.error || "World load failed")
+        benillaWorld=surfaceHost.gameEngineBenillaWorld()
+        refresh()
+    }
+    FileDialog {
+        id: worldManifestDialog
+        title: "Select a packaged Benilla world"
+        nameFilters: ["World manifest (*.json)"]
+        currentFolder: Qt.resolvedUrl("../game")
+        onAccepted: root.selectBenillaWorld(selectedFile)
+    }
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
     // WorkspaceSurface keeps this pane loaded while hidden.  paneLive is
@@ -30,6 +79,8 @@ Item {
     property bool renderStreamPrimed: false
     property string page: "PLAY"
     property string selectedItemId: ""
+    property string itemNotice: ""
+    property bool bankViewOpen: false
     property real throttle: 0
     property real steer: 0
     property real strafe: 0
@@ -37,41 +88,156 @@ Item {
     property real vertical: 0
     property bool boost: false
     property bool jump: false
+    property bool grapple: false
     // Presentation is disposable; the simulation remains authoritative when
     // the rich scene is unavailable.  This local flag is also useful for a
     // future native graphics watchdog that cannot safely mutate game state.
     property bool localGraphicsFailure: false
-    // WoW-style input: A/D rotate the avatar, Q/E strafe, and the camera is a
-    // separate right-mouse orbit.  The action registry below keeps this
-    // readable grammar remappable without scattering key codes through QML.
+    // A/D turns the character; E interacts and Q fires/releases the grapple.
+    // Camera orbit stays relative to player heading so the default view
+    // remains behind the +Z-facing Blender avatar. The 180 degree base offset
+    // puts the camera at its back.
     property var pressedTokens: ({})
     property string bindingCaptureAction: ""
     property real orbitYaw: 0
-    // The authored character fixture is 1.5 m tall.  An 18 m default orbit
-    // gives that metre scale enough context to read the island as a world
-    // instead of a tabletop, while the wheel still allows a close 6 m view.
-    property real cameraDistance: 18
-    property real orbitPitch: -27
+    property bool mouseRightHeld: false
+    property bool mouseLeftHeld: false
+    property real mouseLookHeading: 0
+    property real leftLookHeading: 0
+    readonly property real characterHeading: root.number(root.player.yaw, 0) * 57.29577951308232
+    readonly property real cameraHeading: root.mouseRightHeld ? root.mouseLookHeading
+        : (root.mouseLeftHeld ? root.leftLookHeading : root.characterHeading + root.orbitYaw)
+    readonly property real cameraWorldYaw: root.wrapDegrees(root.cameraHeading + 180)
+    // Meter-based framing: chest/head pivot, six-meter boom, mild downward pitch.
+    // Character GLBs stay at their authored human scale.
+    property real cameraDistance: 6
+    property real orbitPitch: -8
+    property int cameraViewRevision: -1
+    property var clientDisplay: ({})
+    readonly property bool firstPersonView: root.cameraDistance < 0.01
+    function syncClientCamera(snapshot) {
+        var control=(snapshot.player || {}).client_controls
+        if (!control || control.revision === undefined)
+            return
+        root.clientDisplay=control.display || ({})
+        if (control.revision === root.cameraViewRevision) return
+        root.cameraViewRevision=control.revision
+        root.cameraDistance=root.number(control.distance,6)
+        root.orbitPitch=root.number(control.pitch,-8)
+        root.orbitYaw=root.wrapDegrees(root.number(control.yaw,0))
+        root.mouseLookHeading=root.characterHeading+root.orbitYaw
+        root.leftLookHeading=root.mouseLookHeading
+        root.importedCameraReady=false
+    }
+    readonly property real cameraPivotOffsetM: 0.8
+    property vector3d importedCameraSeat: Qt.vector3d(0,0,0)
+    property bool importedCameraReady: false
+    property bool cameraWaterCollision: true
+    function updateImportedCamera(delta) {
+        if (!root.originalWorldActive || !root.benillaWorld) {
+            root.importedCameraReady=false
+            return
+        }
+        root.importedCameraSeat=root.benillaWorld.solveCamera({
+            feet:[root.number(root.player.x,0),root.number(root.player.y,0)-.65,root.number(root.player.z,0)],
+            head_height:1.4,pivot_height:.65+root.cameraPivotOffsetM,
+            yaw:root.cameraWorldYaw,pitch:root.orbitPitch,
+            distance:root.cameraDistance*root.cameraDistanceScale,
+            delta:Math.max(0,Math.min(1,delta)),water_collision:root.cameraWaterCollision})
+        root.importedCameraReady=true
+    }
+    onOriginalWorldActiveChanged: { importedCameraReady=false; updateImportedCamera(0) }
     // The navigation rail and the inspector are independent overlays.  Their
     // collapsed forms deliberately keep a small click target over the scene
     // instead of removing the route or stealing space from the engine view.
     property bool leftMenuCollapsed: false
     property bool inspectorCollapsed: false
+    property var assetEditorState: ({})
+    property string assetEditorError: ""
+    property int assetEditorRevision: 0
+    property var assetMaterialRecords: []
+    property string assetTool: "SELECT"
+    readonly property bool assetEditorMode: !root.standalonePlayerMode && (root.page === "EDIT" || root.page === "ASSETS")
+    property var assetDrag: ({})
+    property double assetDragSentAt: 0
+    property bool floraEnabled: true
+    property bool frustumCullingEnabled: true
+    // Actual Qt counters belong to the View3D/window, not the simulation.
+    readonly property string rendererMeasurementsJson: JSON.stringify({
+        fps: view3d.renderStats.fps,
+        frame_ms: view3d.renderStats.frameTime,
+        sync_cpu_ms: view3d.renderStats.syncTime,
+        render_cpu_ms: view3d.renderStats.renderTime,
+        gpu_window_ms: view3d.renderStats.lastCompletedGpuTime > 0
+            ? view3d.renderStats.lastCompletedGpuTime : null,
+        draw_calls: view3d.renderStats.extendedDataCollectionEnabled
+            ? view3d.renderStats.drawCallCount : null,
+        render_passes: view3d.renderStats.extendedDataCollectionEnabled
+            ? view3d.renderStats.renderPassCount : null,
+        graphics_api: view3d.renderStats.graphicsApiName
+    })
     // QtQuick3D's built-in primitive meshes are authored at 100 units.  The
     // simulation uses compact gameplay coordinates, so keep the conversion in
     // one place instead of distorting the physics data.
     readonly property real sceneScale: 0.01
     readonly property real terrainCellSize: 16.0
-    // One directional shadow pass is affordable for the bounded preview;
-    // POTATO remains deliberately unshadowed. Point-light shadows are kept
-    // off because Qt renders them as six cubemap passes.
+    readonly property bool ps2ClassicRenderer:
+        String(root.render.profile || "PS2_CLASSIC") === "PS2_CLASSIC"
+    // The console-era profile uses baked/environment shading and the
+    // existing low-cost player blob; it does not allocate a dynamic shadow
+    // map. Point-light shadows are off because they cost six cubemap passes.
     readonly property bool shadowMappingEnabled:
-        String(root.render.profile || "BALANCED") !== "POTATO"
+        String(root.render.profile || "PS2_CLASSIC") !== "POTATO"
+        && !root.ps2ClassicRenderer
+    readonly property real internalResolutionScale: {
+        var policy = root.render.policy || ({})
+        return Math.max(
+            0.5,
+            Math.min(1.25, root.number(policy.resolution_scale, 0.67))
+        )
+    }
     property bool applyingRenderStatus: false
+    property var waterWaveGeometry: null
+    property var particleBatchGeometry: null
+    property int particleBatchCount: 0
+    property var additiveParticleGeometry: null
+    property int additiveParticleCount: 0
+    property var worldFxAnchors: []
+    property var worldAmbientAnchors: []
+    property var worldLightBeacons: []
+    property var localLightSources: []
+    property double lastWorldFxAnchorUpdate: 0
+    property var equipmentFxNodes: ({})
+    property var enchantMesh0: null
+    property var enchantMesh1: null
+    property var lastVisualSnapshot: ({})
+    property var lastVisualRenderView: ({})
+    readonly property vector3d groundCoverRight: Qt.vector3d(
+        Math.cos(root.cameraWorldYaw*Math.PI/180),0,-Math.sin(root.cameraWorldYaw*Math.PI/180))
+    property int enchantOwnedScrollIndex: 0
+    readonly property string selectedEnchantScrollId: root.ownedEnchantScrolls.length > 0
+        ? root.ownedEnchantScrolls[Math.min(root.enchantOwnedScrollIndex, root.ownedEnchantScrolls.length-1)].scroll_enchant_id : ""
+    property int enchantPrimaryIndex: 0
+    property int enchantSecondIndex: 0
+    property int enchantThirdIndex: 0
+    property int enchantGearIndex: 0
+    property int enchantRecipeMode: 0
+    readonly property var enchantRecipe: WorldFx.recipeForChoices(
+        root.enchantPrimaryIndex, root.enchantSecondIndex, root.enchantThirdIndex,
+        root.enchantGearIndex, root.enchantRecipeMode)
+    readonly property var ownedEnchantScrolls: (root.items.inventory || []).filter(
+        function(row) { return !!row.scroll_enchant_id })
+    readonly property var enchantStation: ((root.status.crafting || {}).workstations || []).filter(
+        function(row) { return row.id === "station.enchanting_altar" })[0] || ({})
+    property int fxPreviewIndex: -1
+    readonly property string fxPreviewStyle:
+        root.fxPreviewIndex >= 0
+            ? WorldFx.PREVIEW_STYLES[root.fxPreviewIndex] : ""
+    property bool sandoverBirdClipBound: false
+    property bool sandoverFishClipBound: false
     property var renderModelIndex: ({
         "terrainRow": ({}),
-        "entityRow": ({}),
-        "particleRow": ({})
+        "entityRow": ({})
     })
     // Replace Qt's dense convenience sphere with one shared native mesh.
     // GG_CLAY_ASSET_KIT is the shared item/prop style contract: one cached
@@ -94,33 +260,6 @@ Item {
             ? (root.surfaceHost.gameEngineLowPolySphereGeometry()
                 || lowPolySphereGeometryFallback)
             : lowPolySphereGeometryFallback
-    // The character fallback is one shared low-poly humanoid geometry in
-    // gameplay metre units. A minimal/older host may not expose that native
-    // cache yet; in that case the already shared low-poly sphere is safer than
-    // creating a cube or a second per-character mesh. The real host exposes
-    // gameEngineCharacterGeometry(), so normal runtime uses the humanoid
-    // silhouette without changing the simulation contract.
-    readonly property var nativeLowPolyCharacterGeometry:
-        root.surfaceHost
-        && typeof root.surfaceHost.gameEngineCharacterGeometry === "function"
-            ? root.surfaceHost.gameEngineCharacterGeometry() : null
-    readonly property var lowPolyCharacterGeometry:
-        root.nativeLowPolyCharacterGeometry || root.lowPolySphereGeometry
-    function characterGeometryForCast(role) {
-        if (
-            root.surfaceHost
-            && typeof root.surfaceHost.gameEngineCharacterGeometryForRole === "function"
-        ) {
-            var geometry = root.surfaceHost.gameEngineCharacterGeometryForRole(
-                String(role || "CROWD")
-            )
-            if (geometry)
-                return geometry
-        }
-        return root.lowPolyCharacterGeometry
-    }
-    readonly property bool lowPolyCharacterUsesGameplayUnits:
-        Boolean(root.nativeLowPolyCharacterGeometry)
     // The target is intentionally UI state.  The authoritative edit and its
     // undo history remain in the bounded backend terrain document.
     property bool terrainTargetSelected: false
@@ -151,14 +290,14 @@ Item {
     readonly property color panelOverlay: Qt.rgba(0.067, 0.082, 0.09, 0.24)
     readonly property color panelOverlayRaised: Qt.rgba(0.067, 0.082, 0.09, 0.30)
     readonly property var nav: [
-        "PLAY", "BAG", "SCENE", "PERF", "NET", "ASSETS", "UI"
+        "PLAY", "CHAR", "EDIT", "MAP", "BAG", "SCENE", "PERF", "NET", "ASSETS", "UI"
     ]
     readonly property var terrainBrushFalloffs: [
         "SMOOTH", "LINEAR", "SHARP", "GAUSSIAN"
     ]
 
-    // The 3D repeaters must receive a stable model identity.  Replacing a JavaScript
-    // array at 30 Hz makes QtQuick3D destroy and recreate every delegate,
+    // The 3D repeaters must receive a stable model identity. Replacing a JavaScript
+    // array each frame makes QtQuick3D destroy and recreate every delegate,
     // which is visible as asset flicker and can briefly expose an empty scene.
     // Each list keeps one bounded row per render object and updates it by the
     // authoritative stable key.  A cell/NPC/item entering or leaving the view
@@ -170,10 +309,6 @@ Item {
     ListModel {
         id: entityRenderModel
         objectName: "gameEngineEntityRenderModel"
-    }
-    ListModel {
-        id: particleRenderModel
-        objectName: "gameEngineParticleRenderModel"
     }
 
     readonly property var baseStatus: {
@@ -208,9 +343,26 @@ Item {
         }
         return merged
     }
+    property var retainedStatusCache: ({value: ({})})
+    function retainRenderValue(value, previous) {
+        if (value === previous) return previous
+        if (value === null || previous === null || typeof value !== 'object'
+                || typeof previous !== 'object') return value
+        if (Array.isArray(value) !== Array.isArray(previous)) return value
+        var keys=Object.keys(value),oldKeys=Object.keys(previous)
+        var unchanged=keys.length === oldKeys.length
+        for (var i=0;i<keys.length;++i) {
+            var key=keys[i]
+            value[key]=root.retainRenderValue(value[key],previous[key])
+            if (value[key] !== previous[key] || !Object.prototype.hasOwnProperty.call(previous,key)) unchanged=false
+        }
+        return unchanged ? previous : value
+    }
     readonly property var renderStatus: {
         try {
-            return JSON.parse(root.renderStatusJson || "{}")
+            var value=root.retainRenderValue(JSON.parse(root.renderStatusJson || "{}"),root.retainedStatusCache.value)
+            root.retainedStatusCache.value=value
+            return value
         } catch (err) {
             return {}
         }
@@ -238,14 +390,23 @@ Item {
     readonly property var chunks: root.status.chunks || ({})
     readonly property var world: root.status.world || ({})
     readonly property var worldStreaming: root.world.streaming || ({})
-    readonly property var combat: root.status.combat || ({})
+    readonly property var combat: {
+        var merged=Object.assign({},root.status.combat || ({}),root.renderStatus.combat_live || ({}))
+        return merged
+    }
     readonly property var controller: root.status.controller || ({})
     readonly property var inventory: root.status.inventory || ({})
     readonly property var items: root.status.items || ({})
+    readonly property var firearms: root.renderStatus.firearms || root.status.firearms || ({hands:[],shots:[]})
+    readonly property var bank: root.status.bank || ({})
     readonly property var economy: root.status.economy || ({})
     readonly property var itemInteraction: root.items.interaction_target || ({})
+    readonly property bool hasInteractableTarget:
+        Boolean(root.natureTarget.available) || Boolean(root.npcInteraction.available)
+        || Boolean(String(root.itemInteraction.instance_id || ""))
     readonly property var life: root.status.life || ({})
     readonly property var crafting: root.status.crafting || ({})
+    readonly property var loot: root.status.loot || ({})
     readonly property var progression: root.status.progression || ({})
     readonly property var quests: root.status.quests || ({})
     readonly property var factions: root.status.factions || ({})
@@ -256,6 +417,20 @@ Item {
     readonly property var contentPacks: root.status.content_packs || ({})
     readonly property var editor: root.status.editor || ({})
     readonly property var cinematic: root.status.cinematic || ({})
+    function skipOpeningCinematic() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineClientControl)
+            root.applyRaw(root.surfaceHost.gameEngineClientControl(JSON.stringify({kind:"service",op:"CinematicStop"})))
+    }
+    Rectangle {
+        visible: !!root.cinematic.active
+        anchors.top: parent.top
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.topMargin: 64
+        width: 330; height: 52; radius: 10; z: 2000
+        color: "#e6182928"; border.color: "#b89750"
+        Text { anchors.left: parent.left; anchors.leftMargin: 16; anchors.verticalCenter: parent.verticalCenter; text: "Introduktion"; color: "#eadca8" }
+        GgButton { objectName: "gameCinematicSkip"; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: "Hoppa över"; onClicked: root.skipOpeningCinematic() }
+    }
     readonly property var content: root.status.content || ({})
     // The stream contract, rather than a renderer-only constant, owns the
     // amount of world that the presentation must cover.  The render ring is
@@ -275,6 +450,85 @@ Item {
             (2 * root.streamInterestRadius + 1) * root.terrainCellSize
         )
     )
+    // Diameter of the near sea disk. The horizon ring starts at half of this.
+    readonly property real waterWaveSpanM: 560
+    readonly property real planetRadiusM: Math.max(
+        10000,
+        root.number(root.world.planet ? root.world.planet.radius_m : 1000000, 1000000)
+    )
+    readonly property var ggAtmosphere: WorldAtmosphere.palette(
+        String(root.player.biome || root.terrainSurface.biome || "FIRST_ISLAND"),
+        Math.floor(root.number(root.player.time_s, 0) / 2) * 2,
+        root.number((root.life.clock || {}).day_length_s, 120))
+    readonly property var atmosphere: {
+        var a=Object.assign({},root.ggAtmosphere)
+        var light=root.originalWorldActive && root.benillaWorld ? root.benillaWorld.lighting : null
+        if (light && light.source === "ORIGINAL_LIGHT_DBC") {
+            function c(rgb) { return Qt.rgba(rgb[0],rgb[1],rgb[2],1) }
+            a.sky=c(light.sky[0]);a.horizon=c(light.fog.color);a.cloud=c(light.cloud_colors[1])
+            a.key=c(light.diffuse);a.fill=c(light.ambient);a.keyEnergy=1;a.fillEnergy=1
+            a.night=light.sidn;a.glowStrength=light.glow;a.glowIntensity=light.glow
+            a.fogNear=light.fog.near;a.fogFar=light.fog.far
+        }
+        return a
+    }
+    property color oceanHorizonColor: root.atmosphere.horizon
+    Behavior on oceanHorizonColor { ColorAnimation { duration: 1600 } }
+    readonly property real cameraDistanceScale:
+        root.cinematic.preset === "ORBIT_WORLD_SCALE" ? 2.2 : 1.0
+    readonly property real renderCameraX:
+        root.originalWorldActive && root.importedCameraReady ? root.importedCameraSeat.x : root.number(root.player.x, 0)
+        + Math.sin(root.cameraWorldYaw * Math.PI / 180)
+            * Math.cos(root.orbitPitch * Math.PI / 180) * root.cameraDistance * root.cameraDistanceScale
+    readonly property real renderCameraY:
+        root.originalWorldActive && root.importedCameraReady ? root.importedCameraSeat.y : root.number(root.player.y, 0)
+        + root.cameraPivotOffsetM
+        - Math.sin(root.orbitPitch * Math.PI / 180)
+            * root.cameraDistance * root.cameraDistanceScale
+    readonly property real renderCameraZ:
+        root.originalWorldActive && root.importedCameraReady ? root.importedCameraSeat.z : root.number(root.player.z, 0)
+        + Math.cos(root.cameraWorldYaw * Math.PI / 180)
+            * Math.cos(root.orbitPitch * Math.PI / 180) * root.cameraDistance * root.cameraDistanceScale
+    readonly property real cameraAltitudeAboveSea: Math.max(
+        0.75,
+        root.planetRenderY(
+            root.renderCameraX,
+            root.renderCameraY,
+            root.renderCameraZ
+        ) - root.planetRenderY(
+            root.renderCameraX,
+            root.number(
+                root.terrain.water ? root.terrain.water.sea_level_m : 0,
+                0
+            ),
+            root.renderCameraZ
+        )
+    )
+    readonly property real geometricHorizonM: Math.sqrt(Math.max(
+        1,
+        2 * root.planetRadiusM * root.cameraAltitudeAboveSea
+            + root.cameraAltitudeAboveSea * root.cameraAltitudeAboveSea
+    ))
+    readonly property real distantIslandRangeM: Math.max(
+        Math.sqrt(root.renderCameraX * root.renderCameraX
+            + root.renderCameraZ * root.renderCameraZ) + 96,
+        root.number(root.planetMap.bounds_m ? root.planetMap.bounds_m.max_x : 0, 0) * Math.SQRT2
+    )
+    readonly property real worldViewDistanceM: WorldAtmosphere.farClip(
+        root.number((root.render.policy || {}).world_view_distance_m, 3200),
+        root.geometricHorizonM, root.planetRadiusM)
+    readonly property real renderFarClipM: WorldAtmosphere.coveredDistance(
+        root.worldViewDistanceM, root.planetSurfaceAssetVisible,
+        root.streamInterestRadius, root.terrainCellSize,
+        root.cameraDistance * root.cameraDistanceScale)
+    // Only lightweight light sprites use the outer 18%. Terrain fog and map
+    // residency retain the ordinary distance; distant lights allocate no AI.
+    readonly property real lightBeaconRangeM: root.renderFarClipM * 1.18
+    readonly property real cameraClipFarM: root.lightBeaconRangeM * 1.04
+    readonly property var distanceFog: WorldAtmosphere.fogRange(
+        root.renderFarClipM, root.planetSurfaceAssetVisible,
+        root.streamInterestRadius, root.terrainCellSize,
+        root.cameraDistance * root.cameraDistanceScale, root.atmosphere.fogNear)
     readonly property var assets: root.status.assets || ({})
     readonly property var characterVisual: root.assets.character_visual || ({})
     readonly property var selectedAsset: root.assets.selected || ({})
@@ -283,6 +537,23 @@ Item {
         Math.floor(root.number(root.assets.instance_budget, 0))
     )
     readonly property var terrain: root.status.terrain || ({})
+    readonly property var planetMap: root.terrain.planet || ({})
+    readonly property string nearbyWorldPlace: {
+        if (root.originalWorldActive) {
+            var imported = root.player.benilla_world || ({})
+            return String(imported.subzone || imported.zone || "")
+        }
+        var list = root.planetMap.places || []
+        var nearest = 220 * 220
+        var name = ""
+        for (var i = 0; i < list.length; ++i) {
+            var dx = root.number(root.player.x, 0) - list[i].x
+            var dz = root.number(root.player.z, 0) - list[i].z
+            var distance = dx * dx + dz * dz
+            if (distance < nearest) { nearest = distance; name = list[i].name }
+        }
+        return name
+    }
     readonly property var navigation: root.status.navigation || ({})
     readonly property var terrainCells: root.terrain.cells || []
     readonly property var terrainSurface: root.uiStatus.terrain_surface
@@ -293,6 +564,132 @@ Item {
         0,
         Math.floor(root.number(root.terrainEditor.revision, 0))
     )
+    readonly property real worldFeelScale: root.number(
+        root.world.feel ? root.world.feel.scale : 1.85,
+        1.85
+    )
+    readonly property real worldLayoutScale: root.number(
+        root.world.feel ? root.world.feel.layout_scale : root.worldFeelScale, root.worldFeelScale)
+    readonly property real worldPropScale: root.number(
+        root.world.feel ? root.world.feel.prop_scale : root.worldFeelScale, root.worldFeelScale)
+    readonly property bool largeEnvironment: root.number(
+        root.world.feel ? root.world.feel.environment_revision : 1, 1) >= 2
+    readonly property var fauna: root.renderStatus.fauna || root.status.fauna || ({})
+    readonly property var ecology: root.renderStatus.ecology || root.status.ecology || ({})
+    readonly property var nature: root.renderStatus.nature || root.status.nature || ({})
+    readonly property var natureTarget: root.nature.target || ({})
+    readonly property int natureRevision: Math.floor(root.number(root.nature.revision, 0))
+    readonly property var naturePlants: ["sea_bell","sun_daisy","moon_orchid","red_poppy","blue_lupin","berry_bush","sage","broad_fern","aloe","cattail","amanita","chanterelle"]
+    readonly property var natureAnimals: ["rabbit","squirrel","hedgehog","frog","lizard","crab","boar","fox","goat","sheep","sunfin","reef_perch","needlefish","lanternfish","puffer","turtle","octopus","gull","songbird","parrot","bee","butterfly"]
+    property var natureBatchKeys: []
+    property var floraBatchKeys: []
+    function retainNearbyBatchKeys(previous, groups, limit) {
+        var active = Object.keys(groups || ({})).filter(function(key) { return Number(groups[key]) > 0 })
+        var kept = previous.filter(function(key) { return active.indexOf(key) >= 0 })
+        var idle = previous.filter(function(key) { return active.indexOf(key) < 0 })
+        kept = kept.concat(idle.slice(0, Math.max(0, limit - active.length)))
+        for (var i=0; i<active.length; ++i)
+            if (kept.indexOf(active[i]) < 0) kept.push(active[i])
+        // Retain ordering and object identity on settled/moving frames. New
+        // silhouettes are admitted only when their physical instances arrive.
+        var ordered = previous.filter(function(key) { return kept.indexOf(key) >= 0 })
+        for (var j=0; j<kept.length; ++j)
+            if (ordered.indexOf(kept[j]) < 0) ordered.push(kept[j])
+        return ordered.join("|") === previous.join("|") ? previous : ordered
+    }
+    onNatureRevisionChanged: natureBatchKeys = retainNearbyBatchKeys(natureBatchKeys, nature.groups, 192)
+    onEcologyRevisionChanged: floraBatchKeys = retainNearbyBatchKeys(floraBatchKeys, ecology.groups, 320)
+    readonly property var combatTarget: (root.renderStatus.targeting || root.status.targeting || ({})).selected || ({})
+    readonly property int ecologyRevision: Math.floor(root.number(root.ecology.revision, 0))
+    readonly property var floraSpecies: [
+        "oak", "oak_arch", "pine", "jungle", "palm", "mangrove",
+        "scrub", "fern", "grass", "flowers", "deadwood"
+    ].concat(root.naturePlants)
+    readonly property real sandoverIslandHalfExtent: 27.0 * root.worldLayoutScale
+    readonly property var sandoverBakedAssetIds: [
+        "gg-sandover-stilt-hut",
+        "gg-sandover-roundhouse",
+        "gg-sandover-longhouse",
+        "gg-sandover-market-hut",
+        "gg-sandover-palm",
+        "gg-sandover-mangrove",
+        "gg-sandover-windmill",
+        "gg-sandover-cove-pier",
+        "gg-sandover-waterwheel",
+        "gg-sandover-tide-beacon"
+    ]
+    readonly property bool planetSurfaceAssetReady:
+        planetSurfaceLoader.status === RuntimeLoader.Success
+    readonly property bool planetSurfaceAssetVisible:
+        root.planetSurfaceAssetReady
+        && !root.dosFallbackActive
+        && root.paneLive
+        && root.terrainGeometryRevision === 0
+    readonly property bool sandoverIslandTerrainReady:
+        sandoverIslandTerrainLoader.status === RuntimeLoader.Success
+    readonly property bool sandoverIslandEnvironmentReady:
+        sandoverIslandEnvironmentLoader.status === RuntimeLoader.Success
+    readonly property bool sandoverTerrainUsesNativeCells: {
+        var authoring = root.terrain.authoring || ({})
+        var cells = Array.isArray(authoring.cells) ? authoring.cells : []
+        for (var index = 0; index < cells.length; ++index) {
+            var cell = cells[index] || ({})
+            var minX = root.number(cell.x, 10000) * root.terrainCellSize
+            var minZ = root.number(cell.z, 10000) * root.terrainCellSize
+            if (root.sandoverBoundsOverlapIsland(
+                minX,
+                minZ,
+                minX + root.terrainCellSize,
+                minZ + root.terrainCellSize
+            ))
+                return true
+        }
+        var brushes = Array.isArray(authoring.brushes) ? authoring.brushes : []
+        for (var brushIndex = 0; brushIndex < brushes.length; ++brushIndex) {
+            var brush = brushes[brushIndex] || ({})
+            var brushX = root.number(brush.center_x_m, 10000)
+            var brushZ = root.number(brush.center_z_m, 10000)
+            var radius = Math.max(0, root.number(brush.radius_m, 0))
+            if (root.sandoverBoundsOverlapIsland(
+                brushX - radius,
+                brushZ - radius,
+                brushX + radius,
+                brushZ + radius
+            ))
+                return true
+        }
+        return false
+    }
+    readonly property bool sandoverIslandTerrainVisible:
+        root.sandoverIslandTerrainReady
+        && !root.planetSurfaceAssetVisible
+        && !root.sandoverTerrainUsesNativeCells
+        && !root.dosFallbackActive
+        && root.paneLive
+    function sandoverBoundsOverlapIsland(minX, minZ, maxX, maxZ) {
+        var extent = root.sandoverIslandHalfExtent
+        return maxX > -extent && minX < extent
+            && maxZ > -extent && minZ < extent
+    }
+    function sandoverTerrainCellCoveredByBlender(row) {
+        if (!root.sandoverIslandTerrainVisible || !row)
+            return false
+        var bounds = row.bounds_m || ({})
+        return root.sandoverBoundsOverlapIsland(
+            root.number(bounds.min_x, 10000),
+            root.number(bounds.min_z, 10000),
+            root.number(bounds.max_x, -10000),
+            root.number(bounds.max_z, -10000)
+        )
+    }
+    function sandoverEntityBakedByEnvironment(assetId, kind, x, z) {
+        if (!root.sandoverIslandEnvironmentReady
+            || Math.abs(root.number(x, 10000)) > root.sandoverIslandHalfExtent
+            || Math.abs(root.number(z, 10000)) > root.sandoverIslandHalfExtent)
+            return false
+        return root.sandoverBakedAssetIds.indexOf(String(assetId || "")) >= 0
+            || String(kind || "").toUpperCase() === "ROCK"
+    }
     readonly property var npc: root.status.npc || ({})
     readonly property var npcInteraction: root.npc.interaction || ({})
     readonly property var people: root.status.people || ({})
@@ -307,8 +704,9 @@ Item {
     readonly property var capabilities: root.status.capabilities || []
     readonly property var keyBindings: root.status.keybindings || ({})
     readonly property var addonState: root.status.addons || ({})
-    readonly property var renderEntities: root.render.entities || []
-    readonly property var renderParticles: root.render.particles || []
+    property var retainedEntityRows: ({})
+    property var retainedRenderRows: []
+    readonly property var renderEntities: root.retainedRenderRows
 
     function runtimeLoaderHasVisualContent(loader) {
         // RuntimeLoader.Success means decoding completed, but the imported
@@ -349,6 +747,23 @@ Item {
             return "Sprint"
         if (state === "AIR")
             return "Air"
+        if (state === "DOUBLE_JUMP")
+            return "DoubleJump"
+        if (state === "GRAPPLE")
+            return "Grapple"
+        if (state === "SWIM")
+            return "Swim"
+        if (state === "FLY")
+            return "Fly"
+        if (state === "HOVERBOARD")
+            return "Board"
+        if (state === "HOVERBOARD_AIR")
+            return "BoardAir"
+        if (state === "BOAT")
+            return "Skiff"
+        if (state === "SIT") return "Sit"
+        if (state === "SLEEP") return "Sleep"
+        if (state === "KNEEL") return "Kneel"
         return "Idle"
     }
     readonly property bool stress: root.renderStatus.stress !== undefined
@@ -365,7 +780,7 @@ Item {
         1,
         Math.floor(root.number(
             root.render.update_hz,
-            root.stress ? 20 : 30
+            60
         ))
     )
     readonly property int renderUpdateIntervalMs: Math.max(
@@ -377,8 +792,8 @@ Item {
     // at 2 Hz (1 Hz under stress), leaving the fixed-step/render paths alone.
     readonly property int statusUpdateIntervalMs: root.stress ? 750 : 500
     readonly property string legend: root.stress
-        ? "LOCAL · STRESS · RENDER 20 HZ · UI 1 HZ"
-        : "LOCAL · FIXED 60 HZ · RENDER 30 HZ · UI 2 HZ"
+        ? "LOCAL · FIXED 60 HZ · RENDER 60 HZ"
+        : "LOCAL · FIXED 60 HZ · RENDER 60 HZ"
 
     function installFullStatus(raw, immediateRender) {
         if (raw === undefined || raw === null)
@@ -398,8 +813,258 @@ Item {
         }
     }
 
+    function applyGameplay(raw) {
+        var response
+        try {response=JSON.parse(String(raw || '{}'))} catch(e) {return false}
+        if (response.schema==='gg.game-engine.render-snapshot.v1') root.installRenderStatus(raw)
+        else if (!response.error) root.applyRaw(raw)
+        if (response.error) {
+            var codes={FIREARM_NO_AMMO:"Rätt ammunition saknas i väskan.",
+                FIREARM_RELOADING:"Vapnet laddas om.",FIREARM_COOLDOWN:"Vapnet är inte redo än.",
+                FIREARM_LINE_OF_SIGHT_BLOCKED:"Målet är skymt.",FIREARM_TARGET_OUT_OF_RANGE:"Målet är för långt bort."}
+            root.itemNotice=codes[response.error] || String(response.error);return false
+        }
+        return true
+    }
+    function useActionSlot(index) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineActionUse)
+            root.applyGameplay(root.surfaceHost.gameEngineActionUse(index))
+    }
+    function editActionBar(edit) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineActionBarEdit)
+            root.applyGameplay(root.surfaceHost.gameEngineActionBarEdit(JSON.stringify(edit)))
+    }
+    function moveActionDrag(kind,ref,source,x,y) {
+        root.actionDrag={kind:kind,ref:ref,source:source};root.actionDragX=x;root.actionDragY=y
+    }
+    function cancelActionDrag() {root.actionDrag=({})}
+    function finishActionDrag() {
+        if (!root.actionBarWidget || !root.actionDrag.kind) {root.cancelActionDrag();return false}
+        var index=root.actionBarWidget.dropIndex(root.actionDragX,root.actionDragY)
+        if (index<0) {root.cancelActionDrag();return false}
+        var edit=root.actionDrag.source>=0 ? {verb:'MOVE',source:root.actionDrag.source,index:index}
+            : {index:index,kind:root.actionDrag.kind,ref:root.actionDrag.ref}
+        root.editActionBar(edit);root.cancelActionDrag();return true
+    }
+    function inventoryActionDrag(row,x,y,panel,finish) {
+        var point=root.mapFromItem(panel,x,y)
+        if (row && ['INVENTORY','EQUIPPED'].indexOf(String(row.location))>=0)
+            root.moveActionDrag('ITEM',String(row.definition_id),-1,point.x,point.y)
+        if (!finish) return false
+        return root.finishActionDrag()
+    }
+    function assetEdit(request) {
+        if (!root.surfaceHost || !root.surfaceHost.gameEngineAssetEditor) {
+            root.assetEditorError = "Starta om GG AI Desktop för att läsa in assetredigeraren."
+            return ({ok:false})
+        }
+        try {
+            var response=JSON.parse(root.surfaceHost.gameEngineAssetEditor(root,null,JSON.stringify(request)))
+            root.assetEditorError=response.ok ? "" : String(response.error || "Redigeringen misslyckades.")
+            if (!response.ok || response.preview) return response
+            var nextState=Object.assign({},response)
+            delete nextState.snapshot
+            root.assetEditorState=Object.assign({},root.assetEditorState,nextState)
+            root.assetEditorRevision=Number(response.revision || 0)
+            if (response.snapshot) root.installFullStatus(JSON.stringify(response.snapshot),true)
+            return response
+        } catch(error) {
+            root.assetEditorError=String(error)
+            return ({ok:false})
+        }
+    }
+    function assetIdentity(entityId) {
+        var rows=root.assetEditorState.scene || []
+        for(var i=0;i<rows.length;i++) if(rows[i].id===entityId) return String(rows[i].identity)
+        return String(entityId || "")
+    }
+    function applyAssetMaterial(loader,entityId) {
+        if (!loader || !root.surfaceHost || !root.surfaceHost.gameEngineAssetEditor) return
+        if(loader.status!==RuntimeLoader.Success)return
+        var raw=root.surfaceHost.gameEngineAssetEditor(root,loader,JSON.stringify({op:"APPLY_MATERIAL",identity:root.assetIdentity(entityId)}))
+        try {
+            var result=JSON.parse(raw)
+            if(!result.ok){root.assetEditorError=result.error;return}
+            var settings=result.materials || [], ordinal=0,seen=[]
+            var changed=settings.some(function(row){return Object.keys(row.values || {}).length>0})
+            var cached=root.assetMaterialRecords.some(function(row){return row.loader===loader})
+            if(!changed && !cached)return
+            function visit(node) {
+                var materials=node.materials || []
+                for(var i=0;i<materials.length;i++) {
+                    var material=materials[i];if(seen.indexOf(material)>=0)continue;seen.push(material)
+                    var index=ordinal++
+                    var values=({})
+                    var matched=settings.filter(function(row){return row.name===String(material.objectName || "")})[0]
+                    if(!matched)matched=settings.filter(function(row){return row.ordinal===index})[0]
+                    if(matched)values=matched.values || ({})
+                    var record=root.assetMaterialRecords.filter(function(row){return row.material===material && row.loader===loader})[0]
+                    if(!record) {
+                        record={loader:loader,material:material,color:material.baseColor,roughness:material.roughness,metalness:material.metalness,map:material.baseColorMap,texture:null}
+                        if(record.map)record.uv={positionU:record.map.positionU,positionV:record.map.positionV,scaleU:record.map.scaleU,scaleV:record.map.scaleV}
+                        root.assetMaterialRecords=root.assetMaterialRecords.concat([record])
+                    }
+                    material.baseColor=values.color!==undefined ? values.color : record.color
+                    material.roughness=values.roughness!==undefined ? values.roughness : record.roughness
+                    material.metalness=values.metalness!==undefined ? values.metalness : record.metalness
+                    material.baseColorMap=record.map
+                    if(values.image) {
+                        if(!record.texture) {
+                            record.texture=Qt.createQmlObject('import QtQuick3D; Texture {}',material,"assetPaintTexture")
+                            if(record.map){record.texture.flipV=record.map.flipV;record.texture.indexUV=record.map.indexUV
+                                record.texture.tilingModeHorizontal=record.map.tilingModeHorizontal;record.texture.tilingModeVertical=record.map.tilingModeVertical}
+                        }
+                        record.texture.source=values.image;material.baseColorMap=record.texture
+                    }
+                    var texture=material.baseColorMap
+                    if(texture){var props=["positionU","positionV","scaleU","scaleV"]
+                        for(var p=0;p<props.length;p++){var key=props[p];texture[key]=values[key]!==undefined ? values[key] : record.uv ? record.uv[key] : key.indexOf("scale")===0 ? 1 : 0}}
+                }
+                var children=node.children || [];for(var j=0;j<children.length;j++){
+                    if(children[j].materials!==undefined || children[j].position!==undefined)visit(children[j])
+                }
+            }
+            visit(loader)
+        } catch(error) {root.assetEditorError=String(error)}
+    }
+    function forgetAssetMaterials(loader) {
+        root.assetMaterialRecords=root.assetMaterialRecords.filter(function(row){return row.loader!==loader})
+    }
+    function assetPick(x,y) {
+        var hit=view3d.pick(x,y),node=hit.objectHit
+        if (!node) return ""
+        if(node.treeKey!==undefined) {
+            var kind=String(node.objectName).indexOf("WorldTree")>=0 ? "TREE" : String(node.objectName).indexOf("GroundCover")>=0 ? "COVER" : "PLACE"
+            var picked=root.assetEdit({op:"PICK_BATCH",batchKind:kind,batchKey:String(node.treeKey),index:Number(hit.instanceIndex)})
+            return picked && picked.selected ? String(picked.selected.identity || "") : ""
+        }
+        if (node.batchKey!==undefined && root.surfaceHost.gameEngineInstanceIdentity)
+            return root.surfaceHost.gameEngineInstanceIdentity(String(node.batchKey),Number(hit.instanceIndex),Boolean(node.isNatureBatch))
+        for(var i=0;node && i<40;i++,node=node.parent) {
+            if (node.worldEntityId!==undefined) return root.assetIdentity(String(node.worldEntityId))
+            if (String(node.objectName || "").indexOf("ggPick:")===0 && String(node.objectName).length>7)
+                return String(node.objectName).substring(7)
+        }
+        return ""
+    }
+    onAssetEditorModeChanged: {
+        if (root.assetEditorMode) {
+            root.pauseRuntime()
+            root.inspectorCollapsed=false
+            root.assetEdit({op:"OPEN"})
+        } else {root.assetDrag=({})}
+    }
+    function worldPick(x,y) {
+        if (!root.surfaceHost || !root.surfaceHost.gameEngineWorldHover) return ({})
+        var hit=view3d.pick(x,y),node=hit.objectHit,identity=''
+        if (!node) return ({})
+        if (node.batchKey!==undefined && root.surfaceHost.gameEngineInstanceIdentity)
+            identity=root.surfaceHost.gameEngineInstanceIdentity(String(node.batchKey),Number(hit.instanceIndex),Boolean(node.isNatureBatch))
+        else if (String(node.objectName || '').indexOf('ggPick:')===0) identity=String(node.objectName).substring(7)
+        else {
+            for (var i=0;node && i<32;i++,node=node.parent) {
+                if (node.worldEntityId!==undefined && root.surfaceHost.gameEngineEntityIdentity) {
+                    identity=root.surfaceHost.gameEngineEntityIdentity(String(node.worldEntityId));break
+                }
+            }
+        }
+        if (identity && root.surfaceHost.gameEngineEntityIdentity && ['e-','item-'].some(function(prefix) {return identity.indexOf(prefix)===0}))
+            identity=root.surfaceHost.gameEngineEntityIdentity(identity)
+        if (!identity) return ({})
+        try {return JSON.parse(root.surfaceHost.gameEngineWorldHover(identity))} catch(e) {return ({})}
+    }
+    function worldPointToScreen(x,y,z) {
+        return view3d.mapFrom3DScene(Qt.vector3d(x,root.planetRenderY(x,y,z),z))
+    }
+    function nameplateProjection(x,y,z) {
+        var point=root.worldPointToScreen(x,y,z)
+        if(!isFinite(point.x) || !isFinite(point.y) || point.z<=0 || point.x<0 || point.y<0 || point.x>view3d.width || point.y>view3d.height)
+            return ({visible:false,reason:"frustum",point:[point.x,point.y,point.z],viewport:[view3d.width,view3d.height],eye:[camera.scenePosition.x,camera.scenePosition.y,camera.scenePosition.z],angles:[camera.eulerRotation.x,camera.eulerRotation.y,camera.eulerRotation.z],anchor:[x,root.planetRenderY(x,y,z),z]})
+        var anchor=Qt.vector3d(x,root.planetRenderY(x,y,z),z)
+        var eye=camera.scenePosition
+        var dx=anchor.x-eye.x,dy=anchor.y-eye.y,dz=anchor.z-eye.z
+        var distance=Math.sqrt(dx*dx+dy*dy+dz*dz)
+        if(distance<=0.01) return ({visible:false,reason:"camera"})
+        var hit=view3d.rayPick(eye,Qt.vector3d(dx/distance,dy/distance,dz/distance))
+        if(hit.objectHit && hit.distance<distance-0.35) return ({visible:false,reason:"occluded",hit:hit.objectHit.objectName,distance:distance,hitDistance:hit.distance})
+        var local=root.mapFromItem(view3d,point.x,point.y)
+        return ({visible:true,x:local.x,y:local.y})
+    }
+    function setRenderCountersEnabled(enabled) {
+        view3d.renderStats.extendedDataCollectionEnabled=enabled
+    }
+    function setWorldRenderMode(underlay) {
+        view3d.renderMode=underlay ? View3D.Underlay : View3D.Offscreen
+    }
+    function updateWorldHover(x,y,force) {
+        var point=cameraMouse.mapToItem(root,x,y)
+        root.worldMouseX=point.x;root.worldMouseY=point.y
+        var now=Date.now()
+        if (!force && now-root.lastHoverAt<16) return
+        root.lastHoverAt=now;root.worldHoverInfo=root.worldPick(x,y)
+    }
+    function selectWorld(identity) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineWorldSelect)
+            root.applyGameplay(root.surfaceHost.gameEngineWorldSelect(String(identity || '')))
+    }
+    function contextWorld(identity) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineWorldContext)
+            root.applyGameplay(root.surfaceHost.gameEngineWorldContext(String(identity || '')))
+    }
+
     function applyRaw(raw) {
         root.installFullStatus(raw, true)
+        try {
+            var response = JSON.parse(String(raw || "{}"))
+            var code = String(response.error || "")
+            var errors = {
+                "ITEM_INVENTORY_FULL": "Väskan är full.",
+                "ACCOUNT_STASH_FULL": "Kistan är full.",
+                "ACCOUNT_STASH_OUT_OF_REACH": "Gå närmare den öppnade kistan.",
+                "ACCOUNT_STASH_INVENTORY_ITEM_REQUIRED": "Välj ett föremål i väskan.",
+                "ACCOUNT_STASH_ITEM_MISSING": "Föremålet finns inte längre i kistan.",
+                "ITEM_CONTAINER_TARGET_REQUIRED": "Ingen kista inom räckhåll.",
+                "FIREARM_NO_AMMO": "Rätt ammunition saknas i väskan.",
+                "FIREARM_MAGAZINE_FULL": "Magasinet är fullt.",
+                "FIREARM_RELOADING": "Vapnet laddas om.",
+                "FIREARM_COOLDOWN": "Vapnet är inte redo att skjuta än.",
+                "FIREARM_LINE_OF_SIGHT_BLOCKED": "Målet är skymt.",
+                "FIREARM_TARGET_OUT_OF_RANGE": "Målet är för långt bort.",
+                "AMMO_WORKBENCH_OUT_OF_REACH": "Gå närmare arbetsbänken för att tillverka ammunition."
+            }
+            if (code)
+                root.itemNotice = errors[code] || WorldFx.scrollError(code)
+            else {
+                if (response.gear_craft_result && response.gear_craft_result.action === "CRAFT_ENCHANT_SCROLL")
+                    root.itemNotice = "Scroll skapad: " + String(response.gear_craft_result.name || "")
+                else if (response.gear_result && response.gear_result.action === "ENCHANT")
+                    root.itemNotice = "Enchant applicerad: " + String(response.gear_result.enchantment.name || "")
+                var result = response.item_result || ({})
+                var labels = {
+                    "OPEN": "Kistan är öppen.",
+                    "LOOT": "Kistan plundrad.",
+                    "BANK_DEPOSIT": "Föremålet ligger i den gemensamma kistan.",
+                    "BANK_WITHDRAW": "Föremålet ligger i väskan.",
+                    "UNEQUIP": "Utrustningen ligger i väskan.",
+                    "EQUIP": "Föremålet är utrustat.",
+                    "PICKUP": "Föremålet ligger i väskan.",
+                    "DROP": "Föremålet ligger på marken."
+                }
+                if (result.action && labels[String(result.action)])
+                    root.itemNotice = labels[String(result.action)]
+            }
+        } catch (err) {
+            // installFullStatus owns malformed response reporting.
+        }
+    }
+
+    function applyItemAction(raw) {
+        root.applyRaw(raw)
+        try {
+            return !Boolean(JSON.parse(String(raw || "{}")).error)
+        } catch (err) {
+            return false
+        }
     }
 
     function renderSignature(value, roleName) {
@@ -418,9 +1083,6 @@ Item {
                 authoring.water_mode
             ].join("|")
         }
-        if (roleName === "particleRow") {
-            return [value.x, value.y, value.z, value.life, value.color].join("|")
-        }
         if (roleName === "entityRow") {
             // Static bindings (assets, equipment and entity kind) are kept in
             // the delegate's entityRow role.  Positions and poses travel in
@@ -436,7 +1098,9 @@ Item {
                  ++equipmentIndex) {
                 var equipped = staticEquipment[equipmentIndex] || ({})
                 equipmentKeys += String(equipped.instance_id || "")
-                    + ":" + String(equipped.equipped_slot || "") + ";"
+                    + ":" + String(equipped.equipped_slot || "")
+                    + ":" + String(equipped.visual_stowed) + ":" + String(equipped.visual_visible)
+                    + ":" + JSON.stringify(equipped.attachment || {}) + ";"
             }
             return [
                 value.id,
@@ -501,16 +1165,28 @@ Item {
         var asset = value.asset || ({})
         var item = value.item || ({})
         var visual = item.visual || ({})
+        if (root.surfaceHost && root.surfaceHost.gameEngineRegisterEntityNode) {
+            // Native scene handles carry position/rotation every frame. Only
+            // locomotion/visibility changes rebind imported rig metadata.
+            return [value.id,value.vehicle,value.hidden,value.motion_state,
+                    animation.state,animation.action_serial,asset.clip,asset.runtime_clip,
+                    Math.round(root.number(animation.cadence_hz,0)*8)].join('|')
+        }
         return [
             value.id,
             value.x,
             value.y,
             value.z,
             value.yaw,
+            value.pitch,
+            value.roll,
             value.speed,
+            value.vehicle,
+            value.hidden,
             value.lod,
             value.motion_state,
             animation.state,
+            animation.action_serial,
             animation.phase,
             animation.bob_m,
             animation.lean_deg,
@@ -533,7 +1209,11 @@ Item {
             y: value.y,
             z: value.z,
             yaw: value.yaw,
+            pitch: value.pitch,
+            roll: value.roll,
             speed: value.speed,
+            vehicle: value.vehicle,
+            hidden: value.hidden,
             lod: value.lod,
             motion_state: value.motion_state,
             animation: value.animation || ({}),
@@ -549,7 +1229,7 @@ Item {
         root.renderModelIndex[roleName] = map
     }
 
-    function syncRenderModel(model, rows, roleName) {
+    function syncRenderModel(model, rows, roleName, residentIds) {
         if (!Array.isArray(rows))
             return
         var indexByKey = root.renderModelIndex[roleName]
@@ -564,6 +1244,10 @@ Item {
             indexByKey = root.renderModelIndex[roleName]
         }
         var nextKeys = ({})
+        if (Array.isArray(residentIds)) {
+            for (var residentIndex = 0; residentIndex < residentIds.length; ++residentIndex)
+                nextKeys[roleName + '::' + residentIds[residentIndex]] = true
+        }
         var structural = false
         for (var rowIndex = 0; rowIndex < rows.length; ++rowIndex) {
             var value = rows[rowIndex]
@@ -583,9 +1267,12 @@ Item {
                     "renderKey": stableKey,
                     "renderSignature": signature
                 }
-                row[roleName] = value
+                // Nested maps become nested ListModels on append while
+                // setProperty receives QVariantMap. Typed JSON roles retain
+                // stable delegates without recursive QObject reconstruction.
+                row[roleName + "Json"] = JSON.stringify(value)
                 if (roleName === "entityRow") {
-                    row.entityDynamic = root.renderDynamicValue(value)
+                    row.entityDynamicJson = JSON.stringify(root.renderDynamicValue(value))
                     row.renderDynamicSignature = dynamicSignature
                 }
                 model.append(row)
@@ -593,15 +1280,15 @@ Item {
             } else {
                 var current = model.get(existingIndex)
                 if (String(current.renderSignature) !== signature) {
-                    model.setProperty(existingIndex, roleName, value)
+                    model.setProperty(existingIndex, roleName + "Json", JSON.stringify(value))
                     model.setProperty(existingIndex, "renderSignature", signature)
                 }
                 if (roleName === "entityRow"
                     && String(current.renderDynamicSignature) !== dynamicSignature) {
                     model.setProperty(
                         existingIndex,
-                        "entityDynamic",
-                        root.renderDynamicValue(value)
+                        "entityDynamicJson",
+                        JSON.stringify(root.renderDynamicValue(value))
                     )
                     model.setProperty(
                         existingIndex,
@@ -622,7 +1309,7 @@ Item {
     }
 
     function denseTerrainCells(cells) {
-        // Play draws the nearby heightfield only.  ORBIT is one sea/horizon
+        // Play draws the nearby heightfield only. ORBIT is one sea/horizon
         // plane, not a QQuick3D node per 16 m cell out to 336 m.
         if (!Array.isArray(cells))
             return []
@@ -657,7 +1344,7 @@ Item {
     function syncRenderModels(raw) {
         // A QML change handler can run before dependent readonly properties
         // have re-evaluated. Parse the changed value directly so PLAY never
-        // observes a one-frame empty render list. The 30 Hz path passes the
+        // observes a one-frame empty render list. The 60 Hz path passes the
         // already-parsed renderStatus object so PLAY does not JSON.parse twice.
         var snapshot = root.status
         if (raw !== undefined && raw !== null && typeof raw === "object")
@@ -669,6 +1356,7 @@ Item {
                 snapshot = {}
             }
         }
+        root.syncClientCamera(snapshot)
         var renderView = snapshot.render || ({})
         var terrainView = snapshot.terrain || ({})
         // Compact render snapshots intentionally omit terrain cells; the full
@@ -681,16 +1369,120 @@ Item {
                 "terrainRow"
             )
         }
-        root.syncRenderModel(
-            entityRenderModel,
-            Array.isArray(renderView.entities) ? renderView.entities : [],
-            "entityRow"
+        var delta = Array.isArray(renderView.entities_delta)
+        var entityRows = delta ? renderView.entities_delta
+            : (Array.isArray(renderView.entities) ? renderView.entities : [])
+        var residentIds = delta ? renderView.entity_ids : undefined
+        root.syncRenderModel(entityRenderModel, entityRows, 'entityRow', residentIds)
+        if (entityRows.length || !delta || root.retainedRenderRows.length !== residentIds.length) {
+            var retained = delta ? root.retainedEntityRows : ({})
+            for (var entityIndex=0; entityIndex<entityRows.length; ++entityIndex)
+                retained[entityRows[entityIndex].id] = entityRows[entityIndex]
+            var retainedRows=[]
+            if (delta) {
+                for (var idIndex=0; idIndex<residentIds.length; ++idIndex)
+                    if (retained[residentIds[idIndex]]) retainedRows.push(retained[residentIds[idIndex]])
+            } else retainedRows=entityRows
+            root.retainedEntityRows=({})
+            for (var retainIndex=0; retainIndex<retainedRows.length; ++retainIndex)
+                root.retainedEntityRows[retainedRows[retainIndex].id]=retainedRows[retainIndex]
+            root.retainedRenderRows=retainedRows
+        }
+        root.lastVisualSnapshot=snapshot
+        root.lastVisualRenderView=renderView
+        root.refreshVisualEffects()
+    }
+
+    function refreshVisualEffects() {
+        var snapshot=root.lastVisualSnapshot,renderView=root.lastVisualRenderView
+        if (!snapshot.player) return
+        var particleRows = Array.isArray(renderView.particles)
+            ? renderView.particles.slice() : []
+        var visualFx = WorldFx.rows(
+            snapshot.player || ({}),
+            root.items.equipment || [],
+            root.fxPreviewStyle,
+            root.worldFeelScale,
+            snapshot.fauna || root.fauna,
+            root.equipmentFxPoints()
         )
-        root.syncRenderModel(
-            particleRenderModel,
-            Array.isArray(renderView.particles) ? renderView.particles : [],
-            "particleRow"
-        )
+        var fxNow=Date.now()
+        if (root.surfaceHost && fxNow-root.lastWorldFxAnchorUpdate >= 250) {
+            root.lastWorldFxAnchorUpdate=fxNow
+            if (typeof root.surfaceHost.gameEngineWorldFxAnchors === "function")
+                root.worldFxAnchors = root.surfaceHost.gameEngineWorldFxAnchors(
+                    root.number(snapshot.player.x, 0), root.number(snapshot.player.z, 0))
+            if (typeof root.surfaceHost.gameEngineEnvironmentFxAnchors === "function")
+                root.worldAmbientAnchors = root.surfaceHost.gameEngineEnvironmentFxAnchors(
+                    root.number(snapshot.player.x, 0), root.number(snapshot.player.z, 0))
+            if (typeof root.surfaceHost.gameEngineLightBeacons === "function")
+                root.worldLightBeacons=root.surfaceHost.gameEngineLightBeacons(root.lightBeaconRangeM)
+        }
+        WorldFx.emitLamps(visualFx, root.worldFxAnchors,
+            root.number(snapshot.player.time_s, 0), root.atmosphere.night)
+        WorldFx.emitGunfire(visualFx,(snapshot.firearms || root.firearms).shots || [],
+            root.number(snapshot.player.time_s,0),root.equipmentFxPoints())
+        WorldFx.emitEnvironment(visualFx, root.worldAmbientAnchors,
+            root.number(snapshot.player.time_s, 0), root.atmosphere)
+        var particleLimit=Math.max(0,root.number(
+            (root.render.policy || {}).max_visible_particles,256))
+        particleRows=particleRows.slice(0,particleLimit)
+        for (var fxIndex = 0; fxIndex < visualFx.length
+            && particleRows.length < particleLimit; ++fxIndex)
+            particleRows.push(visualFx[fxIndex])
+        var lightCamera={x:root.renderCameraX,y:root.renderCameraY,z:root.renderCameraZ}
+        var sources=WorldFx.lightSources(particleRows,root.worldFxAnchors,
+            lightCamera,root.atmosphere.night)
+        for (var lightIndex=0;lightIndex<sources.length;++lightIndex) {
+            var light=sources[lightIndex],lightItem=root.equipmentFxNodes[light.attachment_slot]
+            if (!lightItem) continue
+            var lightLocal=lightItem.fxMesh().mapPositionFromScene(Qt.vector3d(light.x,
+                root.planetRenderY(light.x,light.y,light.z),light.z))
+            light.attachment_point=[lightLocal.x,lightLocal.y,lightLocal.z]
+        }
+        root.localLightSources=WorldFx.nearbyLights(sources,
+            root.number((root.render.policy || {}).max_dynamic_lights,6))
+        var beacons=[]
+        WorldFx.emitLightBeacons(beacons,sources,root.worldLightBeacons,lightCamera,
+            root.lightBeaconRangeM,root.atmosphere.night,
+            root.number((root.render.policy || {}).max_light_beacons,24))
+        // Dense nearby sparks cannot consume every distant signal slot.
+        particleRows=particleRows.slice(0,Math.max(0,particleLimit-beacons.length))
+        for (var b=0;b<beacons.length && particleRows.length<particleLimit;++b)
+            particleRows.push(beacons[b])
+        var alphaRows = [], additiveRows = []
+        for (var particleIndex = 0; particleIndex < particleRows.length; ++particleIndex) {
+            var fx = Object.assign({}, particleRows[particleIndex])
+            fx.y = root.planetRenderY(fx.x, fx.y, fx.z)
+            if (fx.ex !== undefined) fx.ey = root.planetRenderY(fx.ex, fx.ey, fx.ez)
+            if (fx.kind === "ENCHANT") {
+                var yaw = root.cameraWorldYaw * Math.PI / 180
+                var pitch = root.orbitPitch * Math.PI / 180
+                fx.rx=Math.cos(yaw); fx.ry=0; fx.rz=-Math.sin(yaw)
+                fx.ux=Math.sin(yaw)*Math.sin(pitch); fx.uy=Math.cos(pitch)
+                fx.uz=Math.cos(yaw)*Math.sin(pitch)
+                root.attachEnchantmentParticle(fx)
+            }
+            if (WorldFx.isAdditive(fx)) additiveRows.push(fx)
+            else alphaRows.push(fx)
+        }
+        root.particleBatchCount = alphaRows.length
+        root.additiveParticleCount = additiveRows.length
+        if (root.surfaceHost) {
+            if (!root.particleBatchGeometry
+                && typeof root.surfaceHost.gameEngineParticleGeometry
+                    === "function") {
+                root.particleBatchGeometry =
+                    root.surfaceHost.gameEngineParticleGeometry()
+            }
+            if (typeof root.surfaceHost.gameEngineParticleUpdate === "function")
+                root.surfaceHost.gameEngineParticleUpdate(alphaRows)
+            if (typeof root.surfaceHost.gameEngineAdditiveParticleGeometry === "function") {
+                if (!root.additiveParticleGeometry)
+                    root.additiveParticleGeometry = root.surfaceHost.gameEngineAdditiveParticleGeometry()
+                root.surfaceHost.gameEngineAdditiveParticleUpdate(additiveRows)
+            }
+        }
     }
 
     onStatusJsonChanged: {
@@ -701,8 +1493,60 @@ Item {
             root.syncRenderModels(root.statusJson)
             root.renderStreamPrimed = true
         }
-        if (dosFallbackCanvas)
+        if (root.dosFallbackActive && dosFallbackCanvas)
             dosFallbackCanvas.requestPaint()
+    }
+
+    function equipmentFxPoints() {
+        var points = ({})
+        var playerY = root.number(root.player.y,0)
+        var curve = playerY-root.planetRenderY(root.number(root.player.x,0),playerY,root.number(root.player.z,0))
+        for (var slot in root.equipmentFxNodes) {
+            var item = root.equipmentFxNodes[slot]
+            if (!item) continue
+            var frame = item.enchantFrame()
+            function uncurve(p) { return {x:p.x,y:p.y+curve,z:p.z} }
+            // Flail paths share endpoint objects. Copy them before converting
+            // coordinates, otherwise their curvature correction runs twice.
+            frame.base=uncurve(frame.base)
+            frame.tip=uncurve(frame.tip)
+            if (frame.path) frame.path=frame.path.map(uncurve)
+            if (frame.muzzles) {
+                for (var m=0;m<frame.muzzles.length;++m) frame.muzzles[m].y+=curve
+            }
+            if (frame.magic && frame.magic.point) frame.magic.point.y+=curve
+            points[slot] = frame
+        }
+        return points
+    }
+
+    function attachEnchantmentParticle(fx) {
+        var item=root.equipmentFxNodes[fx.attachment_slot]
+        if (!item || fx.attachment_index===undefined) return
+        var mesh=item.fxMesh(),world=Qt.vector3d(fx.x,fx.y,fx.z)
+        var local=mesh.mapPositionFromScene(world)
+        var right=mesh.mapPositionFromScene(Qt.vector3d(world.x+fx.rx,world.y+fx.ry,world.z+fx.rz))
+        var up=mesh.mapPositionFromScene(Qt.vector3d(world.x+fx.ux,world.y+fx.uy,world.z+fx.uz))
+        fx.attachment_bounds=[world.x,world.y,world.z]
+        fx.x=local.x;fx.y=local.y;fx.z=local.z
+        fx.rx=right.x-local.x;fx.ry=right.y-local.y;fx.rz=right.z-local.z
+        fx.ux=up.x-local.x;fx.uy=up.y-local.y;fx.uz=up.z-local.z
+        fx.attachment_local=true
+        if (fx.attachment_index===0) root.enchantMesh0=mesh
+        else root.enchantMesh1=mesh
+    }
+
+    function attachedLightPosition(source) {
+        var mesh=source.attachment_index===0 ? root.enchantMesh0 : root.enchantMesh1
+        if (source.attachment_point && mesh) {
+            // Explicit dependency on the animated scene transform.
+            var transform=mesh.sceneTransform
+            var p=source.attachment_point
+            return mesh.mapPositionToScene(Qt.vector3d(p[0],p[1],p[2]))
+        }
+        return Qt.vector3d(root.number(source.x,0),
+            root.planetRenderY(root.number(source.x,0),root.number(source.y,0),root.number(source.z,0)),
+            root.number(source.z,0))
     }
 
     onRenderStatusJsonChanged: {
@@ -710,14 +1554,15 @@ Item {
             root.syncRenderModels(root.renderStatusJson)
             root.renderStreamPrimed = true
         }
-        if (dosFallbackCanvas)
+        if (root.dosFallbackActive && dosFallbackCanvas)
             dosFallbackCanvas.requestPaint()
     }
 
     onUiStatusJsonChanged: {
+        root.syncClientCamera(root.uiStatus)
         // UI deltas deliberately do not touch any 3D repeater model.  The
         // DOS view reads the same merged status and may repaint cheaply.
-        if (dosFallbackCanvas)
+        if (root.dosFallbackActive && dosFallbackCanvas)
             dosFallbackCanvas.requestPaint()
     }
 
@@ -741,17 +1586,24 @@ Item {
 
     function refreshRender() {
         if (root.surfaceHost && root.surfaceHost.gameEngineRenderStatus) {
+            if (root.surfaceHost.gameEngineSetView)
+                root.surfaceHost.gameEngineSetView(JSON.stringify({
+                    x:root.renderCameraX,
+                    y:root.planetRenderY(root.renderCameraX,root.renderCameraY,root.renderCameraZ),
+                    z:root.renderCameraZ,heading:root.cameraHeading,pitch:root.orbitPitch,
+                    fov:45,aspect:view3d.width/Math.max(1,view3d.height),far:root.renderFarClipM
+                }))
+            // Loading a saved character may replace the Qt world owner while
+            // retaining this pane. Bind the live owner before publishing its
+            // coordinates and models into the scene.
+            if (root.surfaceHost.gameEngineBenillaWorld) {
+                var provider=root.surfaceHost.gameEngineBenillaWorld()
+                if (root.benillaWorld!==provider) root.benillaWorld=provider
+            }
+            var started=Date.now()
             var raw = root.surfaceHost.gameEngineRenderStatus()
-            if (raw === undefined || raw === null)
-                return
-            var text = String(raw)
-            if (text === root.renderStatusJson)
-                return
-            root.applyingRenderStatus = true
-            root.renderStatusJson = text
-            root.applyingRenderStatus = false
-            root.syncRenderModels(root.renderStatus)
-            root.renderStreamPrimed = true
+            root.snapshotBridgeMs=Date.now()-started
+            root.installRenderStatus(raw)
         } else {
             // Test bridges and older embedding hosts may expose only the full
             // status slot; keep that compatibility path explicit.
@@ -759,13 +1611,48 @@ Item {
         }
     }
 
+    function updateWaterGeometry() {
+        if (!root.paneLive || !root.surfaceHost) return
+        if (!root.waterWaveGeometry && root.surfaceHost.gameEngineWaterGeometry)
+            root.waterWaveGeometry = root.surfaceHost.gameEngineWaterGeometry()
+        if (root.surfaceHost.gameEnginePrepareWaterGpu)
+            root.surfaceHost.gameEnginePrepareWaterGpu(root.waterWaveSpanM)
+    }
+
+    function installRenderStatus(raw) {
+        if (raw === undefined || raw === null)
+            return
+        var text = String(raw)
+        if (text === root.renderStatusJson)
+            return
+        root.applyingRenderStatus = true
+        var started=Date.now()
+        root.renderStatusJson = text
+        root.snapshotBindingsMs=Date.now()-started
+        root.applyingRenderStatus = false
+        started=Date.now()
+        root.syncRenderModels(root.renderStatus)
+        root.snapshotModelsMs=Date.now()-started
+        root.renderStreamPrimed = true
+        if (root.worldMouseInside && root.worldHoverInfo.id && !root.mouseLeftHeld && !root.mouseRightHeld) {
+            try {
+                root.worldHoverInfo=JSON.parse(root.surfaceHost.gameEngineWorldHover(root.worldHoverInfo.id))
+            } catch(e) {root.worldHoverInfo=({})}
+        }
+    }
+
     function startRuntime() {
-        if (root.surfaceHost && root.surfaceHost.gameEngineStart)
+        if (root.surfaceHost && root.surfaceHost.gameEngineStartRender)
+            root.installRenderStatus(root.surfaceHost.gameEngineStartRender())
+        else if (root.surfaceHost && root.surfaceHost.gameEngineStart)
             root.applyRaw(root.surfaceHost.gameEngineStart())
     }
 
     function pauseRuntime() {
-        if (root.surfaceHost && root.surfaceHost.gameEnginePause)
+        root.clearMovementInput()
+        if (root.surfaceHost && root.surfaceHost.gameEnginePauseRender)
+            root.installRenderStatus(root.surfaceHost.gameEnginePauseRender())
+        else if (root.surfaceHost && root.surfaceHost.gameEnginePause)
             root.applyRaw(root.surfaceHost.gameEnginePause())
     }
 
@@ -815,6 +1702,54 @@ Item {
             ))
     }
 
+    function openCrafting(stationId) {
+        if (!root.surfaceHost || !root.surfaceHost.gameEngineCraftingOpen)
+            return false
+        var station = String(stationId || "")
+        if (station === "NEAREST") {
+            var rows = root.crafting.workstations || []
+            var closest = null
+            var distance = Infinity
+            for (var i = 0; i < rows.length; ++i) {
+                var nextDistance = Math.hypot(Number(rows[i].x) - Number(root.player.x), Number(rows[i].z) - Number(root.player.z))
+                if (nextDistance < distance) { closest = rows[i]; distance = nextDistance }
+            }
+            if (!closest) { root.itemNotice = "Ingen arbetsstation finns i den här världen."; return false }
+            station = String(closest.id)
+        }
+        return root.applyItemAction(root.surfaceHost.gameEngineCraftingOpen("TRADE_SKILL", station))
+    }
+
+    function closeCrafting() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineCraftingClose)
+            return root.applyItemAction(root.surfaceHost.gameEngineCraftingClose(Number(root.crafting.book.session)))
+        return false
+    }
+
+    function craftBookRecipe(recipeId, count) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineCraftBookRecipe)
+            return root.applyItemAction(root.surfaceHost.gameEngineCraftBookRecipe(Number(root.crafting.book.session), String(recipeId), Number(count)))
+        return false
+    }
+
+    function stopCrafting() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineCraftingStop)
+            return root.applyItemAction(root.surfaceHost.gameEngineCraftingStop())
+        return false
+    }
+
+    function lootItem(instanceId) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineLootSlot)
+            return root.applyItemAction(root.surfaceHost.gameEngineLootSlot(Number(root.loot.session), String(root.loot.container_id), String(instanceId)))
+        return false
+    }
+
+    function closeLoot() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineLootClose)
+            return root.applyItemAction(root.surfaceHost.gameEngineLootClose(Number(root.loot.session)))
+        return false
+    }
+
     function craftGear(recipeId, stationId) {
         if (root.surfaceHost && root.surfaceHost.gameEngineGearCraft)
             root.applyRaw(root.surfaceHost.gameEngineGearCraft(
@@ -830,6 +1765,13 @@ Item {
             && typeof root.surfaceHost.gameEngineFindNamedNode === "function")
             return root.surfaceHost.gameEngineFindNamedNode(loader, String(name))
         return null
+    }
+
+    function updateEquipmentPhysics(dt) {
+        for (var slot in root.equipmentFxNodes) {
+            var item=root.equipmentFxNodes[slot]
+            if(item && item.stepFlail)item.stepFlail(dt)
+        }
     }
 
     function socketItem(instanceId, insertableId) {
@@ -856,8 +1798,86 @@ Item {
     }
 
     function interactItem() {
-        if (root.surfaceHost && root.surfaceHost.gameEngineItemInteract)
-            root.applyRaw(root.surfaceHost.gameEngineItemInteract())
+        if (root.surfaceHost && root.surfaceHost.gameEngineItemInteract) {
+            var raw = root.surfaceHost.gameEngineItemInteract()
+            root.applyRaw(raw)
+            root.showOpenedBank(raw)
+        }
+    }
+
+    function showOpenedBank(raw) {
+        try {
+            var value = JSON.parse(String(raw || "{}"))
+            if (String((value.item_result || {}).action || "") === "OPEN"
+                    && Boolean((value.bank || {}).accessible)) {
+                root.bankViewOpen = true
+                root.page = "BAG"
+                root.forceActiveFocus()
+            }
+        } catch (err) {
+            // The normal status path reports malformed command data.
+        }
+    }
+
+    function nearestSkiffDistance() {
+        var entities = (root.render && root.render.entities) || []
+        var px = root.number(root.player.x, 0)
+        var pz = root.number(root.player.z, 0)
+        var best = 100000
+        for (var index = 0; index < entities.length; ++index) {
+            var row = entities[index]
+            if (!row || String(row.kind || "") !== "BOAT")
+                continue
+            var distance = Math.hypot(
+                root.number(row.x, 0) - px,
+                root.number(row.z, 0) - pz
+            )
+            if (distance < best)
+                best = distance
+        }
+        return best
+    }
+
+    function interactNearby() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineWorldContext && root.combatTarget.id) {
+            root.contextWorld(root.combatTarget.id);return true
+        }
+        if (root.natureTarget.available && root.natureTarget.distance_m <= Math.min(
+                root.number(root.npcInteraction.target_distance_m,1000000),
+                root.number(root.itemInteraction.distance_m,1000000))) {
+            root.interactNature("", "")
+            return true
+        }
+        // The chest in front of the player opens its shared storage view.
+        if (Boolean(root.bank.focused)
+                && String(root.player.vehicle || "NONE") === "NONE") {
+            root.openContainer(String(root.bank.container_id || ""))
+            return true
+        }
+        // E also boards nearby skiffs and dispatches NPC/item interactions.
+        if (String(root.player.vehicle || "") === "BOAT"
+                || root.nearestSkiffDistance() <= 5.2) {
+            root.performMobilityAction("MOUNT_BOAT")
+            return true
+        }
+        var npcAvailable = Boolean(root.npcInteraction.available)
+        var itemAvailable = Boolean(
+            String(root.itemInteraction.instance_id || "")
+        )
+        if (!npcAvailable && !itemAvailable)
+            return false
+
+        var npcDistance = root.number(
+            root.npcInteraction.target_distance_m, 1000000
+        )
+        var itemDistance = root.number(
+            root.itemInteraction.distance_m, 1000000
+        )
+        if (npcAvailable && (!itemAvailable || npcDistance <= itemDistance))
+            root.interactNpc()
+        else
+            root.interactItem()
+        return true
     }
 
     function pickupItem(instanceId) {
@@ -868,10 +1888,19 @@ Item {
     }
 
     function openContainer(instanceId) {
-        if (root.surfaceHost && root.surfaceHost.gameEngineContainerOpen)
-            root.applyRaw(root.surfaceHost.gameEngineContainerOpen(
+        if (root.surfaceHost && root.surfaceHost.gameEngineContainerOpen) {
+            var raw = root.surfaceHost.gameEngineContainerOpen(
                 String(instanceId || "")
-            ))
+            )
+            root.applyRaw(raw)
+            root.showOpenedBank(raw)
+            try {
+                return !Boolean(JSON.parse(String(raw || "{}")).error)
+            } catch (err) {
+                return false
+            }
+        }
+        return false
     }
 
     function lootContainer(instanceId) {
@@ -881,18 +1910,72 @@ Item {
             ))
     }
 
-    function equipItem(instanceId) {
+    function equipItem(instanceId, slot) {
         if (root.surfaceHost && root.surfaceHost.gameEngineItemEquip)
-            root.applyRaw(root.surfaceHost.gameEngineItemEquip(
+            return root.applyItemAction(root.surfaceHost.gameEngineItemEquip(
+                String(instanceId || ""), String(slot || "")
+            ))
+        return false
+    }
+
+    function unequipItem(instanceId) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineItemUnequip)
+            return root.applyItemAction(root.surfaceHost.gameEngineItemUnequip(
                 String(instanceId || "")
             ))
+        return false
+    }
+
+    function moveInventorySlot(instanceId, slotIndex) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineInventoryMove)
+            return root.applyItemAction(root.surfaceHost.gameEngineInventoryMove(
+                String(instanceId || ""), Number(slotIndex)
+            ))
+        return false
+    }
+
+    function depositToBank(instanceId, slotIndex) {
+        if (!root.surfaceHost)
+            return false
+        if (Number(slotIndex) >= 0 && root.surfaceHost.gameEngineBankDepositAt)
+            return root.applyItemAction(root.surfaceHost.gameEngineBankDepositAt(
+                String(instanceId || ""), Number(slotIndex)
+            ))
+        if (root.surfaceHost.gameEngineBankDeposit)
+            return root.applyItemAction(root.surfaceHost.gameEngineBankDeposit(
+                String(instanceId || "")
+            ))
+        return false
+    }
+
+    function withdrawFromBank(instanceId, slotIndex) {
+        if (!root.surfaceHost)
+            return false
+        if (Number(slotIndex) >= 0 && root.surfaceHost.gameEngineBankWithdrawAt)
+            return root.applyItemAction(root.surfaceHost.gameEngineBankWithdrawAt(
+                String(instanceId || ""), Number(slotIndex)
+            ))
+        if (root.surfaceHost.gameEngineBankWithdraw)
+            return root.applyItemAction(root.surfaceHost.gameEngineBankWithdraw(
+                String(instanceId || "")
+            ))
+        return false
+    }
+
+    function moveBankSlot(instanceId, slotIndex) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineBankMove)
+            return root.applyItemAction(root.surfaceHost.gameEngineBankMove(
+                String(instanceId || ""), Number(slotIndex)
+            ))
+        return false
     }
 
     function dropItem(instanceId) {
         if (root.surfaceHost && root.surfaceHost.gameEngineItemDrop)
-            root.applyRaw(root.surfaceHost.gameEngineItemDrop(
+            return root.applyItemAction(root.surfaceHost.gameEngineItemDrop(
                 String(instanceId || "")
             ))
+        return false
     }
 
     function gainXp(amount) {
@@ -941,6 +2024,11 @@ Item {
             ))
     }
 
+    function closeDialogue() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineNpcDialogueClose)
+            root.applyRaw(root.surfaceHost.gameEngineNpcDialogueClose())
+    }
+
     function activateContentPack(packId) {
         if (root.surfaceHost && root.surfaceHost.gameEngineContentPack)
             root.applyRaw(root.surfaceHost.gameEngineContentPack(
@@ -948,11 +2036,63 @@ Item {
             ))
     }
 
-    function attackNpc(targetId) {
+    function attackNpc(targetId, automatic) {
+        if (root.firearms.hands && root.firearms.hands.length && root.surfaceHost && root.surfaceHost.gameEngineAttack) {
+            root.applyGameplay(root.surfaceHost.gameEngineAttack(String(targetId || ""), automatic ? "automatic_fire" : "basic_attack"))
+            return
+        }
+        if (root.surfaceHost && root.surfaceHost.gameEngineActionCommand) {
+            if (targetId && String(root.combatTarget.id || '') !== String(targetId))
+                root.selectWorld(targetId)
+            root.applyGameplay(root.surfaceHost.gameEngineActionCommand('ATTACK'))
+            return
+        }
+        if (!targetId && root.natureTarget.available && !root.natureTarget.dead
+                && root.natureAnimals.indexOf(root.natureTarget.species) >= 0) {
+            root.interactNature(root.natureTarget.id, "ATTACK")
+            return
+        }
         if (root.surfaceHost && root.surfaceHost.gameEngineAttack)
             root.applyRaw(root.surfaceHost.gameEngineAttack(
                 String(targetId || "")
             ))
+    }
+
+    function reloadFirearms() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineFirearmReload)
+            root.applyRaw(root.surfaceHost.gameEngineFirearmReload())
+    }
+
+    function interactNature(targetId, action) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineNatureAction)
+            root.applyRaw(root.surfaceHost.gameEngineNatureAction(
+                String(targetId || root.natureTarget.id || ""), String(action || "")))
+    }
+
+    function cycleCombatTarget(reverse) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineWorldTargetCycle) {
+            root.applyGameplay(root.surfaceHost.gameEngineWorldTargetCycle(JSON.stringify({
+                x:camera.scenePosition.x,y:camera.scenePosition.y,z:camera.scenePosition.z,
+                heading:root.cameraHeading,pitch:root.orbitPitch,aspect:view3d.width/view3d.height,fov:camera.fieldOfView}),Boolean(reverse)))
+            return
+        }
+        if (root.surfaceHost && root.surfaceHost.gameEngineTargetNext)
+            root.applyRaw(root.surfaceHost.gameEngineTargetNext(Boolean(reverse)))
+    }
+
+    function clearCombatTarget() {
+        if (root.surfaceHost && root.surfaceHost.gameEngineTargetClear)
+            root.applyRaw(root.surfaceHost.gameEngineTargetClear())
+    }
+
+    function exploreRegion(regionId) {
+        if (root.surfaceHost && root.surfaceHost.gameEngineExploreRegion) {
+            root.pressedTokens = ({})
+            root.throttle = 0; root.strafe = 0; root.vertical = 0; root.steer = 0
+            root.updateInputStates()
+            root.applyRaw(root.surfaceHost.gameEngineExploreRegion(String(regionId)))
+            root.page = "PLAY"
+        }
     }
 
     function acceptQuest(questId) {
@@ -1163,7 +2303,7 @@ Item {
             var depth = (
                 Number(viewY) / Math.max(1, stage.height) - 0.5
             ) * root.terrainCellSize * 5.0
-            var yawRadians = root.orbitYaw * Math.PI / 180.0
+            var yawRadians = root.cameraWorldYaw * Math.PI / 180.0
             var projectedX = root.number(root.player.x, 0)
                 + horizontal * Math.cos(yawRadians)
                 + depth * Math.sin(yawRadians)
@@ -1259,6 +2399,14 @@ Item {
         } else {
             root.localGraphicsFailure = normalized === "DOS_2D"
         }
+        // The DOS and low-poly buttons sit on top of the stage.  Without
+        // this, the click leaves focus on the button and WASD never reaches
+        // the surface, so the new picture has nothing to follow.
+        root.forceActiveFocus()
+    }
+
+    function togglePresentationMode() {
+        root.setPresentationMode(root.dosFallbackActive ? "RICH_3D" : "DOS_2D")
     }
 
     function reportGraphicsFailure(reason) {
@@ -1274,6 +2422,14 @@ Item {
             root.applyRaw(root.surfaceHost.gameEngineCinematic(String(preset)))
     }
 
+    function performMobilityAction(action) {
+        if (!root.surfaceHost || !root.surfaceHost.gameEngineMobilityAction)
+            return
+        var raw = root.surfaceHost.gameEngineMobilityAction(String(action || ""))
+        if (raw !== undefined && raw !== null)
+            root.applyRaw(raw)
+    }
+
     function sendInput() {
         if (!root.surfaceHost || !root.surfaceHost.gameEngineInput)
             return
@@ -1287,8 +2443,10 @@ Item {
             strafe: root.strafe,
             vertical: root.vertical,
             jump: root.jump,
-            movement_mode: root.movementMode,
-            camera_yaw: root.orbitYaw,
+            grapple: root.grapple,
+            camera_yaw: root.cameraWorldYaw,
+            mouse_look: root.mouseRightHeld,
+            facing_yaw: root.mouseLookHeading,
             camera_pitch: root.orbitPitch,
             camera_distance: root.cameraDistance
         })
@@ -1335,11 +2493,45 @@ Item {
         return isFinite(parsed) ? parsed : (fallback || 0)
     }
 
+    function planetRenderY(x, y, z) {
+        if (root.originalWorldActive) return y
+        var radius = root.planetRadiusM
+        var radial = Math.max(1, radius + root.number(y, 0))
+        var radialHeight = Math.sqrt(Math.max(
+            1,
+            radial * radial
+                - root.number(x, 0) * root.number(x, 0)
+                - root.number(z, 0) * root.number(z, 0)
+        ))
+        return radialHeight - radius
+    }
+
+    function bindFaunaRepeater(repeater, clip) {
+        if (!repeater
+            || !root.paneLive
+            || !root.surfaceHost
+            || typeof root.surfaceHost.gameEngineRuntimeClip !== "function")
+            return
+        var count = repeater.count || 0
+        for (var index = 0; index < count; ++index) {
+            var loader = repeater.objectAt(index)
+            if (loader && loader.status === RuntimeLoader.Success)
+                root.surfaceHost.gameEngineRuntimeClip(loader, clip, 0, "")
+        }
+    }
+
+    function refreshSandoverLifeClips() {
+        root.bindFaunaRepeater(faunaBirdRepeater, "SandoverBirdFly")
+        root.bindFaunaRepeater(faunaFishRepeater, "SandoverFishSwim")
+    }
+
     function fixed(value, decimals) {
         return number(value, 0).toFixed(decimals === undefined ? 1 : decimals)
     }
 
     function combatActor(actorId) {
+        if (String(actorId)==='player' && root.renderStatus.combat_live
+                && root.renderStatus.combat_live.player) return root.renderStatus.combat_live.player
         var actors = root.combat.actors || []
         for (var index = 0; index < actors.length; ++index) {
             if (actors[index] && String(actors[index].id || "") === String(actorId || ""))
@@ -1372,31 +2564,42 @@ Item {
     function biomeColor(value) {
         var biome = String(value || "")
         if (biome === "FIRST_ISLAND")
-            return "#c2d15a"
+            return "#4f8339"
         if (biome === "LAND")
-            return "#7eab46"
+            return "#5a8c3c"
+        if (biome === "BEACH")
+            return "#efd090"
         if (biome === "CLIFF")
-            return "#d2b17a"
+            return "#9e653b"
         if (biome === "REEF")
-            return "#2f9d8c"
+            return "#43b49c"
         if (biome === "DEEP_WATER")
-            return "#15657a"
-        return "#1f88a0"
+            return "#1e7185"
+        return "#39b7c1"
     }
 
     function terrainMaterialFor(biome, waterCell) {
-        if (waterCell)
-            return String(biome) === "DEEP_WATER"
-                ? deepTerrainMaterial : shallowTerrainMaterial
-        if (String(biome) === "FIRST_ISLAND")
-            return islandTerrainMaterial
-        if (String(biome) === "CLIFF")
-            return cliffTerrainMaterial
-        if (String(biome) === "REEF")
-            return reefTerrainMaterial
-        if (String(biome) === "LAND")
-            return landTerrainMaterial
-        return shallowTerrainMaterial
+        // The terrain mesh blends its coast, grass and rock colors per
+        // vertex.  A material per 16 m cell made those regions look like
+        // separate square tiles even though their heightfield was shared.
+        return terrainSurfaceMaterial
+    }
+
+    function terrainHlodMaterialFor(biome) {
+        // ORBIT cells use one inexpensive tile without vertex colors, so
+        // retain a single shared palette material for each far-field biome.
+        var value = String(biome || "")
+        if (value === "BEACH")
+            return terrainHlodBeachMaterial
+        if (value === "CLIFF")
+            return terrainHlodCliffMaterial
+        if (value === "REEF")
+            return terrainHlodReefMaterial
+        if (value === "DEEP_WATER")
+            return terrainHlodDeepWaterMaterial
+        if (value === "SHALLOW_WATER")
+            return terrainHlodShallowWaterMaterial
+        return terrainHlodGrassMaterial
     }
 
     function stateColor(value) {
@@ -1448,16 +2651,129 @@ Item {
             - (root.actionDown(negativeAction) ? 1 : 0)
     }
 
+    function wrapDegrees(value) {
+        return value - 360 * Math.floor((value + 180) / 360)
+    }
+
+    function beginCameraLook(button) {
+        var heading = root.cameraHeading
+        if (button === Qt.RightButton) {
+            root.mouseLookHeading = heading
+            root.mouseRightHeld = true
+            root.orbitYaw = 0
+        } else {
+            root.leftLookHeading = heading
+            root.mouseLeftHeld = true
+        }
+        root.updateInputStates()
+        root.sendInput()
+    }
+
+    function dragCameraLook(dx, dy) {
+        // Benilla's normal pitch and yaw rate law, adapted to our +Z facing.
+        if (root.mouseRightHeld)
+            root.mouseLookHeading = root.wrapDegrees(root.mouseLookHeading - dx * 0.225)
+        else
+            root.leftLookHeading = root.wrapDegrees(root.leftLookHeading - dx * 0.225)
+        root.orbitPitch = Math.max(-75, Math.min(75, root.orbitPitch - dy * 0.15))
+        root.sendInput()
+    }
+
+    function endCameraLook(button) {
+        if (button === Qt.RightButton && root.mouseRightHeld) {
+            root.sendInput() // Commit facing before releasing the heading lock.
+            root.leftLookHeading = root.mouseLookHeading
+            root.mouseRightHeld = false
+            root.orbitYaw = 0
+        } else if (button === Qt.LeftButton && root.mouseLeftHeld) {
+            if (!root.mouseRightHeld)
+                root.orbitYaw = root.wrapDegrees(root.leftLookHeading - root.characterHeading)
+            root.mouseLeftHeld = false
+        }
+        root.updateInputStates()
+        root.sendInput()
+    }
+
+    function clearMovementInput() {
+        if (root.mouseLeftHeld && !root.mouseRightHeld)
+            root.orbitYaw = root.wrapDegrees(root.leftLookHeading - root.characterHeading)
+        root.mouseLeftHeld = false
+        root.mouseRightHeld = false
+        root.pressedTokens = ({})
+        root.updateInputStates()
+        root.vertical = 0
+        root.boost = false
+        root.jump = false
+        root.grapple = false
+        root.brake = 0
+        if (root.surfaceHost && root.surfaceHost.gameEngineClientControl)
+            root.applyRaw(root.surfaceHost.gameEngineClientControl(JSON.stringify({kind:'input',op:'Cancel'})))
+        root.sendInput()
+    }
+
+    onControlsLockedChanged: {
+        if (root.controlsLocked)
+            Qt.callLater(function(){if(root.controlsLocked)root.clearMovementInput()})
+    }
+    onActiveFocusChanged: {
+        if (!root.activeFocus)
+            Qt.callLater(function(){if(!root.activeFocus)root.clearMovementInput()})
+    }
+
+    function followCamera(dt) {
+        if (root.mouseLeftHeld || root.mouseRightHeld)
+            return
+        if (Math.abs(root.throttle) + Math.abs(root.steer) + Math.abs(root.strafe) > 0.01
+                || root.number(root.player.speed, 0) > 0.1) {
+            var offset = root.wrapDegrees(root.orbitYaw)
+            var step = Math.min(Math.abs(offset), 180 * dt)
+            root.orbitYaw = offset - Math.sign(offset) * step
+        }
+    }
+
+    function crewSource(asset, entityId, kind) {
+        if (asset.editor_model) return String(asset.source || "")
+        var names = ["brinekip", "copperwake", "glassfin", "mosswake", "tideclaw",
+                     "reefrunner", "riftclaw", "briarstride", "mossjaw"]
+        var ids = ["gg-codex-original", "gg-codex-character-flow", "gg-codex-cartoon-flow",
+                   "gg-codex-art-flow", "gg-codex-sculpt-flow", "gg-codex-style-flow",
+                   "gg-codex-riftclaw", "gg-codex-briarstride", "gg-codex-mossjaw"]
+        var source = String(asset.source || "")
+        var filename = source.split("/").pop()
+        var compact = String(asset.mode || "") === "AUTHORED_CROWD_LOD"
+            || /-compact(?:-v[0-9]+)?\.glb$/.test(filename)
+            || root.number(asset.instance_rank,0)>=8
+        var bank = compact ? "compact" : "articulated"
+        for (var i = 0; i < names.length; ++i) {
+            var match = filename.match(new RegExp("^gg-crew-" + names[i]
+                + "(?:-(?:animated|articulated|compact))?(?:-v([0-9]+))?\\.glb$"))
+            if (match && match[1] && Number(match[1]) > 0 && Number(match[1]) < 36)
+                return Qt.resolvedUrl("../assets/authored/variants/characters/gg-crew-"
+                    + names[i] + "-" + bank + "-v" + Number(match[1]) + ".glb")
+            if (match || String(asset.id || "") === ids[i])
+                return Qt.resolvedUrl("../assets/authored/characters/gg-crew-" + names[i] + "-" + bank + ".glb")
+        }
+        var hash = 0; var identity = String(entityId || "")
+        for (var j = 0; j < identity.length; ++j)
+            hash = (hash * 31 + identity.charCodeAt(j)) >>> 0
+        var index = kind === "PLAYER" ? 0 : hash % names.length
+        return Qt.resolvedUrl("../assets/authored/characters/gg-crew-" + names[index] + "-" + bank + ".glb")
+    }
+
     function updateInputStates() {
         root.throttle = root.axisFor("MOVE_BACK", "MOVE_FORWARD")
-        // QtQuick3D's positive Y rotation turns a -Z-facing avatar toward
-        // screen-left.  The gameplay grammar therefore negates the raw
-        // key-axis so A is visually LEFT and D is visually RIGHT.
-        root.steer = -root.axisFor("TURN_LEFT", "TURN_RIGHT")
-        root.strafe = root.axisFor("STRAFE_LEFT", "STRAFE_RIGHT")
+        var sideAxis = root.axisFor("TURN_LEFT", "TURN_RIGHT")
+        // A/D rotate the +Z-facing avatar; Q grapples and E interacts.
+        // W/S never changes the meaning of A/D.
+        root.steer = root.mouseRightHeld ? 0 : -sideAxis
+        var strafeAxis = root.axisFor("STRAFE_LEFT", "STRAFE_RIGHT")
+        root.strafe = root.mouseRightHeld ? strafeAxis + sideAxis : strafeAxis
+        if (root.mouseLeftHeld && root.mouseRightHeld)
+            root.throttle = 1
         root.vertical = root.axisFor("VERTICAL_DOWN", "VERTICAL_UP")
         root.boost = root.actionDown("SPRINT")
         root.jump = root.actionDown("JUMP")
+        root.grapple = root.actionDown("GRAPPLE")
     }
 
     function keyToken(key) {
@@ -1469,7 +2785,7 @@ Item {
             return "CONTROL"
         if (key === Qt.Key_Alt)
             return "ALT"
-        if (key === Qt.Key_Tab)
+        if (key === Qt.Key_Tab || key === Qt.Key_Backtab)
             return "TAB"
         if (key === Qt.Key_Return || key === Qt.Key_Enter)
             return "ENTER"
@@ -1533,6 +2849,8 @@ Item {
 
     function bindingRows() {
         return [
+            { id: "TARGET_NEXT", label: "CYCLE TARGET (SHIFT REVERSES)" },
+            { id: "PRIMARY_ATTACK", label: "PRIMARY ATTACK" },
             { id: "MOVE_FORWARD", label: "MOVE FORWARD" },
             { id: "MOVE_BACK", label: "MOVE BACK" },
             { id: "TURN_LEFT", label: "TURN LEFT" },
@@ -1541,6 +2859,9 @@ Item {
             { id: "STRAFE_RIGHT", label: "STRAFE RIGHT" },
             { id: "JUMP", label: "JUMP" },
             { id: "SPRINT", label: "SPRINT" },
+            { id: "TOGGLE_FLIGHT", label: "TAKE OFF / LAND" },
+            { id: "TOGGLE_HOVERBOARD", label: "TOGGLE HOVERBOARD" },
+            { id: "MOUNT_BOAT", label: "BOARD / LEAVE SKIFF" },
             { id: "VERTICAL_UP", label: "SWIM / FLY UP" },
             { id: "VERTICAL_DOWN", label: "SWIM / FLY DOWN" },
             { id: "ABILITY_SURGE", label: "ABILITY SURGE" },
@@ -1553,6 +2874,8 @@ Item {
         var token = root.keyToken(key)
         if (!token)
             return false
+        if ((root.standalonePlayerMode && root.controlsLocked) || localServices.visible)
+            return true
 
         // The UI captures the next physical key, just like a conventional
         // WoW keybinding screen.  Capture happens before gameplay actions so
@@ -1562,31 +2885,85 @@ Item {
             return true
         }
 
+        var wasPressed = Boolean(root.pressedTokens[token])
         root.pressedTokens[token] = Boolean(pressed)
-        if (pressed && key === Qt.Key_1) {
+        var pressedEdge = pressed && !wasPressed
+        if (pressedEdge && (key === Qt.Key_B || key === Qt.Key_I)) {
+            root.page = root.page === "BAG" ? "PLAY" : "BAG"
+            return true
+        }
+        if (root.page === "BAG")
+            return true
+        if (pressedEdge) {
+            var commands={POSTURE_TOGGLE:"SitOrStand",SHEATH_TOGGLE:"ToggleSheath",WALK_TOGGLE:"ToggleRun",AUTORUN_TOGGLE:"ToggleAutoRun"}
+            for (var action in commands) {
+                if (root.isActionBound(action,token)) {
+                    if (root.surfaceHost && root.surfaceHost.gameEngineClientControl)
+                        root.applyRaw(root.surfaceHost.gameEngineClientControl(JSON.stringify({kind:"input",op:"Fire",key:commands[action]})))
+                    return true
+                }
+            }
+        }
+        if (pressedEdge && root.isActionBound("TARGET_NEXT", token)) {
+            root.cycleCombatTarget(Boolean(root.pressedTokens["SHIFT"]))
+            return true
+        }
+        if (pressedEdge && key === Qt.Key_Escape && root.combatTarget.id) {
+            root.clearCombatTarget()
+            return true
+        }
+        if (pressedEdge && root.isActionBound("TOGGLE_HOVERBOARD", token)) {
+            root.performMobilityAction("TOGGLE_HOVERBOARD")
+            return true
+        }
+        if (pressedEdge && root.isActionBound("PRIMARY_ATTACK", token) && token !== "V") {
+            root.attackNpc(String(root.combatTarget.id || ""))
+            return true
+        }
+        if (pressedEdge && root.isActionBound("RELOAD_FIREARM", token)) {
+            root.reloadFirearms()
+            return true
+        }
+        if (pressedEdge && key === Qt.Key_1) {
             root.setMovementMode("GROUND")
             return true
         }
-        if (pressed && key === Qt.Key_2) {
+        if (pressedEdge && key === Qt.Key_2) {
             root.setMovementMode("SWIM")
             return true
         }
-        if (pressed && key === Qt.Key_3) {
+        if (pressedEdge && key === Qt.Key_3) {
             root.setMovementMode("FLY")
             return true
         }
+        if (pressedEdge && root.isActionBound("TOGGLE_FLIGHT", token)) {
+            root.performMobilityAction("TOGGLE_FLIGHT")
+            return true
+        }
+        if (pressedEdge && root.isActionBound("TOGGLE_HOVERBOARD", token)) {
+            root.performMobilityAction("TOGGLE_HOVERBOARD")
+            return true
+        }
+        if (pressedEdge && root.isActionBound("MOUNT_BOAT", token)) {
+            root.performMobilityAction("MOUNT_BOAT")
+            return true
+        }
+        if (pressedEdge && root.isActionBound("INTERACT", token)) {
+            root.interactNearby()
+            return true
+        }
         if (root.isActionBound("ABILITY_SURGE", token)) {
-            if (pressed)
+            if (pressedEdge)
                 root.useAbility("ability.surge")
             return true
         }
         if (root.isActionBound("ABILITY_UNDERTOW", token)) {
-            if (pressed)
+            if (pressedEdge)
                 root.useAbility("ability.undertow")
             return true
         }
         if (root.isActionBound("ABILITY_SKY_LEAP", token)) {
-            if (pressed)
+            if (pressedEdge)
                 root.useAbility("ability.sky_leap")
             return true
         }
@@ -1598,6 +2975,7 @@ Item {
             || root.isActionBound("STRAFE_LEFT", token)
             || root.isActionBound("STRAFE_RIGHT", token)
             || root.isActionBound("JUMP", token)
+            || root.isActionBound("GRAPPLE", token)
             || root.isActionBound("SPRINT", token)
             || root.isActionBound("VERTICAL_UP", token)
             || root.isActionBound("VERTICAL_DOWN", token)
@@ -1611,14 +2989,112 @@ Item {
     focus: true
     activeFocusOnTab: true
 
-    Timer {
+    FrameAnimation {
         id: refreshTimer
-        interval: root.renderUpdateIntervalMs
+        objectName: "gameRenderFrameAnimation"
+        running: root.paneLive
+            && root.surfaceHost !== null
+            && (root.running || root.replaying)
+        onTriggered: {
+            if (!root.controlsLocked && !root.cinematic.active)
+                root.followCamera(refreshTimer.frameTime)
+            root.refreshRender()
+            root.updateEquipmentPhysics(refreshTimer.frameTime)
+        }
+    }
+
+    FrameAnimation {
+        id: importedCameraFrame
+        objectName: "importedWorldCameraFrame"
+        running: root.paneLive && root.originalWorldActive
+        onTriggered: root.updateImportedCamera(importedCameraFrame.frameTime)
+    }
+
+    Timer {
+        interval: 16; repeat: true
+        running: root.paneLive && root.enabled && root.page === "PLAY" && !root.controlsLocked && !root.cinematic.active
+        onTriggered: {
+            var hands=root.firearms.hands || []
+            if (!hands.length) return
+            var held=false,automatic=false,ready=false,time=root.number(root.player.time_s,0)
+            for (var token in root.pressedTokens)
+                if (root.pressedTokens[token] && root.isActionBound("PRIMARY_ATTACK",token)) held=true
+            for (var i=0;i<hands.length;++i) {
+                if (hands[i].profile.automatic) automatic=true
+                var mag=hands[i].magazine
+                if (hands[i].profile.automatic && mag.next_fire<=time && !mag.pending
+                        && (mag.rounds>=hands[i].profile.rounds_per_shot || hands[i].reserve>0)) ready=true
+            }
+            if (held && automatic && ready) root.attackNpc(String(root.combatTarget.id || ""),true)
+        }
+    }
+
+    Rectangle {
+        objectName: "gameFirearmAmmoHud"
+        z: 50
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 104
+        width: 460; height: 18+gunAmmoColumn.implicitHeight
+        visible: root.page === "PLAY" && (root.firearms.hands || []).length>0
+        color: "#dd16242a"; border.color: "#aa9a72"; radius: 3
+        Column {
+            id: gunAmmoColumn; x:10; y:6; width: parent.width-20; spacing: 3
+            Repeater {
+                model: root.firearms.hands || []
+                delegate: Text {
+                    required property var modelData
+                    width: gunAmmoColumn.width
+                    text: (modelData.slot==="MAIN_HAND" ? "H: " : "V: ")
+                        +modelData.profile.name+" · "+modelData.magazine.rounds+"/"+modelData.profile.capacity
+                        +" · "+modelData.reserve+" "+modelData.profile.ammo_name
+                        +(modelData.magazine.pending ? " · LADDAR" : " · Y: LADDA OM")
+                    color: modelData.magazine.pending ? "#f2c178" : "#d9e4df"
+                    font.pixelSize: 11; elide: Text.ElideRight
+                }
+            }
+        }
+        MouseArea { anchors.fill: parent; onClicked: root.reloadFirearms() }
+    }
+
+    Timer {
+        id: waterGeometryTimer
+        // Mesh preparation only; water animates in the shader every frame.
+        interval: 1000
         repeat: true
         running: root.paneLive
             && root.surfaceHost !== null
             && (root.running || root.replaying)
-        onTriggered: root.refreshRender()
+        onTriggered: root.updateWaterGeometry()
+    }
+
+    Timer {
+        id: sandoverLifeClipTimer
+        interval: 500
+        repeat: true
+        running: root.paneLive && root.surfaceHost !== null
+        onTriggered: root.refreshSandoverLifeClips()
+    }
+
+    Timer {
+        id: graphicsProbe
+        interval: 3000
+        repeat: true
+        running: root.paneLive && root.running && !root.dosFallbackActive
+        property int misses: 0
+        onTriggered: {
+            var api = String(view3d.renderStats.graphicsApiName || "")
+            var frame = root.number(
+                view3d.renderStats ? view3d.renderStats.frameTime : 0,
+                0
+            )
+            if (api === "" && frame <= 0) {
+                graphicsProbe.misses += 1
+                if (graphicsProbe.misses >= 2)
+                    root.reportGraphicsFailure("GRAPHICS_API_UNAVAILABLE")
+            } else {
+                graphicsProbe.misses = 0
+            }
+        }
     }
 
     Timer {
@@ -1627,18 +3103,34 @@ Item {
         repeat: true
         running: root.paneLive
             && root.surfaceHost !== null
-            && (root.running || root.replaying)
+            && (root.running || root.replaying || localServices.visible)
         onTriggered: root.refresh()
+    }
+    Timer {
+        interval:100;repeat:true
+        running:root.paneLive && root.surfaceHost!==null && (root.mountedWorldState.status==="LOADING" || (root.benillaWorld && root.benillaWorld.loading) || (root.originalWorldActive && !root.running && !root.replaying))
+        onTriggered: {root.refreshRender();root.refresh()}
     }
 
     Component.onCompleted: {
         if (!root.paneLive)
             return
         root.refresh()
+        root.updateWaterGeometry()
         root.forceActiveFocus()
     }
 
-    onPageChanged: root.refresh()
+    onPageChanged: {
+        root.refresh()
+        if (root.page === "BAG" || root.page === "CHAR") {
+            root.clearMovementInput()
+        }
+    }
+    onSurfaceHostChanged: {
+        root.sandoverBirdClipBound = false
+        root.sandoverFishClipBound = false
+        root.refreshSandoverLifeClips()
+    }
     onVisibleChanged: {
         if (visible && root.paneLive) {
             root.refresh()
@@ -1649,6 +3141,7 @@ Item {
     }
 
     onPaneLiveChanged: {
+        root.refreshSandoverLifeClips()
         if (root.paneLive) {
             if (root.resumeWhenShown)
                 root.startRuntime()
@@ -1663,6 +3156,7 @@ Item {
     }
 
     function suspendRuntime() {
+        root.clearMovementInput()
         if (root.running)
             root.pauseRuntime()
     }
@@ -1671,9 +3165,51 @@ Item {
     // Hidden tabs must still stop the render timers and the host tick.
     Component.onDestruction: root.suspendRuntime()
 
+    Shortcut {
+        sequence: "F8"
+        context: Qt.ApplicationShortcut
+        onActivated: root.togglePresentationMode()
+    }
+
     Keys.onPressed: function(event) {
+        if (root.cinematic.active) {
+            if (event.key === Qt.Key_Escape) root.skipOpeningCinematic()
+            event.accepted = true
+            return
+        }
+        if (root.page === "CHAR") {
+            if (event.key === Qt.Key_Escape) {
+                root.page = "PLAY"
+                if (root.standalonePlayerMode) root.startRuntime()
+            }
+            event.accepted = true
+            return
+        }
+        if (!event.isAutoRepeat && !root.controlsLocked) {
+            var slot=-1
+            if (event.key>=Qt.Key_1 && event.key<=Qt.Key_9) slot=event.key-Qt.Key_1
+            else if (event.key===Qt.Key_0) slot=9
+            else if (event.key===Qt.Key_Minus) slot=10
+            else if (event.key===Qt.Key_Equal) slot=11
+            if (slot>=0) {root.useActionSlot(Number(root.actionState.page || 0)*12+slot);event.accepted=true;return}
+        }
         if (event.isAutoRepeat)
             return
+        if (root.page === "BAG" && event.key === Qt.Key_Escape) {
+            root.page = "PLAY"
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Escape && root.dialogue.open) {
+            root.closeDialogue()
+            event.accepted = true
+            return
+        }
+        if (root.standalonePlayerMode && event.key === Qt.Key_Escape && !root.combatTarget.id) {
+            root.gameMenuRequested()
+            event.accepted = true
+            return
+        }
         if (root.setKeyState(event.key, true))
             event.accepted = true
     }
@@ -1685,22 +3221,52 @@ Item {
             event.accepted = true
     }
 
+
+    GameActionBar {
+        surface: root
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 14
+        z: 100
+        visible: root.paneLive && (root.page==='PLAY' || root.page==='BAG') && root.addonEnabled('ACTION_BAR')
+    }
+    Rectangle {
+        z:150;visible:!!root.actionDrag.kind
+        x:root.actionDragX-20;y:root.actionDragY-20;width:40;height:40
+        color:'#b0354840';border.color:'#efcd83'
+        Text {anchors.centerIn:parent;text:root.actionDrag.kind==='ITEM' ? '◆' : '✦';color:'#efcd83';font.pixelSize:28}
+    }
+    Image {
+        z:160;visible:root.worldMouseInside && !!root.worldHoverInfo.id && !root.mouseLeftHeld && !root.mouseRightHeld && !root.controlsLocked
+        x:root.worldMouseX+14;y:root.worldMouseY+18;width:24;height:24
+        source:'../assets/authored/ui/'+String(root.worldHoverInfo.cursor || 'pet').toLowerCase()+'.svg'
+        opacity:root.worldHoverInfo.in_range ? 1 : .4
+    }
+    Rectangle {
+        z:159;visible:root.worldMouseInside && !!root.worldHoverInfo.id && !root.mouseLeftHeld && !root.mouseRightHeld && !root.controlsLocked
+        x:Math.min(root.width-width-10,root.worldMouseX+42);y:Math.min(root.height-height-90,root.worldMouseY+18)
+        width:hoverLabel.implicitWidth+16;height:hoverLabel.implicitHeight+12
+        color:'#e0182427';border.color:root.worldHoverInfo.in_range ? '#d7bf78' : '#9a7060';radius:3
+        Text {id:hoverLabel;anchors.centerIn:parent;color:'#e9dcb8';font.pixelSize:11
+            text:String(root.worldHoverInfo.name || '')+' · '+Number(root.worldHoverInfo.distance_m || 0).toFixed(1)+' m'
+                +(root.worldHoverInfo.reason ? '\n'+root.worldHoverInfo.reason : '')}
+    }
     Rectangle {
         anchors.fill: parent
         color: "#161616"
         border.color: root.frameBorder
-        border.width: 1
-        radius: root.frameRadius
+        border.width: root.standalonePlayerMode ? 0 : 1
+        radius: root.standalonePlayerMode ? 0 : root.frameRadius
         antialiasing: false
     }
 
     Item {
         id: chrome
         anchors.fill: parent
-        anchors.leftMargin: 10
-        anchors.rightMargin: 12
-        anchors.topMargin: 9
-        anchors.bottomMargin: 9
+        anchors.leftMargin: root.standalonePlayerMode ? 0 : 10
+        anchors.rightMargin: root.standalonePlayerMode ? 0 : 12
+        anchors.topMargin: root.standalonePlayerMode ? 0 : 9
+        anchors.bottomMargin: root.standalonePlayerMode ? 0 : 9
 
         Rectangle {
             id: toolbar
@@ -1708,6 +3274,7 @@ Item {
             anchors.right: parent.right
             anchors.top: parent.top
             height: 34
+            visible: !root.standalonePlayerMode
             color: root.panelOverlayRaised
             border.color: "#333333"
             border.width: 1
@@ -1727,6 +3294,26 @@ Item {
                 anchors.rightMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 6
+
+                GgButton {
+                    objectName: "gameEngineWorldLoadButton"
+                    text: root.originalWorldActive ? "GG WORLD" : "LOAD WORLD"
+                    implicitWidth: 96
+                    implicitHeight: 25
+                    HoverHandler { id: worldLoadHover }
+                    ToolTip.text: root.worldLoadMessage || (root.benillaWorld ? root.benillaWorld.error : "")
+                    ToolTip.visible: worldLoadHover.hovered && ToolTip.text.length > 0
+                    onClicked: root.originalWorldActive ? root.selectBenillaWorld("") : worldManifestDialog.open()
+                }
+
+                GgButton {
+                    objectName: "gameEngineWorldDemoButton"
+                    text: "DEMO WORLD"
+                    implicitWidth: 96
+                    implicitHeight: 25
+                    enabled: !root.originalWorldActive
+                    onClicked: root.selectBenillaWorld("game/worlds/benilla-demo/world.json")
+                }
 
                 GgButton {
                     objectName: "gameEnginePlayButton"
@@ -1759,14 +3346,31 @@ Item {
             id: body
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: toolbar.bottom
+            anchors.top: root.standalonePlayerMode ? parent.top : toolbar.bottom
             anchors.bottom: parent.bottom
-            anchors.topMargin: 8
+            anchors.topMargin: root.standalonePlayerMode ? 0 : 8
+
+            Loader {
+                anchors.fill: parent
+                anchors.leftMargin: root.standalonePlayerMode ? 0 : sidebar.width + 8
+                z: 29
+                active: root.page === "CHAR"
+                sourceComponent: CharacterCreationPanel {
+                    surfaceHost: root.surfaceHost
+                    onApplied: root.applyRaw(root.surfaceHost.gameEngineStatus())
+                    onClosed: {
+                        root.page = "PLAY"
+                        if (root.standalonePlayerMode) root.startRuntime()
+                        root.forceActiveFocus()
+                    }
+                }
+            }
 
             Rectangle {
                 id: sidebar
                 objectName: "gameEngineSidebar"
                 z: 30
+                visible: !root.standalonePlayerMode
                 anchors.left: parent.left
                 anchors.top: parent.top
                 width: root.leftMenuCollapsed ? 34 : 124
@@ -1860,6 +3464,7 @@ Item {
                 id: engineRail
                 objectName: "gameEngineEngineRail"
                 z: 30
+                visible: !root.standalonePlayerMode
                 anchors.left: sidebar.left
                 anchors.bottom: parent.bottom
                 width: sidebar.width
@@ -1909,21 +3514,88 @@ Item {
                 objectName: "gameEngineStage"
                 anchors.fill: parent
 
+                GgButton {
+                    objectName: "gameEnginePresentationToggle"
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 8
+                    z: 40
+                    implicitWidth: 92
+                    implicitHeight: 26
+                    text: root.dosFallbackActive ? "LOW POLY" : "DOS"
+                    checked: root.dosFallbackActive
+                    onClicked: root.togglePresentationMode()
+                }
+
                 View3D {
                     id: view3d
+                    objectName: "gameEngineView3D"
                     anchors.fill: parent
+                    // The bounded console-era profiles render color/depth at
+                    // their internal scale, then composite to the viewport.
+                    // This changes presentation cost only, not gameplay data.
+                    explicitTextureWidth: Math.max(
+                        1,
+                        Math.round(width * Screen.devicePixelRatio
+                            * root.internalResolutionScale)
+                    )
+                    explicitTextureHeight: Math.max(
+                        1,
+                        Math.round(height * Screen.devicePixelRatio
+                            * root.internalResolutionScale)
+                    )
                     // Hiding the rich renderer is presentation-only.  The
                     // fixed-step host keeps producing the same entity/item/
                     // NPC rows for the DOS canvas below.
                     visible: !root.dosFallbackActive && root.paneLive
                     camera: camera
-                    environment: SceneEnvironment {
-                        // Jak/Sly/Fable coastal daylight: a readable cyan
-                        // sky, not a crushed black void.  Presentation only;
-                        // the simulation sea level and biomes stay the same.
-                        clearColor: "#7eb7d2"
+                    environment: ExtendedSceneEnvironment {
+                        objectName: "gamePaintedSceneEnvironment"
+                        // Only HDR sources bloom; ordinary painted surfaces
+                        // remain readable. Two blur levels keep cost bounded.
+                        glowEnabled: !root.originalWorldActive && root.render.profile !== "POTATO"
+                        effects: root.originalWorldActive || originalFfx.ghost ? [originalFfx] : []
+                        glowBlendMode: ExtendedSceneEnvironment.Additive
+                        glowHDRMinimumValue: 1.1
+                        glowBloom: 0.0
+                        glowStrength: root.atmosphere.glowStrength
+                        glowIntensity: root.atmosphere.glowIntensity
+                        glowLevel: ExtendedSceneEnvironment.Two | ExtendedSceneEnvironment.Three
+                        glowQualityHigh: false
+                        glowUseBicubicUpscale: false
+                        // The ambient probe is generated once. Sky colours
+                        // animate on the cheap skydome below, without rebuilding
+                        // and prefiltering a 512px HDR cubemap every clock tick.
+                        clearColor: root.oceanHorizonColor
                         backgroundMode: SceneEnvironment.Color
+                        lightProbe: Texture {
+                            textureData: ProceduralSkyTextureData {
+                                textureQuality:
+                                    ProceduralSkyTextureData.SkyTextureQualityLow
+                                skyTopColor: "#799bbd"
+                                skyHorizonColor: "#adbac9"
+                                groundHorizonColor: "#adbac9"
+                                groundBottomColor: "#526568"
+                                skyEnergy: 1.0
+                                groundEnergy: 0.9
+                                sunEnergy: 0.0
+                            }
+                        }
+                        probeExposure: root.atmosphere.probeEnergy
+                        skyboxBlurAmount: 0.0
+                        fog: Fog {
+                            objectName: "gameDistanceFog"
+                            enabled: true
+                            depthEnabled: true
+                            depthNear: root.distanceFog.near
+                            Behavior on depthNear { NumberAnimation { duration: 1200 } }
+                            depthFar: root.distanceFog.far
+                            depthCurve: root.distanceFog.curve
+                            density: 1.0
+                            color: root.oceanHorizonColor
+                        }
                         antialiasingMode: root.render.profile === "POTATO"
+                            || root.ps2ClassicRenderer
                             ? SceneEnvironment.NoAA
                             : (root.render.profile === "CINEMATIC"
                                 ? SceneEnvironment.SSAA : SceneEnvironment.MSAA)
@@ -1931,67 +3603,75 @@ Item {
                             ? SceneEnvironment.VeryHigh
                             : (root.render.profile === "MODERN"
                                 ? SceneEnvironment.High : SceneEnvironment.Medium)
-                        temporalAAEnabled: root.render.profile === "MODERN"
-                            || root.render.profile === "CINEMATIC"
+                        temporalAAEnabled: !root.ps2ClassicRenderer
+                            && (root.render.profile === "MODERN"
+                                || root.render.profile === "CINEMATIC")
                         temporalAAStrength: root.render.profile === "CINEMATIC" ? 0.85 : 0.55
-                        tonemapMode: SceneEnvironment.TonemapModeFilmic
+                        tonemapMode: root.originalWorldActive || root.ps2ClassicRenderer
+                            ? SceneEnvironment.TonemapModeLinear
+                            : SceneEnvironment.TonemapModeFilmic
                         aoEnabled: root.render.profile !== "POTATO"
+                            && !root.ps2ClassicRenderer
                         aoStrength: root.render.profile === "CINEMATIC" ? 0.32 : 0.14
                     }
 
                     PerspectiveCamera {
                         id: camera
+                        fieldOfView: 45
+                        fieldOfViewOrientation: PerspectiveCamera.Vertical
+                        frustumCullingEnabled: root.frustumCullingEnabled
                         position: Qt.vector3d(
-                            root.number(root.player.x, 0)
-                                + Math.sin(root.orbitYaw * Math.PI / 180)
-                                    * root.cameraDistance
-                                    * (root.cinematic.preset === "ORBIT_WORLD_SCALE" ? 2.2 : 1),
-                            root.number(root.player.y, 0)
-                                - Math.sin(root.orbitPitch * Math.PI / 180)
-                                    * root.cameraDistance
-                                    * (root.cinematic.preset === "ORBIT_WORLD_SCALE" ? 2.2 : 1),
-                            root.number(root.player.z, 0)
-                                + Math.cos(root.orbitYaw * Math.PI / 180)
-                                    * root.cameraDistance
-                                    * (root.cinematic.preset === "ORBIT_WORLD_SCALE" ? 2.2 : 1)
+                            root.renderCameraX,
+                            root.planetRenderY(
+                                root.renderCameraX,
+                                root.renderCameraY,
+                                root.renderCameraZ
+                            ),
+                            root.renderCameraZ
                         )
                         eulerRotation: Qt.vector3d(
                             root.cinematic.preset === "ORBIT_WORLD_SCALE"
                                 ? -42 : root.orbitPitch,
-                            root.orbitYaw,
+                            root.cameraWorldYaw,
                             0
                         )
-                        clipNear: root.number(
-                            root.world.camera
-                                ? root.world.camera.clip_near_m : 0.1,
-                            0.1
+                        clipNear: Math.max(
+                            root.number(
+                                root.world.camera
+                                    ? root.world.camera.clip_near_m : 0.1,
+                                0.1
+                            ),
+                            Math.min(2.0, root.renderFarClipM / 500000)
                         )
-                        clipFar: root.cinematic.preset === "ORBIT_WORLD_SCALE"
-                            ? Math.max(
-                                640,
-                                root.number(
-                                    root.world.camera
-                                        ? root.world.camera.clip_far_m : 360,
-                                    360
-                                )
-                            )
-                            : (root.render.profile === "CINEMATIC"
-                                ? Math.max(
-                                    root.streamCoverageSize * 2.5,
-                                    root.number(
-                                        root.world.camera
-                                            ? root.world.camera.clip_far_m : 360,
-                                        360
-                                    )
-                                )
-                                : 240)
+                        clipFar: root.cameraClipFarM
+                    }
+
+                    Model {
+                        objectName: "gameAtmosphereSkyDome"
+                        visible: !(root.originalWorldActive && root.benillaWorld && root.benillaWorld.lighting.source === "ORIGINAL_LIGHT_DBC")
+                        geometry: root.lowPolySphereGeometry
+                        position: camera.position
+                        scale: Qt.vector3d(root.cameraClipFarM*.99/50,
+                            root.cameraClipFarM*.99/50, root.cameraClipFarM*.99/50)
+                        castsShadows: false
+                        receivesShadows: false
+                        materials: AdventureSkyMaterial {
+                            uTopColor: root.atmosphere.sky
+                            uHorizonColor: root.oceanHorizonColor
+                            uBottomColor: root.atmosphere.ground
+                            uCloudColor: root.atmosphere.cloud
+                            uTime: root.number(root.player.time_s,0)
+                            uNight: root.atmosphere.night
+                        }
                     }
 
                     DirectionalLight {
                         objectName: "gameKeyLight"
                         eulerRotation: Qt.vector3d(-58, 42, 0)
-                        brightness: 1.22
-                        color: "#ffe3b0"
+                        brightness: root.atmosphere.keyEnergy
+                        color: root.atmosphere.key
+                        Behavior on color { ColorAnimation { duration: 1600 } }
+                        Behavior on brightness { NumberAnimation { duration: 1600 } }
                         castsShadow: root.shadowMappingEnabled
                         shadowMapQuality: root.render.profile === "CINEMATIC"
                             ? Light.ShadowMapQualityHigh
@@ -2005,163 +3685,707 @@ Item {
                     DirectionalLight {
                         objectName: "gameSkyFillLight"
                         eulerRotation: Qt.vector3d(-18, -135, 0)
-                        brightness: 0.55
-                        color: "#9fd4ee"
+                        brightness: root.atmosphere.fillEnergy
+                        color: root.atmosphere.fill
+                        Behavior on color { ColorAnimation { duration: 1600 } }
+                        Behavior on brightness { NumberAnimation { duration: 1600 } }
                         castsShadow: false
                     }
 
-                    PointLight {
-                        position: Qt.vector3d(
-                            root.number(root.player.x, 0),
-                            root.number(root.player.y, 0) + 16,
-                            root.number(root.player.z, 0) + 5
-                        )
-                        brightness: 4.2
-                        color: "#ffc27a"
-                        quadraticFade: 0.008
-                        // A point-light shadow map costs six render passes;
-                        // the directional light above owns the scene shadow.
+                    DirectionalLight {
+                        objectName: "gameMoonRimLight"
+                        eulerRotation: Qt.vector3d(-28, 145, 0)
+                        brightness: .08 + root.atmosphere.night * .10
+                        color: root.atmosphere.fill
                         castsShadow: false
+                    }
+
+                    Model {
+                        id: grappleRopeModel
+                        objectName: "gameGrappleRope"
+                        source: "#Cube"
+                        property var grappleState: root.player.grapple || ({})
+                        property bool grappleAttached:
+                            Boolean(grappleState.attached)
+                        property bool hookFlying:
+                            Boolean(grappleState.projectile_active)
+                        property real ropeEndX: grappleAttached
+                            ? root.number(grappleState.anchor_x, 0)
+                            : root.number(grappleState.projectile_x, 0)
+                        property real ropeEndY: grappleAttached
+                            ? root.number(grappleState.anchor_y, 0)
+                            : root.number(grappleState.projectile_y, 0)
+                        property real ropeEndZ: grappleAttached
+                            ? root.number(grappleState.anchor_z, 0)
+                            : root.number(grappleState.projectile_z, 0)
+                        property real ropeStartY:
+                            root.number(root.player.y, 0) + 0.85
+                        property real ropeDx:
+                            ropeEndX - root.number(root.player.x, 0)
+                        property real ropeDy:
+                            ropeEndY - ropeStartY
+                        property real ropeDz:
+                            ropeEndZ - root.number(root.player.z, 0)
+                        property real ropeHorizontal:
+                            Math.sqrt(ropeDx * ropeDx + ropeDz * ropeDz)
+                        visible: grappleAttached || hookFlying
+                        position: Qt.vector3d(
+                            root.number(root.player.x, 0) + ropeDx * 0.5,
+                            ropeStartY + ropeDy * 0.5,
+                            root.number(root.player.z, 0) + ropeDz * 0.5
+                        )
+                        eulerRotation: Qt.vector3d(
+                            Math.atan2(ropeHorizontal, ropeDy) * 57.2957795,
+                            Math.atan2(ropeDx, ropeDz) * 57.2957795,
+                            0
+                        )
+                        scale: Qt.vector3d(
+                            0.045 * root.sceneScale,
+                            Math.sqrt(
+                                ropeDx * ropeDx + ropeDy * ropeDy + ropeDz * ropeDz
+                            ) * root.sceneScale,
+                            0.045 * root.sceneScale
+                        )
+                        castsShadows: false
+                        receivesShadows: false
+                        materials: PrincipledMaterial {
+                            baseColor: "#d8bd78"
+                            roughness: 0.72
+                            metalness: 0.0
+                        }
+                    }
+
+                    RuntimeLoader {
+                        objectName: "gameGrappleHook"
+                        source: Qt.resolvedUrl(
+                            "../assets/authored/props/gg-grapple-hook.glb"
+                        )
+                        property var grappleState: root.player.grapple || ({})
+                        visible: Boolean(grappleState.attached)
+                            || Boolean(grappleState.projectile_active)
+                        position: Qt.vector3d(
+                            Boolean(grappleState.attached)
+                                ? root.number(grappleState.anchor_x, 0)
+                                : root.number(grappleState.projectile_x, 0),
+                            Boolean(grappleState.attached)
+                                ? root.number(grappleState.anchor_y, 0)
+                                : root.number(grappleState.projectile_y, 0),
+                            Boolean(grappleState.attached)
+                                ? root.number(grappleState.anchor_z, 0)
+                                : root.number(grappleState.projectile_z, 0)
+                        )
+                        // The Blender GLB is authored in meters and follows
+                        // local +Z after its Y-up export, matching the rope.
+                        scale: Qt.vector3d(1, 1, 1)
+                        eulerRotation.x: -Math.atan2(
+                            grappleRopeModel.ropeDy,
+                            grappleRopeModel.ropeHorizontal
+                        ) * 57.2957795
+                        eulerRotation.y: Math.atan2(
+                            grappleRopeModel.ropeDx,
+                            grappleRopeModel.ropeDz
+                        ) * 57.2957795
+                    }
+
+                    RuntimeLoader {
+                        id: planetSurfaceLoader
+                        onStatusChanged: if (status===RuntimeLoader.Success && root.surfaceHost.gameEngineEnablePicking)
+                            root.surfaceHost.gameEngineEnablePicking(this,'')
+                        objectName: "gamePlanetSurfaceLoader"
+                        source: Qt.resolvedUrl(
+                            root.largeEnvironment
+                                ? "../assets/authored/world/gg-sandover-planet-surface-landscape.glb"
+                                : "../assets/authored/world/gg-sandover-planet-surface.glb"
+                        )
+                        visible: !root.originalWorldActive && root.planetSurfaceAssetVisible
+                        // This mesh and the water/terrain collision data share
+                        // world-meter coordinates. sceneScale only sizes local
+                        // primitives and must not shrink world-space geometry.
+                        scale: Qt.vector3d(1, 1, 1)
+                    }
+
+                    BenillaWorldPage {
+                        id: originalWorldPage
+                        stream: root.benillaWorld
+                        textureTrilinear: root.nativeScenePresentation ? root.nativeScenePresentation.textureTrilinear : true
+                        cameraPosition: camera.scenePosition
+                        sceneCamera: camera
+                        cameraAspect: Math.max(.05,view3d.width/Math.max(1,view3d.height))
+                        live: root.paneLive
+                        animate: root.running || root.replaying
+                    }
+                    BenillaWorldActorsPage {
+                        provider: root.originalWorldActors
+                        textureTrilinear: root.nativeScenePresentation ? root.nativeScenePresentation.textureTrilinear : true
+                        stream: root.benillaWorld
+                        cameraPosition: camera.scenePosition
+                        hidePlayer: root.firstPersonView
+                        visible: root.originalWorldActive
+                    }
+
+                    BenillaFfxEffect {
+                        id: originalFfx
+                        objectName: "ggBenillaFfx"
+                        property var state: root.benillaWorld ? root.benillaWorld.ffx : ({})
+                        glowWeight: state.gain || 0
+                        hazeWeight: state.haze || 0
+                        ghost: state.ghost || false
+                        underwaterWave: state.wave || false
+                        timeSeconds: originalWorldPage.timeSeconds
+                        viewportWidth: view3d.explicitTextureWidth
+                        viewportHeight: view3d.explicitTextureHeight
+                        waveTexture: root.originalWorldActive && root.surfaceHost
+                            && typeof root.surfaceHost.gameEngineBenillaWaveTexture === "function"
+                            ? root.surfaceHost.gameEngineBenillaWaveTexture() : null
+                    }
+
+                    PaintedClayMaterial {
+                        id: floraMaterial
+                        uSurfaceKind: 1
+                    }
+
+                    PaintedClayMaterial {
+                        id: paintedArchitectureMaterial
+                    }
+
+                    PaintedClayMaterial {
+                        id: paintedRoadMaterial
+                        uSurfaceKind: 2
+                    }
+
+                    CustomMaterial {
+                        id: inlandWaterMaterial
+                        shadingMode: CustomMaterial.Shaded
+                        vertexShader: "../shaders/gg-inland-water.vert"
+                        fragmentShader: "../shaders/gg-inland-water.frag"
+                        property real uTime: root.number(root.player.time_s, 0)
+                        property color uWaterTint: root.atmosphere.waterTint
+                        property TextureInput waterMap: TextureInput {
+                            texture: Texture {
+                                source: "../assets/authored/world/textures/clay-v4/water.png"
+                                generateMipmaps: true
+                                tilingModeHorizontal: Texture.Repeat
+                                tilingModeVertical: Texture.Repeat
+                            }
+                        }
+                        cullMode: Material.NoCulling
+                    }
+
+                    Repeater3D {
+                        model: root.surfaceHost && root.surfaceHost.gameEngineLandscape
+                            ? root.surfaceHost.gameEngineLandscape() : null
+                        delegate: Model {
+                            required property var treeGeometry
+                            required property var treeInstances
+                            required property int treeLod
+                            required property int treeCount
+                            required property string treeKey
+                            required property bool treeResident
+                            objectName: "gameLandscapeBatch"
+                            geometry: treeGeometry
+                            instancing: treeInstances
+                            instancingLodMax: -1
+                            readonly property bool waterPage: treeKey.indexOf("/road-water-") >= 0
+                            materials: waterPage ? [inlandWaterMaterial] : [paintedArchitectureMaterial]
+                            visible: !root.originalWorldActive && treeResident && root.paneLive && !root.dosFallbackActive && treeCount > 0
+                            castsShadows: root.shadowMappingEnabled && !waterPage
+                            receivesShadows: root.shadowMappingEnabled && !waterPage
+                        }
+                    }
+
+                    // Fixed map placements. The camera clips these models at
+                    // the same far plane as land/buildings. Sector/species
+                    // buffers persist when the shared LOD mesh changes.
+                    Repeater3D {
+                        model: root.surfaceHost && root.surfaceHost.gameEngineWorldTrees
+                            ? root.surfaceHost.gameEngineWorldTrees() : null
+                        delegate: Model {
+                            required property var treeGeometry
+                            required property var treeInstances
+                            required property int treeLod
+                            required property int treeCount
+                            required property string treeKey
+                            required property bool treeResident
+                            objectName: "gameWorldTreeBatch"
+                            pickable: root.assetEditorMode
+                            geometry: treeGeometry
+                            instancing: treeInstances
+                            readonly property real nearDistance: root.render.profile === "POTATO" ? 128 : 256
+                            readonly property real midDistance: root.render.profile === "POTATO" ? 512 : 1024
+                            instancingLodMin: treeLod === 0 ? 0 : treeLod === 1 ? nearDistance : midDistance
+                            instancingLodMax: treeLod === 0 ? Math.min(nearDistance,root.renderFarClipM)
+                                : treeLod === 1 ? Math.min(midDistance,root.renderFarClipM) : root.renderFarClipM
+                            materials: [floraMaterial]
+                            visible: !root.originalWorldActive && treeResident && root.floraEnabled && root.paneLive
+                                && !root.dosFallbackActive && treeCount > 0
+                            castsShadows: root.shadowMappingEnabled && treeLod === 0
+                            receivesShadows: root.shadowMappingEnabled && treeLod < 2
+                        }
+                    }
+
+                    // Saved towns, landmarks and road pages share terrain
+                    // range. Their scene nodes survive turning away/returning.
+                    GroundCoverMaterial {
+                        id: grassCardMaterial
+                        imageSource: "../assets/authored/world/ground-cover/tuft.png"
+                        uCameraRight: root.groundCoverRight
+                        uTime: root.number(root.player.time_s,0)
+                    }
+                    GroundCoverMaterial {
+                        id: fernCardMaterial
+                        imageSource: "../assets/authored/world/ground-cover/fern-card.png"
+                        uCameraRight: root.groundCoverRight
+                        uTime: root.number(root.player.time_s,0)
+                    }
+                    GroundCoverMaterial {
+                        id: flowerCardMaterial
+                        imageSource: "../assets/authored/world/ground-cover/flowers-card.png"
+                        uCameraRight: root.groundCoverRight
+                        uTime: root.number(root.player.time_s,0)
+                    }
+                    GroundCoverMaterial {
+                        id: leafCardMaterial
+                        imageSource: "../assets/authored/world/ground-cover/leaves-card.png"
+                        uCameraRight: root.groundCoverRight
+                        uTime: root.number(root.player.time_s,0)
+                    }
+                    Repeater3D {
+                        model: root.surfaceHost && root.surfaceHost.gameEngineGroundCover
+                            ? root.surfaceHost.gameEngineGroundCover() : null
+                        delegate: Model {
+                            required property var treeGeometry
+                            required property var treeInstances
+                            required property int treeLod
+                            required property int treeCount
+                            required property string treeKey
+                            required property bool treeResident
+                            objectName: "gameCosmeticGroundCoverBatch"
+                            pickable: root.assetEditorMode
+                            geometry: treeGeometry
+                            instancing: treeInstances
+                            instancingLodMax: root.render.profile === "POTATO" ? 64
+                                : root.render.profile === "PS2_CLASSIC" ? 128
+                                : root.render.profile === "CINEMATIC" ? 224
+                                : root.render.profile === "MODERN" ? 192 : 160
+                            visible: !root.originalWorldActive && treeResident && root.floraEnabled && root.paneLive
+                                && !root.dosFallbackActive && treeCount>0
+                            castsShadows: false
+                            receivesShadows: root.shadowMappingEnabled
+                            materials: treeKey.indexOf("/fern-card")>=0 ? [fernCardMaterial]
+                                : treeKey.indexOf("/flowers-card")>=0 ? [flowerCardMaterial]
+                                : treeKey.indexOf("/leaves-card")>=0 ? [leafCardMaterial] : [grassCardMaterial]
+                        }
+                    }
+                    Repeater3D {
+                        model: root.surfaceHost && root.surfaceHost.gameEngineWorldPlaces
+                            ? root.surfaceHost.gameEngineWorldPlaces() : null
+                        delegate: Model {
+                            required property var treeGeometry
+                            required property var treeInstances
+                            required property int treeLod
+                            required property int treeCount
+                            required property string treeKey
+                            required property bool treeResident
+                            objectName: "gameWorldPlaceBatch"
+                            readonly property bool roadPage: treeKey.indexOf("/road-") >= 0
+                            pickable: root.assetEditorMode
+                            geometry: treeGeometry
+                            instancing: treeInstances
+                            readonly property real nearDistance: root.render.profile === "POTATO" ? 128 : 256
+                            readonly property real midDistance: root.render.profile === "POTATO" ? 512 : 1024
+                            instancingLodMin: treeLod === 0 ? 0 : treeLod === 1 ? nearDistance : midDistance
+                            instancingLodMax: roadPage ? -1 : treeLod === 0 ? Math.min(nearDistance,root.renderFarClipM)
+                                : treeLod === 1 ? Math.min(midDistance,root.renderFarClipM) : root.renderFarClipM
+                            materials: roadPage ? [paintedRoadMaterial]
+                                : treeKey.indexOf("/lantern")>=0 ? [paintedLampMaterial] : [paintedArchitectureMaterial]
+                            visible: !root.originalWorldActive && treeResident && root.paneLive && !root.dosFallbackActive && treeCount > 0
+                            castsShadows: root.shadowMappingEnabled && treeLod === 0 && !roadPage
+                            receivesShadows: root.shadowMappingEnabled && treeLod < 2
+                        }
+                    }
+
+                    // Stable species/LOD slots, one native GPU table per mesh.
+                    // Placements stay in the backend cache, not in frame JSON
+                    // or one scene Node/RuntimeLoader for each tree.
+                    Repeater3D {
+                        model: root.floraBatchKeys
+                        delegate: Model {
+                            id: floraBatch
+                            pickable: true
+                            property bool isNatureBatch: false
+                            required property string modelData
+                            objectName: "gameFloraBatch"
+                            readonly property string batchKey: modelData
+                            readonly property int batchRevision: root.ecologyRevision
+                                + root.assetEditorRevision
+                            readonly property int plantCount:
+                                Math.floor(root.number((root.ecology.groups || ({}))[batchKey], 0))
+                            property var sharedMesh: null
+                            property var instanceTable: null
+                            function refreshBatch() {
+                                if (!root.surfaceHost || plantCount <= 0
+                                        || !root.surfaceHost.gameEngineFloraGeometry
+                                        || !root.surfaceHost.gameEngineFloraInstances)
+                                    return
+                                if (sharedMesh === null)
+                                    sharedMesh = root.surfaceHost.gameEngineFloraGeometry(batchKey)
+                                instanceTable = root.surfaceHost.gameEngineFloraInstances(batchKey)
+                            }
+                            onBatchRevisionChanged: Qt.callLater(refreshBatch)
+                            onPlantCountChanged: Qt.callLater(refreshBatch)
+                            Component.onCompleted: Qt.callLater(refreshBatch)
+                            Connections {
+                                target: root
+                                function onSurfaceHostChanged() { Qt.callLater(floraBatch.refreshBatch) }
+                            }
+                            geometry: sharedMesh
+                            instancing: instanceTable
+                            materials: [floraMaterial]
+                            visible: !root.originalWorldActive && root.floraEnabled && root.paneLive && !root.dosFallbackActive && plantCount > 0
+                                && sharedMesh !== null && instanceTable !== null
+                            castsShadows: root.shadowMappingEnabled && batchKey.endsWith(":0")
+                                && ["oak","oak_arch","pine","jungle","palm","mangrove","deadwood"].indexOf(batchKey.split(":")[0].split("-v")[0]) >= 0
+                            receivesShadows: root.shadowMappingEnabled
+                        }
+                    }
+
+                    Repeater3D {
+                        model: root.natureBatchKeys
+                        delegate: Model {
+                            id: natureBatch
+                            pickable: true
+                            property string batchKey: modelData
+                            property bool isNatureBatch: true
+                            required property string modelData
+                            objectName: "gameNatureBatch"
+                            readonly property int batchRevision: root.natureRevision
+                                + root.assetEditorRevision
+                            readonly property int instanceCount: root.number((root.nature.groups || ({}))[modelData],0)
+                            property var sharedMesh: null
+                            property var instanceTable: null
+                            function refreshBatch() {
+                                if (instanceCount <= 0 || !root.surfaceHost
+                                        || !root.surfaceHost.gameEngineNatureGeometry
+                                        || !root.surfaceHost.gameEngineNatureInstances) return
+                                if (sharedMesh === null) sharedMesh = root.surfaceHost.gameEngineNatureGeometry(modelData)
+                                instanceTable = root.surfaceHost.gameEngineNatureInstances(modelData)
+                            }
+                            onInstanceCountChanged: Qt.callLater(refreshBatch)
+                            Component.onCompleted: Qt.callLater(refreshBatch)
+                            Connections {
+                                target: root
+                                function onSurfaceHostChanged() { Qt.callLater(natureBatch.refreshBatch) }
+                            }
+                            geometry: sharedMesh
+                            instancing: instanceTable
+                            materials: [floraMaterial]
+                            visible: !root.originalWorldActive && root.paneLive && !root.dosFallbackActive && instanceCount > 0
+                                && sharedMesh !== null && instanceTable !== null
+                            receivesShadows: root.shadowMappingEnabled
+                        }
+                    }
+
+                    RuntimeLoader {
+                        id: sandoverIslandTerrainLoader
+                        onStatusChanged: if (status===RuntimeLoader.Success && root.surfaceHost.gameEngineEnablePicking)
+                            root.surfaceHost.gameEngineEnablePicking(this,'')
+                        objectName: "gameSandoverIslandTerrainLoader"
+                        source: Qt.resolvedUrl(
+                            "../assets/authored/world/gg-sandover-island-terrain.glb"
+                        )
+                        visible: !root.originalWorldActive && root.sandoverIslandTerrainVisible
+                        scale: Qt.vector3d(
+                            root.worldLayoutScale,
+                            root.worldFeelScale,
+                            root.worldLayoutScale
+                        )
+                    }
+
+                    RuntimeLoader {
+                        id: sandoverIslandEnvironmentLoader
+                        onStatusChanged: if (status===RuntimeLoader.Success && root.surfaceHost.gameEngineEnablePicking)
+                            root.surfaceHost.gameEngineEnablePicking(this,'')
+                        objectName: "gameSandoverIslandEnvironmentLoader"
+                        source: Qt.resolvedUrl(
+                            root.largeEnvironment
+                                ? "../assets/authored/world/gg-sandover-island-environment-coastal-v3.glb"
+                                : "../assets/authored/world/gg-sandover-island-environment.glb"
+                        )
+                        visible: !root.originalWorldActive && !root.dosFallbackActive && root.paneLive
+                        scale: Qt.vector3d(
+                            root.worldPropScale,
+                            root.worldPropScale,
+                            root.worldPropScale
+                        )
+                    }
+
+                    // Each bird has its own skinned flight path inside this
+                    // mesh. World cells only place the authored bird groups;
+                    // fish schools and sparse clouds keep their group motion.
+                    Repeater3D {
+                        id: faunaBirdRepeater
+                        model: root.nature.schema ? 0 : 3
+                        delegate: RuntimeLoader {
+                            required property int index
+                            objectName: "gameSandoverBirdFlock"
+                            source: Qt.resolvedUrl(
+                                "../assets/authored/world/gg-sandover-bird-flock.glb"
+                            )
+                            property var group: {
+                                var rows = root.fauna.birds || []
+                                return index < rows.length ? rows[index] : ({})
+                            }
+                            visible: !root.originalWorldActive && root.paneLive
+                                && root.sandoverIslandEnvironmentReady
+                                && !root.dosFallbackActive
+                                && group.x !== undefined
+                            position: Qt.vector3d(
+                                root.number(group.x, 0),
+                                root.planetRenderY(
+                                    root.number(group.x, 0),
+                                    root.number(group.y, 12),
+                                    root.number(group.z, 0)
+                                ),
+                                root.number(group.z, 0)
+                            )
+                            eulerRotation.y: root.number(group.yaw, 0) * 57.2957795
+                            scale: Qt.vector3d(
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1)
+                            )
+                            onStatusChanged: root.refreshSandoverLifeClips()
+                        }
+                    }
+                    Repeater3D {
+                        id: faunaFishRepeater
+                        model: root.nature.schema ? 0 : 8
+                        delegate: RuntimeLoader {
+                            required property int index
+                            objectName: "gameSandoverFishSchool"
+                            source: Qt.resolvedUrl(
+                                "../assets/authored/world/gg-sandover-fish-school.glb"
+                            )
+                            property var group: {
+                                var rows = root.fauna.fish || []
+                                return index < rows.length ? rows[index] : ({})
+                            }
+                            visible: !root.originalWorldActive && root.paneLive
+                                && root.sandoverIslandEnvironmentReady
+                                && !root.dosFallbackActive
+                                && group.x !== undefined
+                            position: Qt.vector3d(
+                                root.number(group.x, 0),
+                                root.planetRenderY(
+                                    root.number(group.x, 0),
+                                    root.number(group.y, 0.2),
+                                    root.number(group.z, 0)
+                                ),
+                                root.number(group.z, 0)
+                            )
+                            eulerRotation.y: root.number(group.yaw, 0) * 57.2957795
+                            scale: Qt.vector3d(
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1)
+                            )
+                            onStatusChanged: root.refreshSandoverLifeClips()
+                        }
+                    }
+                    Repeater3D {
+                        id: faunaCloudRepeater
+                        model: 2
+                        delegate: RuntimeLoader {
+                            required property int index
+                            objectName: "gameSandoverCloudBank"
+                            readonly property var motion: group.motion || ({})
+                            readonly property real cloudTime: root.number(root.player.time_s,0)
+                            readonly property real cloudAngle: cloudTime*root.number(motion.rate,0)+root.number(motion.phase,0)
+                            readonly property real cloudX: motion.anchor_x !== undefined
+                                ? motion.anchor_x+Math.cos(cloudAngle)*motion.radius : root.number(group.x,0)
+                            readonly property real cloudZ: motion.anchor_z !== undefined
+                                ? motion.anchor_z+Math.sin(cloudAngle)*motion.radius : root.number(group.z,0)
+                            readonly property real cloudY: motion.altitude !== undefined
+                                ? motion.altitude+Math.sin(cloudTime*motion.bob_rate+motion.bob_phase)*.35 : root.number(group.y,24)
+                            source: Qt.resolvedUrl(
+                                index % 4 === 0 ? "../assets/authored/world/gg-sandover-cloud-bank.glb"
+                                : "../assets/authored/variants/world/gg-sandover-cloud-bank-v" + (index % 4) + ".glb"
+                            )
+                            property var group: {
+                                var rows = root.fauna.clouds || []
+                                return index < rows.length ? rows[index] : ({})
+                            }
+                            visible: !root.originalWorldActive && root.paneLive
+                                && root.sandoverIslandEnvironmentReady
+                                && !root.dosFallbackActive
+                                && group.x !== undefined
+                            position: Qt.vector3d(
+                                cloudX,
+                                root.planetRenderY(
+                                    cloudX,cloudY,cloudZ
+                                ),
+                                cloudZ
+                            )
+                            eulerRotation.y: motion.rate !== undefined ? -cloudAngle*57.2957795 : root.number(group.yaw,0)*57.2957795
+                            scale: Qt.vector3d(
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1),
+                                root.number(group.scale, 1)
+                            )
+                        }
                     }
 
                     // One material object per look, not one per Model.  Same
                     // sun, same albedo; the Repeater must not allocate a new
                     // PBR material for every palm, hut and terrain cell.
-                    PrincipledMaterial {
+                    PaintedClayMaterial {
                         id: clayPropMaterial
                         objectName: "gameClayPropMaterial"
-                        baseColor: "#ffffff"
-                        vertexColorsEnabled: true
-                        roughness: 0.52
-                        metalness: 0.02
-                        specularAmount: 0.34
                     }
-                    PrincipledMaterial {
+                    PaintedClayMaterial {
+                        id: paintedLampMaterial
+                        uLampEmission: 1
+                    }
+                    PaintedClayMaterial {
                         id: clayCharacterMaterial
                         objectName: "gameClayCharacterMaterial"
-                        baseColor: "#fff6e8"
-                        vertexColorsEnabled: true
-                        roughness: 0.48
-                        metalness: 0.0
-                        specularAmount: 0.42
+                        uSurfaceKind: 3
+                    }
+                    PaintedClayMaterial {
+                        id: terrainSurfaceMaterial
+                        objectName: "gameTerrainVertexColorMaterial"
+                        uSurfaceKind: 2
+                    }
+                    AdventureFxMaterial {
+                        id: clayParticleMaterial
+                        objectName: "gameParticleVertexColorMaterial"
+                        uEnergy: 0.72
+                        uTime: root.number(root.player.time_s,0)
+                        uFogNear: root.distanceFog.near
+                        uFogFar: root.distanceFog.far
+                        uBeaconFar: root.lightBeaconRangeM
+                        uEnchantMatrix0: root.enchantMesh0 ? root.enchantMesh0.sceneTransform : Qt.matrix4x4()
+                        uEnchantMatrix1: root.enchantMesh1 ? root.enchantMesh1.sceneTransform : Qt.matrix4x4()
+                        uCameraPosition: camera.position
+                    }
+                    AdventureFxMaterial {
+                        id: luminousParticleMaterial
+                        objectName: "gameAdditiveParticleMaterial"
+                        additive: true
+                        uTime: root.number(root.player.time_s,0)
+                        uFogNear: root.distanceFog.near
+                        uFogFar: root.distanceFog.far
+                        uBeaconFar: root.lightBeaconRangeM
+                        uEnchantMatrix0: root.enchantMesh0 ? root.enchantMesh0.sceneTransform : Qt.matrix4x4()
+                        uEnchantMatrix1: root.enchantMesh1 ? root.enchantMesh1.sceneTransform : Qt.matrix4x4()
+                        uCameraPosition: camera.position
                     }
                     PrincipledMaterial {
-                        id: islandTerrainMaterial
-                        baseColor: "#c2d15a"
-                        roughness: 0.9
-                        metalness: 0.02
+                        id: terrainHlodGrassMaterial
+                        baseColor: "#5a8c3c"
+                        roughness: 0.94
+                        specularAmount: 0.08
                     }
                     PrincipledMaterial {
-                        id: landTerrainMaterial
-                        baseColor: "#7eab46"
-                        roughness: 0.9
-                        metalness: 0.02
+                        id: terrainHlodBeachMaterial
+                        baseColor: "#efd090"
+                        roughness: 0.94
+                        specularAmount: 0.08
                     }
                     PrincipledMaterial {
-                        id: cliffTerrainMaterial
-                        baseColor: "#d2b17a"
-                        roughness: 0.9
-                        metalness: 0.02
+                        id: terrainHlodCliffMaterial
+                        baseColor: "#9e653b"
+                        roughness: 0.94
+                        specularAmount: 0.08
                     }
                     PrincipledMaterial {
-                        id: reefTerrainMaterial
-                        baseColor: "#2f9d8c"
-                        roughness: 0.9
-                        metalness: 0.02
+                        id: terrainHlodReefMaterial
+                        baseColor: "#43b49c"
+                        roughness: 0.82
+                        specularAmount: 0.08
                     }
                     PrincipledMaterial {
-                        id: shallowTerrainMaterial
-                        baseColor: "#1a7a8c"
-                        roughness: 0.76
-                        metalness: 0.05
+                        id: terrainHlodShallowWaterMaterial
+                        baseColor: "#39b7c1"
+                        roughness: 0.58
+                        specularAmount: 0.12
                     }
                     PrincipledMaterial {
-                        id: deepTerrainMaterial
-                        baseColor: "#0f5364"
-                        roughness: 0.76
-                        metalness: 0.05
+                        id: terrainHlodDeepWaterMaterial
+                        baseColor: "#1e7185"
+                        roughness: 0.62
+                        specularAmount: 0.10
                     }
-                    PrincipledMaterial {
+                    CustomMaterial {
                         id: seaPlaneMaterial
-                        baseColor: "#1f8aa2"
-                        roughness: 0.22
-                        metalness: 0.04
-                        specularAmount: 0.55
-                    }
-                    PrincipledMaterial {
-                        id: coverageSlabMaterial
-                        baseColor: "#111719"
-                        roughness: 0.92
-                    }
-                    PrincipledMaterial {
-                        id: coverageStripMaterial
-                        baseColor: "#252a2d"
-                        roughness: 0.85
-                    }
-
-                    Model {
-                        source: root.lowPolySphereGeometry ? "" : "#Cube"
-                        geometry: root.lowPolySphereGeometry
-                        visible: root.cinematic.preset === "ORBIT_WORLD_SCALE"
-                        position: Qt.vector3d(
-                            root.number(root.player.x, 0),
-                            root.number(root.player.y, 0) - 6,
-                            root.number(root.player.z, 0)
-                        )
-                        scale: Qt.vector3d(0.58, 0.58, 0.58)
-                        materials: [
-                            PrincipledMaterial {
-                                baseColor: "#1d3944"
-                                roughness: 0.96
-                                metalness: 0.02
+                        shadingMode: CustomMaterial.Shaded
+                        vertexShader: "../shaders/gg-sea.vert"
+                        fragmentShader: "../shaders/gg-sea.frag"
+                        property real uTime: root.number(root.player.time_s,0)
+                        property real uSea: root.number((root.terrain.water || {}).sea_level_m,0)
+                        property real uPlanet: 1000000
+                        property real uBedExtent: 600
+                        property color uWaterTint: root.atmosphere.waterTint
+                        property TextureInput seaMap: TextureInput {
+                            texture: Texture {
+                                source: "../assets/authored/world/textures/clay-v4/water.png"
+                                generateMipmaps: true
+                                tilingModeHorizontal: Texture.Repeat
+                                tilingModeVertical: Texture.Repeat
                             }
-                        ]
+                        }
+                        property TextureInput seaBed: TextureInput {
+                            texture: Texture {
+                                textureData: root.surfaceHost && root.surfaceHost.gameEngineSeaBedField
+                                    ? root.surfaceHost.gameEngineSeaBedField() : null
+                                minFilter: Texture.Linear
+                                magFilter: Texture.Linear
+                            }
+                        }
+                        sourceBlend: CustomMaterial.SrcAlpha
+                        destinationBlend: CustomMaterial.OneMinusSrcAlpha
+                        depthDrawMode: Material.OpaqueOnlyDepthDraw
+                        cullMode: Material.BackFaceCulling
                     }
-
                     Model {
-                        source: "#Cube"
-                        visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
-                        position: Qt.vector3d(0, -0.3, 0)
-                        scale: Qt.vector3d(
-                            root.streamCoverageSize * root.sceneScale,
-                            0.1 * root.sceneScale,
-                            root.streamCoverageSize * root.sceneScale
+                        id: planetWaterSurface
+                        objectName: "gamePlanetWaterHorizon"
+                        source: ""
+                        geometry: root.surfaceHost
+                            && typeof root.surfaceHost.gameEnginePlanetWaterGeometry
+                                === "function"
+                            ? root.surfaceHost.gameEnginePlanetWaterGeometry()
+                            : null
+                        visible: !root.originalWorldActive && Boolean(root.terrain.water)
+                        // Vertices are already world XZ. Do not add the player
+                        // position or the sea slides off the island.
+                        position: Qt.vector3d(
+                            root.number(root.player.x,0),
+                            root.number(root.terrain.water
+                                ? root.terrain.water.sea_level_m : 0, 0),
+                            root.number(root.player.z,0)
                         )
                         castsShadows: false
                         receivesShadows: false
-                        materials: [coverageSlabMaterial]
-                    }
-
-                    Model {
-                        source: "#Cube"
-                        visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
-                        position: Qt.vector3d(0, -0.22, 0)
-                        scale: Qt.vector3d(
-                            3.1 * root.sceneScale,
-                            0.06 * root.sceneScale,
-                            root.streamCoverageSize * root.sceneScale
-                        )
-                        castsShadows: false
-                        receivesShadows: false
-                        materials: [coverageStripMaterial]
+                        materials: [seaPlaneMaterial]
                     }
 
                     Model {
                         id: waterSurface
-                        source: "#Cube"
-                        visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
-                            && Boolean(root.terrain.water)
+                        source: ""
+                        geometry: root.waterWaveGeometry
+                        visible: !root.originalWorldActive && Boolean(root.terrain.water)
+                            && Boolean(root.waterWaveGeometry)
+                        // World-space vertices. Keep this at the origin.
                         position: Qt.vector3d(
-                            root.number(root.player.x, 0),
+                            root.number(root.player.x,0),
                             root.number(root.terrain.water
                                 ? root.terrain.water.sea_level_m : 0, 0),
-                            root.number(root.player.z, 0)
+                            root.number(root.player.z,0)
                         )
-                        scale: Qt.vector3d(
-                            root.streamCoverageSize * root.sceneScale,
-                            0.025 * root.sceneScale,
-                            root.streamCoverageSize * root.sceneScale
-                        )
+                        // Metre-sized native geometry. The 0.01 primitive scale
+                        // would shrink the sea disk to a puddle.
+                        scale: Qt.vector3d(1, 1, 1)
                         castsShadows: false
                         receivesShadows: false
                         materials: [seaPlaneMaterial]
@@ -2172,8 +4396,10 @@ Item {
 
                         delegate: Model {
                             id: terrainModel
+                            pickable: true
                             objectName: "terrainPatchModel"
-                            required property var terrainRow
+                            required property string terrainRowJson
+                            readonly property var terrainRow: JSON.parse(terrainRowJson)
                             property var modelData: terrainModel.terrainRow
                             property var center: terrainModel.modelData.center_m || ({})
                             property var bounds: terrainModel.modelData.bounds_m || ({})
@@ -2215,12 +4441,22 @@ Item {
                                 && Boolean(terrainModel.visibilityData.shadow_caster)
                             receivesShadows: root.shadowMappingEnabled
                                 && Boolean(terrainModel.visibilityData.shadow_caster)
-                            visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
+                            visible: !root.originalWorldActive && root.cinematic.preset !== "ORBIT_WORLD_SCALE"
                                 && Boolean(terrainModel.visibilityData.render)
+                                && !root.planetSurfaceAssetVisible
+                                && !root.sandoverTerrainCellCoveredByBlender(
+                                    terrainModel.modelData
+                                )
                             position: Qt.vector3d(
                                 root.number(terrainModel.bounds.min_x,
                                     root.number(terrainModel.center.x, 0)),
-                                0,
+                                root.planetRenderY(
+                                    root.number(terrainModel.bounds.min_x,
+                                        root.number(terrainModel.center.x, 0)),
+                                    0,
+                                    root.number(terrainModel.bounds.min_z,
+                                        root.number(terrainModel.center.z, 0))
+                                ),
                                 root.number(terrainModel.bounds.min_z,
                                     root.number(terrainModel.center.z, 0))
                             )
@@ -2241,8 +4477,9 @@ Item {
                             // mesh above.
                             Model {
                                 objectName: "terrainHlodTileModel"
-                                visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
+                                visible: !root.originalWorldActive && root.cinematic.preset !== "ORBIT_WORLD_SCALE"
                                     && Boolean(terrainModel.visibilityData.render)
+                                    && !root.planetSurfaceAssetVisible
                                     && terrainModel.vertexGrid <= 1
                                 source: "#Cube"
                                 position: Qt.vector3d(
@@ -2259,9 +4496,8 @@ Item {
                                 receivesShadows: root.shadowMappingEnabled
                                     && Boolean(terrainModel.visibilityData.shadow_caster)
                                 materials: [
-                                    root.terrainMaterialFor(
-                                        terrainModel.biome,
-                                        terrainModel.waterCell
+                                    root.terrainHlodMaterialFor(
+                                        terrainModel.biome
                                     )
                                 ]
                             }
@@ -2276,7 +4512,7 @@ Item {
                         property bool targetIsWater:
                             String(root.terrainTargetCell.surface || "LAND")
                             === "WATER"
-                        visible: root.cinematic.preset !== "ORBIT_WORLD_SCALE"
+                        visible: !root.originalWorldActive && root.cinematic.preset !== "ORBIT_WORLD_SCALE"
                             && root.terrainTargetSelected
                             && Boolean(root.terrainTargetCell.key)
                         position: Qt.vector3d(
@@ -2309,12 +4545,24 @@ Item {
 
                         delegate: Node {
                             id: entityModel
+                            property string worldEntityId: String(entityModel.modelData.id || '')
+                            readonly property bool originalActorRequested: !!root.originalWorldActors
+                                && root.originalWorldActors.requestedIds.indexOf(worldEntityId) >= 0
+                            property bool nativeVisible: true
+                            Component.onCompleted: if (root.surfaceHost && root.surfaceHost.gameEngineRegisterEntityNode)
+                                root.surfaceHost.gameEngineRegisterEntityNode(entityModel,worldEntityId)
                             objectName: "gameEntityFigure"
-                            required property var entityRow
-                            required property var entityDynamic
+                            required property string entityRowJson
+                            required property string entityDynamicJson
+                            readonly property var entityRow: JSON.parse(entityRowJson)
+                            readonly property var entityDynamic: JSON.parse(entityDynamicJson)
                             property var modelData: entityModel.entityRow
                             property var dynamicData:
                                 entityModel.entityDynamic || entityModel.entityRow
+                            visible: !Boolean(entityModel.dynamicData.hidden) && nativeVisible && !originalActorRequested
+                                && !(entityModel.entityKind === "PLAYER" && root.firstPersonView)
+                                && !(root.originalWorldActive && !entityModel.entityAsset.editor_model
+                                     && ["TREE","HOUSE","ROCK","PROP","RAMP"].indexOf(entityModel.entityKind)>=0)
                             property string entityKind: String(
                                 entityModel.modelData.kind || "PROP"
                             )
@@ -2326,20 +4574,20 @@ Item {
                                 || entityModel.entityKind === "ACTOR"
                                 || entityModel.entityKind.indexOf("NPC") >= 0
                             property real entitySx: Math.max(
-                                0.35,
+                                0.01,
                                 root.number(entityModel.modelData.sx, 1)
                             )
                             property real entitySy: Math.max(
-                                0.35,
+                                0.01,
                                 root.number(entityModel.modelData.sy, 1)
                             )
                             property real entitySz: Math.max(
-                                0.35,
+                                0.01,
                                 root.number(entityModel.modelData.sz, 1)
                             )
                             property real characterYScale: Math.max(
-                                0.9,
-                                Math.min(1.25, entityModel.entitySy)
+                                0.01,
+                                entityModel.entityAsset.editor_scale ? entityModel.entitySy : Math.max(.9,Math.min(1.25, entityModel.entitySy))
                             )
                             property var entityPose: entityModel.dynamicData.animation
                                 || ({})
@@ -2349,15 +4597,17 @@ Item {
                                 entityModel.dynamicData.asset
                                 || entityModel.entityAsset
                                 || ({})
-                            property bool proceduralCharacter:
-                                entityModel.characterLike
-                                && String(
-                                    entityModel.entityAsset.mode || ""
-                                ) === "PROCEDURAL_GEOMETRY"
                             property var itemState: entityModel.dynamicData.item
                                 || ({})
-                            property var itemVisual: entityModel.itemState.visual
-                                || ({})
+                            property var itemVisual: {
+                                var visual=Object.assign({},entityModel.itemState.visual || ({}))
+                                if (entityModel.itemState.location==='GROUND') {
+                                    var clock=root.number(root.player.time_s,0)
+                                    visual.bob_m=Math.sin(clock*1.7+root.number(entityModel.itemState.visual_phase,0))*root.number(visual.float_m,0)
+                                    visual.rotation_y=root.number(visual.rotation ? visual.rotation[1] : 0,0)+clock*root.number(visual.spin_deg_s,0)
+                                }
+                                return visual
+                            }
                             property var itemAsset: entityModel.itemState.asset
                                 || ({})
                             property bool itemLike: entityModel.entityKind === "GROUND_ITEM"
@@ -2390,6 +4640,13 @@ Item {
                                 && String(entityModel.entityAsset.mode || "")
                                     === "AUTHORED_STATIC"
                                 && String(entityModel.entityAsset.source || "") !== ""
+                            property bool sandoverEnvironmentEntity:
+                                !entityModel.entityAsset.editor_model && root.sandoverEntityBakedByEnvironment(
+                                    entityModel.entityAsset.asset_id,
+                                    entityModel.entityKind,
+                                    entityModel.dynamicData.x,
+                                    entityModel.dynamicData.z
+                                )
                             property string authoredWorldSource: {
                                 var uri = String(entityModel.entityAsset.source || "")
                                 if (uri.indexOf("file:") === 0 || uri.indexOf("/") === 0)
@@ -2405,6 +4662,7 @@ Item {
                                 authoredWorldLoader.item || null
                             property bool authoredWorldVisible:
                                 entityModel.authoredWorldProp
+                                && !entityModel.sandoverEnvironmentEntity
                                 && !Boolean(entityModel.worldPropGeometry)
                                 && root.runtimeLoaderHasVisualContent(
                                     entityModel.authoredWorldRuntimeLoader
@@ -2412,6 +4670,8 @@ Item {
                             property var worldPropGeometry:
                                 !entityModel.characterLike
                                 && !entityModel.itemLike
+                                && !entityModel.entityAsset.editor_model
+                                && !entityModel.sandoverEnvironmentEntity
                                 && root.surfaceHost
                                 && typeof root.surfaceHost
                                     .gameEngineWorldPropGeometry === "function"
@@ -2464,46 +4724,14 @@ Item {
                                 && entityModel.equipment[0]
                                 ? (entityModel.equipment[0].visual || ({}))
                                 : ({})
-                            // A desktop process that was opened before the
-                            // authored hero promotion can still carry the
-                            // old fixture URI in its in-memory snapshot.
-                            // Redirect only that historical URI to the
-                            // canonical Blender asset while the process is
-                            // alive.  The backend contract remains the
-                            // authority on eligibility, rank and animation;
-                            // this is a source migration, not a second body
-                            // or a presentation fallback.
-                            property string authoredCharacterSource: {
-                                var source = String(
-                                    entityModel.entityAsset.source || ""
-                                )
-                                if (source.indexOf("gg-authored-hero.gltf") >= 0)
-                                    return Qt.resolvedUrl(
-                                        "../assets/authored/gg-clay-hero-a.glb"
-                                    )
-                                return source
-                            }
-                            property bool authoredAssetEligible:
-                                entityModel.characterLike
-                                && (
-                                    String(entityModel.entityAsset.mode || "")
-                                        === "AUTHORED_SKINNED"
-                                    || String(entityModel.entityAsset.mode || "")
-                                        === "AUTHORED_NODE_ANIMATED"
-                                )
-                                && String(entityModel.entityAsset.source || "")
-                                    !== ""
-                                && root.number(
-                                    entityModel.entityAsset.instance_rank,
-                                    -1
-                                ) >= 0
-                                && root.number(
-                                    entityModel.entityAsset.instance_rank,
-                                    -1
-                                ) < root.number(
-                                    entityModel.entityAsset.instance_budget,
-                                    root.assetInstanceBudget
-                                )
+                            // Resolve every character to the nine approved crew files,
+                            // including historical snapshots from an older desktop.
+                            // Loading/animation failures never restore a prototype body.
+                            property string authoredCharacterSource: root.crewSource(
+                                entityModel.entityAsset, String(entityModel.modelData.id || ""), entityModel.entityKind)
+                            property bool authoredAssetEligible: entityModel.characterLike
+                                && !entityModel.originalActorRequested
+                                && root.number(entityModel.entityAsset.instance_rank, 0) < 32
                             property bool authoredItemEligible:
                                 entityModel.itemLike
                                 && String(entityModel.itemAsset.mode || "")
@@ -2539,7 +4767,9 @@ Item {
                             )
                             property string requestedAuthoredClip: String(
                                 root.authoredClipForMotionState(
-                                    entityModel.entityPose.state || "IDLE"
+                                    entityModel.entityPose.locomotion
+                                        || entityModel.entityPose.state
+                                        || "IDLE"
                                 )
                             )
                             property bool authoredAssetVisualContent:
@@ -2547,45 +4777,7 @@ Item {
                                 && root.runtimeLoaderHasVisualContent(
                                     entityModel.authoredAssetRuntimeLoader
                                 )
-                            property bool authoredAssetVisible:
-                                entityModel.authoredAssetVisualContent
-                                && (
-                                    entityModel.authoredAssetClipStatus
-                                        === "ROOT_POSE_ONLY"
-                                    || (
-                                        entityModel.authoredAssetClipStatus
-                                            === "READY"
-                                        && entityModel.authoredAssetClip
-                                            === entityModel.requestedAuthoredClip
-                                    )
-                                )
-                            property bool characterFallbackVisible:
-                                entityModel.characterLike
-                                && !entityModel.authoredAssetVisible
-                            // Keep one native body geometry for the complete
-                            // lifetime of this delegate.  The fixed-step
-                            // animation contract still supplies state,
-                            // phase, bob, lean, sway and squash below, but a
-                            // live QtQuick3D Model must not swap its geometry
-                            // object whenever WALK crosses a pose bucket.
-                            // Such swaps can detach the vertex buffer during
-                            // a render pass: the entity remains in the
-                            // snapshot and its head/other props can remain,
-                            // while the body disappears.  Pose variation is
-                            // therefore represented by the deterministic
-                            // transforms, not by replacing the mesh.
-                            property var characterPoseGeometry:
-                                entityModel.characterLike
-                                ? root.characterGeometryForCast(
-                                    entityModel.modelData.cast
-                                        || entityModel.modelData.archetype
-                                        || (
-                                            entityModel.entityKind === "PLAYER"
-                                                ? "PLAYER"
-                                                : "CROWD"
-                                        )
-                                )
-                                : null
+                            property bool authoredAssetVisible: entityModel.authoredAssetVisualContent
                             property bool authoredItemVisible:
                                 entityModel.authoredItemEligible
                                 && root.runtimeLoaderHasVisualContent(
@@ -2608,42 +4800,85 @@ Item {
                             property real poseSquash: root.number(
                                 entityModel.entityPose.squash, 0
                             )
-                            function applyAuthoredRuntimeClip() {
+                            property string lastRuntimeClipRequest: ""
+                            property string lastRuntimeActionSerial: ""
+                            property real lastRuntimeCadenceRequest: -1
+                            property double lastRuntimeClipRequestAt: 0
+                            function applyAuthoredRuntimeClip(force) {
                                 if (!entityModel.authoredAssetEligible
                                     || !entityModel.authoredAssetRuntimeLoader
                                     || !root.surfaceHost
                                     || typeof root.surfaceHost.gameEngineRuntimeClip
                                         !== "function")
                                     return
+                                var clip = String(
+                                    entityModel.authoredAssetRuntimeClip || ""
+                                )
+                                var cadence = root.number(
+                                    entityModel.entityPose.cadence_hz, 0
+                                )
+                                var actionSerial = String(
+                                    entityModel.entityPose.action_serial || ""
+                                )
+                                var now = Date.now()
+                                if (!force
+                                    && clip === entityModel.lastRuntimeClipRequest
+                                    && actionSerial === entityModel.lastRuntimeActionSerial
+                                    && Math.abs(cadence
+                                        - entityModel.lastRuntimeCadenceRequest) < 0.12
+                                    && now - entityModel.lastRuntimeClipRequestAt < 260)
+                                    return
                                 root.surfaceHost.gameEngineRuntimeClip(
                                     entityModel.authoredAssetRuntimeLoader,
-                                    String(
-                                        entityModel.authoredAssetRuntimeClip
-                                            || ""
-                                    )
+                                    clip,
+                                    cadence,
+                                    actionSerial
                                 )
+                                entityModel.lastRuntimeClipRequest = clip
+                                entityModel.lastRuntimeActionSerial = actionSerial
+                                entityModel.lastRuntimeCadenceRequest = cadence
+                                entityModel.lastRuntimeClipRequestAt = now
                             }
                             onAuthoredAssetVisibleChanged:
-                                entityModel.applyAuthoredRuntimeClip()
+                                entityModel.applyAuthoredRuntimeClip(true)
+                            Connections {
+                                target: root
+                                function onAssetEditorRevisionChanged() {
+                                    root.applyAssetMaterial(entityModel.authoredAssetRuntimeLoader,entityModel.worldEntityId)
+                                    root.applyAssetMaterial(entityModel.authoredWorldRuntimeLoader,entityModel.worldEntityId)
+                                    root.applyAssetMaterial(entityModel.authoredItemRuntimeLoader,entityModel.worldEntityId)
+                                }
+                            }
                             onAuthoredAssetClipChanged:
-                                entityModel.applyAuthoredRuntimeClip()
+                                entityModel.applyAuthoredRuntimeClip(true)
                             onAuthoredAssetRuntimeClipChanged:
-                                entityModel.applyAuthoredRuntimeClip()
+                                entityModel.applyAuthoredRuntimeClip(true)
+                            onRequestedAuthoredClipChanged:
+                                entityModel.applyAuthoredRuntimeClip(true)
+                            onEntityPoseChanged:
+                                entityModel.applyAuthoredRuntimeClip(false)
                             Connections {
                                 target: entityModel.authoredAssetRuntimeLoader
                                 function onStatusChanged() {
-                                    entityModel.applyAuthoredRuntimeClip()
+                                    entityModel.applyAuthoredRuntimeClip(true)
                                     entityModel.authoredSocketRevision += 1
+                                    root.applyAssetMaterial(entityModel.authoredAssetRuntimeLoader,entityModel.worldEntityId)
                                 }
                             }
                             position: Qt.vector3d(
                                 root.number(entityModel.dynamicData.x, 0),
-                                root.number(entityModel.dynamicData.y, 0),
+                                root.planetRenderY(
+                                    root.number(entityModel.dynamicData.x, 0),
+                                    root.number(entityModel.dynamicData.y, 0),
+                                    root.number(entityModel.dynamicData.z, 0)
+                                ),
                                 root.number(entityModel.dynamicData.z, 0)
                             )
                             eulerRotation.y:
                                 root.number(entityModel.dynamicData.yaw, 0)
                                 * 57.2958
+                            eulerRotation.x: root.number(entityModel.dynamicData.pitch, 0)
+                            eulerRotation.z: root.number(entityModel.dynamicData.roll, 0)
                             // One native geometry slot serves each prop and
                             // ramp. Item fallbacks keep their named model
                             // below so the asset test and authored handoff
@@ -2651,6 +4886,7 @@ Item {
                             // from every mixed entity delegate.
                             Model {
                                 id: gameEntityProxyModel
+                                pickable: true
                                 objectName: "gameEntityProxyModel"
                                 // ORBIT is a presentation LOD, not a vanish
                                 // distance. Keep this single cheap primitive
@@ -2658,6 +4894,7 @@ Item {
                                 // removes it at the actual horizon.
                                 visible: !entityModel.characterLike
                                     && !entityModel.itemLike
+                                    && !entityModel.sandoverEnvironmentEntity
                                     && !entityModel.authoredWorldVisible
                                 property bool usesNativeGeometry:
                                     Boolean(entityModel.worldPropGeometry)
@@ -2695,12 +4932,22 @@ Item {
                                     objectName: "gameAuthoredWorldLoader"
                                     source: entityModel.authoredWorldSource
                                     visible: true
+                                    Component.onDestruction: {
+                                        if(root.surfaceHost && typeof root.surfaceHost.gameEngineReleaseRuntimeClip === "function")
+                                            root.surfaceHost.gameEngineReleaseRuntimeClip(this)
+                                        root.forgetAssetMaterials(this)
+                                    }
+                                    onStatusChanged: if(status===RuntimeLoader.Success) {
+                                        if(root.surfaceHost.gameEngineEnablePicking)root.surfaceHost.gameEngineEnablePicking(this,entityModel.worldEntityId)
+                                        root.applyAssetMaterial(this,entityModel.worldEntityId)
+                                    }
                                 }
                             }
                             Loader3D {
                                 id: authoredWorldLoader
                                 objectName: "gameAuthoredWorldLoaderHost"
                                 active: entityModel.authoredWorldProp
+                                    && !entityModel.sandoverEnvironmentEntity
                                     && !Boolean(entityModel.worldPropGeometry)
                                 asynchronous: false
                                 sourceComponent: authoredWorldComponent
@@ -2713,6 +4960,8 @@ Item {
                                     0
                                 )
                                 scale: {
+                                    if(entityModel.entityAsset.editor_model)
+                                        return Qt.vector3d(entityModel.entitySx,entityModel.entitySy,entityModel.entitySz)
                                     var height = Math.max(
                                         0.5,
                                         root.number(
@@ -2721,9 +4970,9 @@ Item {
                                         )
                                     )
                                     return Qt.vector3d(
-                                        entityModel.entitySx,
+                                        (2.0 * entityModel.entitySx) / height,
                                         (2.0 * entityModel.entitySy) / height,
-                                        entityModel.entitySz
+                                        (2.0 * entityModel.entitySz) / height
                                     )
                                 }
                             }
@@ -2734,6 +4983,7 @@ Item {
                             // ground items also receive deterministic motion.
                             Model {
                                 id: gameWorldItemModel
+                                pickable: true
                                 objectName: "gameWorldItemModel"
                                 visible: entityModel.itemLike
                                     && !entityModel.authoredItemVisible
@@ -2812,6 +5062,18 @@ Item {
                                 id: authoredItemComponent
                                 RuntimeLoader {
                                     objectName: "gameAuthoredItemLoader"
+                                    Component.onDestruction: {
+                                        if(root.surfaceHost && typeof root.surfaceHost.gameEngineReleaseRuntimeClip === "function")
+                                            root.surfaceHost.gameEngineReleaseRuntimeClip(this)
+                                        root.forgetAssetMaterials(this)
+                                    }
+                                    onStatusChanged: if (status===RuntimeLoader.Success) {
+                                        if (root.surfaceHost.gameEngineEnablePicking)
+                                            root.surfaceHost.gameEngineEnablePicking(this,entityModel.worldEntityId)
+                                        if (root.surfaceHost.gameEngineRegisterRig)
+                                            root.surfaceHost.gameEngineRegisterRig(this,entityModel.worldEntityId)
+                                        Qt.callLater(function(){root.applyAssetMaterial(authoredItemLoader.item,entityModel.worldEntityId)})
+                                    }
                                     source: String(
                                         entityModel.itemAsset.source || ""
                                     )
@@ -2891,8 +5153,25 @@ Item {
                                 id: authoredCharacterComponent
                                 RuntimeLoader {
                                     objectName: "gameAuthoredAssetLoader"
+                                    Component.onDestruction: {
+                                        if(root.surfaceHost && typeof root.surfaceHost.gameEngineReleaseRuntimeClip === "function")
+                                            root.surfaceHost.gameEngineReleaseRuntimeClip(this)
+                                        root.forgetAssetMaterials(this)
+                                    }
                                     source: entityModel.authoredCharacterSource
                                     visible: true
+                                    onStatusChanged: if (status===RuntimeLoader.Success) {
+                                        // Imported GLB clips default to running. Own the
+                                        // exact loader before its first animated frame;
+                                        // Loader3D.item may not yet be bound for Connections.
+                                        if(root.surfaceHost && typeof root.surfaceHost.gameEngineRuntimeClip === "function")
+                                            root.surfaceHost.gameEngineRuntimeClip(this,entityModel.authoredAssetRuntimeClip,
+                                                root.number(entityModel.entityPose.cadence_hz,0),String(entityModel.entityPose.action_serial || ""))
+                                        if (root.surfaceHost && typeof root.surfaceHost.gameEngineRegisterRig === "function")
+                                            root.surfaceHost.gameEngineRegisterRig(this,entityModel.worldEntityId)
+                                        if(root.surfaceHost.gameEngineEnablePicking)root.surfaceHost.gameEngineEnablePicking(this,entityModel.worldEntityId)
+                                        root.applyAssetMaterial(this,entityModel.worldEntityId)
+                                    }
                                 }
                             }
                             Loader3D {
@@ -2916,71 +5195,197 @@ Item {
                                     0
                                 )
                                 scale: Qt.vector3d(
-                                    entityModel.entitySx,
+                                    entityModel.entityAsset.editor_scale ? entityModel.entitySx : Math.min(1.25, entityModel.entitySx),
                                     entityModel.characterYScale
                                         * (1 + entityModel.poseSquash),
-                                    entityModel.entitySz
+                                    entityModel.entityAsset.editor_scale ? entityModel.entitySz : Math.min(1.25, entityModel.entitySz)
                                 )
                             }
 
-                            // The character seam is deliberately one-model
-                            // wide. The imported authored model is preferred;
-                            // this shared low-poly humanoid is the only
-                            // fallback while it loads or fails. It receives
-                            // the same fixed-step bob/lean/sway/squash
-                            // contract, so no head, limbs or alternate pose
-                            // geometry can survive as a second body.
-                            // This is a direct Model rather than a Loader3D:
-                            // Qt can retain loader children during a status
-                            // transition, while this node has one identity for
-                            // the whole lifetime of the entity delegate.
+                            // The board is a vehicle prop under the authored player.
                             Model {
-                                objectName: "gameCharacterBodyModel"
-                                visible: entityModel.characterFallbackVisible
-                                source: entityModel.characterPoseGeometry ? "" : "#Cube"
-                                geometry: entityModel.characterPoseGeometry
-                                position: Qt.vector3d(
-                                    0, 0.10 + entityModel.poseBob, 0
+                                objectName: "playerHoverboardProxy"
+                                visible: entityModel.entityKind === "PLAYER"
+                                    && String(entityModel.dynamicData.vehicle || "")
+                                        === "HOVERBOARD"
+                                source: "#Cube"
+                                position: Qt.vector3d(0, -0.53, 0)
+                                scale: Qt.vector3d(
+                                    0.72 * root.sceneScale,
+                                    0.10 * root.sceneScale,
+                                    1.32 * root.sceneScale
                                 )
-                                eulerRotation: Qt.vector3d(
-                                    entityModel.poseLean,
-                                    entityModel.poseSway,
-                                    0
-                                )
-                                scale: root.lowPolyCharacterUsesGameplayUnits
-                                    ? Qt.vector3d(
-                                        0.96 * entityModel.entitySx,
-                                        0.90 * entityModel.characterYScale
-                                            * (1 + entityModel.poseSquash),
-                                        0.94 * entityModel.entitySz
-                                    )
-                                    : Qt.vector3d(
-                                        0.68 * root.sceneScale
-                                            * entityModel.entitySx,
-                                        1.50 * root.sceneScale
-                                            * entityModel.characterYScale
-                                            * (1 + entityModel.poseSquash),
-                                        0.44 * root.sceneScale
-                                            * entityModel.entitySz
-                                    )
                                 castsShadows: root.shadowMappingEnabled
-                                receivesShadows: root.shadowMappingEnabled
-                                materials: [clayCharacterMaterial]
+                                receivesShadows: false
+                                materials: [
+                                    PrincipledMaterial {
+                                        baseColor: "#bd6938"
+                                        roughness: 0.72
+                                        metalness: 0.04
+                                    }
+                                ]
+                            }
+
+                            Loader3D {
+                                id: worldActionTool
+                                objectName: "gameWorldActionTool"
+                                readonly property string tool: String(entityModel.entityPose.interaction_tool || "")
+                                active: entityModel.authoredAssetVisible
+                                    && ["shears","brush","rod","net","knife","hammer"].indexOf(tool) >= 0
+                                property var grip: {
+                                    var revision = entityModel.authoredSocketRevision
+                                    return entityModel.authoredAssetRuntimeLoader
+                                        ? root.findAttachmentNode(entityModel.authoredAssetRuntimeLoader, "SOCKET_MAIN_HAND") : null
+                                }
+                                parent: grip || entityModel
+                                sourceComponent: Component {
+                                    RuntimeLoader {
+                                        objectName: "gameWorldActionToolMesh"
+                                        source: worldActionTool.tool === "hammer"
+                                            ? Qt.resolvedUrl("../assets/authored/variants/items/weapon-mace-v5.glb")
+                                            : Qt.resolvedUrl("../assets/authored/nature/tool-" + worldActionTool.tool + ".glb")
+                                    }
+                                }
                             }
 
                             Repeater3D {
                                 model: entityModel.entityKind === "PLAYER"
-                                    ? entityModel.equipment.slice(0, 8) : []
+                                    ? entityModel.equipment.slice(0, 16) : []
                                 delegate: Node {
                                     id: wornItem
                                     objectName: "gameEquippedItemModel"
+                                    Component.onCompleted: root.equipmentFxNodes[wornItem.slot]=wornItem
+                                    Component.onDestruction: {
+                                        var mesh=wornItem.fxMesh()
+                                        if (root.enchantMesh0===mesh) root.enchantMesh0=null
+                                        if (root.enchantMesh1===mesh) root.enchantMesh1=null
+                                        if (root.equipmentFxNodes[wornItem.slot]===wornItem)
+                                            delete root.equipmentFxNodes[wornItem.slot]
+                                    }
                                     required property var modelData
                                     readonly property var visual: modelData.visual || ({})
                                     readonly property var itemAsset: modelData.asset || ({})
+                                    readonly property var articulation: itemAsset.articulation || ({})
+                                    property var flailRig: null
+                                    property var flailState: null
+                                    property int flailSetupAttempts: 0
+                                    property var flailLinkLoaders: []
+                                    function flailPartSource(filename) {
+                                        var source=String(itemAsset.source || "")
+                                        return source.slice(0,source.lastIndexOf("/")+1)+filename
+                                    }
+                                    function setupFlail() {
+                                        if(articulation.kind!=="FLAIL" || !authoredItemVisible)return
+                                        var head=authoredFlailHead
+                                        if(head.status!==RuntimeLoader.Success)return
+                                        var links=[]
+                                        for(var i=0;i<articulation.links;++i) {
+                                            var link=flailLinkLoaders[i]
+                                            if(!link || link.status!==RuntimeLoader.Success)return
+                                            links.push(link)
+                                        }
+                                        if(head)flailRig={head:head,links:links}
+                                    }
+                                    function flailWorld(p) {
+                                        var v=authoredEquippedItemLoader.mapPositionToScene(Qt.vector3d(p[0],p[1],p[2]))
+                                        return [v.x,v.y,v.z]
+                                    }
+                                    function placeFlailPart(node,centre,direction,restPoint) {
+                                        var local=node.parent.mapPositionFromScene(Qt.vector3d(centre[0],centre[1],centre[2]))
+                                        var end=node.parent.mapPositionFromScene(Qt.vector3d(centre[0]+direction[0],centre[1]+direction[1],centre[2]+direction[2]))
+                                        var q=FlailPhysics.rotationFromY([end.x-local.x,end.y-local.y,end.z-local.z])
+                                        var datum=FlailPhysics.rotate(q,[restPoint[0]*node.scale.x,restPoint[1]*node.scale.y,restPoint[2]*node.scale.z])
+                                        node.rotation=Qt.quaternion(q[0],q[1],q[2],q[3])
+                                        node.position=Qt.vector3d(local.x-datum[0],local.y-datum[1],local.z-datum[2])
+                                    }
+                                    function stepFlail(dt) {
+                                        if(articulation.kind!=="FLAIL" || !authoredItemVisible)return
+                                        if(!flailRig) {
+                                            if(flailSetupAttempts++<8)setupFlail()
+                                            if(!flailRig)return
+                                        }
+                                        var anchor=flailWorld(articulation.anchor)
+                                        var unit=flailWorld([articulation.anchor[0]+1,articulation.anchor[1],articulation.anchor[2]])
+                                        var scale=FlailPhysics.norm(FlailPhysics.sub(unit,anchor))
+                                        if(!flailState)flailState=FlailPhysics.create(anchor,articulation.length*scale,articulation.links)
+                                        var shaft=[flailWorld(articulation.shaft[0]),flailWorld(articulation.shaft[1])]
+                                        flailState=FlailPhysics.step(flailState,anchor,dt,shaft,
+                                            articulation.head_radius*scale,articulation.shaft_radius*scale)
+                                        var p=flailState.points
+                                        for(var i=0;i<flailRig.links.length;++i) {
+                                            placeFlailPart(flailRig.links[i],FlailPhysics.mul(FlailPhysics.add(p[i],p[i+1]),.5),
+                                                FlailPhysics.sub(p[i],p[i+1]),articulation.link_rest[i])
+                                        }
+                                        placeFlailPart(flailRig.head,p[p.length-1],FlailPhysics.sub(p[p.length-2],p[p.length-1]),articulation.head_rest)
+                                    }
+                                    function flailPhysicsFrame() {
+                                        if(!flailState || !flailRig)return null
+                                        var rest=articulation.head_rest
+                                        var actual=flailRig.head.mapPositionToScene(Qt.vector3d(rest[0],rest[1],rest[2]))
+                                        return {points:flailState.points,steps:flailState.steps,length:flailState.length,
+                                            links:flailRig.links.length,actualHead:[actual.x,actual.y,actual.z]}
+                                    }
+                                    function enchantFrame() {
+                                        var region = wornItem.itemAsset.weapon_fx || ({})
+                                        region = region[wornItem.authoredItemVisible ? "authored" : "native"] || ({})
+                                        var base = region.base || [0,0,0]
+                                        var tip = region.tip || [0,.5,0]
+                                        var mesh = wornItem.authoredItemVisible
+                                            ? authoredEquippedItemLoader : gameEquippedItemPrimitive
+                                        var start = mesh.mapPositionToScene(Qt.vector3d(base[0],base[1],base[2]))
+                                        var end = mesh.mapPositionToScene(Qt.vector3d(tip[0],tip[1],tip[2]))
+                                        var frame = {base:{x:start.x,y:start.y,z:start.z},
+                                            tip:{x:end.x,y:end.y,z:end.z}}
+                                        if(flailState && flailRig) {
+                                            var p=flailState.points[flailState.points.length-1]
+                                            frame.base={x:p[0],y:p[1],z:p[2]}
+                                            frame.tip={x:p[0],y:p[1]+.2,z:p[2]}
+                                            frame.path=[frame.base,frame.tip];frame.muzzles=[]
+                                            return frame
+                                        }
+                                        // Host bindings can expose a QML sequence rather
+                                        // than a JavaScript Array. Both support length
+                                        // and indexing; Array.isArray rejects the former.
+                                        if (region.path && typeof region.path.length === "number"
+                                                && region.path.length>1) {
+                                            frame.path=[]
+                                            for (var i=0;i<Math.min(region.path.length,64);++i) {
+                                                var p=region.path[i]
+                                                var point=mesh.mapPositionToScene(Qt.vector3d(p[0],p[1],p[2]))
+                                                frame.path.push({x:point.x,y:point.y,z:point.z})
+                                            }
+                                        }
+                                        frame.muzzles=[]
+                                        if (region.magic && region.magic.colors && region.magic.colors.length) {
+                                            var core=region.magic.point
+                                            var glow=mesh.mapPositionToScene(Qt.vector3d(core[0],core[1],core[2]))
+                                            frame.magic={point:{x:glow.x,y:glow.y,z:glow.z},
+                                                theme:region.magic.theme,colors:region.magic.colors,
+                                                radius:region.magic.radius}
+                                        }
+                                        var muzzlePoints=wornItem.itemAsset.muzzle_points || []
+                                        for (var m=0;m<muzzlePoints.length && m<7;++m) {
+                                            var p=muzzlePoints[m]
+                                            var muzzle=mesh.mapPositionToScene(Qt.vector3d(p[0],p[1],p[2]))
+                                            frame.muzzles.push({x:muzzle.x,y:muzzle.y,z:muzzle.z})
+                                        }
+                                        return frame
+                                    }
+                                    function fxMesh() {
+                                        return wornItem.authoredItemVisible
+                                            ? authoredEquippedItemLoader : gameEquippedItemPrimitive
+                                    }
                                     readonly property var attachment: modelData.attachment
                                         || wornItem.visual.attachment
                                         || ({})
                                     readonly property string slot: String(modelData.equipped_slot || "")
+                                    readonly property var displayState: root.clientDisplay
+                                    visible: (wornItem.slot !== 'HEAD' || wornItem.displayState.helm !== false)
+                                        && (wornItem.slot !== 'BACK' || wornItem.displayState.cloak !== false)
+                                        && modelData.visual_visible !== false
+                                        && (!Boolean(entityModel.entityPose.world_interaction)
+                                            || (socketId !== "MAIN_HAND" && socketId !== "OFF_HAND"
+                                                && slot !== "MAIN_HAND" && slot !== "OFF_HAND"))
                                     readonly property string socketId: String(
                                         wornItem.attachment.socket || wornItem.slot
                                     )
@@ -2991,6 +5396,14 @@ Item {
                                                 : "")
                                     )
                                     readonly property var rest: wornItem.attachment.rest || []
+                                    readonly property var authoredHandRest: {
+                                        if (modelData.visual_stowed || ["item.weapon_pistol","item.weapon_wand","item.weapon_staff","item.weapon_mace","item.weapon_offhand"].indexOf(modelData.definition_id)<0 || !entityModel.authoredAssetRuntimeLoader) return null
+                                        var sockets=entityModel.entityAsset.attachment_sockets || ({})
+                                        var anchor=sockets[wornItem.slot]
+                                        if (!anchor || !anchor.model_rest) return null
+                                        var p=anchor.model_rest
+                                        return entityModel.authoredAssetRuntimeLoader.mapPositionToNode(entityModel,Qt.vector3d(p[0],p[1],p[2]))
+                                    }
                                     property var socketNode: {
                                         var revision = entityModel.authoredSocketRevision
                                         if (!entityModel.authoredAssetVisible
@@ -3004,7 +5417,7 @@ Item {
                                     }
                                     parent: wornItem.socketNode || entityModel
                                     property var itemGeometry:
-                                        root.surfaceHost
+                                        modelData.definition_id!=="item.guild_tabard" && root.surfaceHost
                                         && typeof root.surfaceHost
                                             .gameEngineItemGeometry === "function"
                                         ? root.surfaceHost.gameEngineItemGeometry(
@@ -3034,15 +5447,23 @@ Item {
                                         wornItem.authoredItemEligible
                                         && authoredEquippedItemLoader.status
                                             === RuntimeLoader.Success
-                                    position: wornItem.socketNode
-                                        ? Qt.vector3d(0, 0, 0)
+                                    onAuthoredItemVisibleChanged: Qt.callLater(root.refreshVisualEffects)
+                                    property var tabardAlignment:wornItem.socketNode && wornItem.slot==="TABARD"
+                                        ? root.surfaceHost.gameEngineAlignedAttachment(wornItem.socketNode.sceneRotation,entityModel.sceneRotation,
+                                            Qt.vector3d(0,-.35,.34)) : null
+                                    position:tabardAlignment ? tabardAlignment.position : wornItem.socketNode
+                                        ? Qt.vector3d(
+                                            root.number((wornItem.visual.grip_offset || [])[0],0),
+                                            root.number((wornItem.visual.grip_offset || [])[1],0),
+                                            root.number((wornItem.visual.grip_offset || [])[2],0))
+                                        : wornItem.authoredHandRest ? wornItem.authoredHandRest
                                         : Qt.vector3d(
                                             root.number(
                                                 wornItem.rest[0],
                                                 wornItem.slot === "MAIN_HAND"
                                                     ? 0.48
                                                     : (wornItem.slot === "OFF_HAND" ? -0.48 : 0)
-                                            ),
+                                            ) + (wornItem.slot === "TABARD" ? root.number((wornItem.visual.grip_offset || [])[0],0) : 0),
                                             root.number(
                                                 wornItem.rest[1],
                                                 wornItem.slot === "HEAD"
@@ -3052,19 +5473,24 @@ Item {
                                                         : (wornItem.slot === "BACK"
                                                             ? 0.13
                                                             : (wornItem.slot === "FEET" ? -0.61 : -0.29)))
-                                            ) + entityModel.poseBob,
+                                            ) + entityModel.poseBob + (wornItem.slot === "TABARD" ? root.number((wornItem.visual.grip_offset || [])[1],0) : 0),
                                             root.number(
                                                 wornItem.rest[2],
                                                 wornItem.slot === "CHEST"
                                                     ? -0.16
                                                     : (wornItem.slot === "BACK" ? 0.22 : -0.04)
-                                            )
+                                            ) + (wornItem.slot === "TABARD" ? root.number((wornItem.visual.grip_offset || [])[2],0) : 0)
                                         )
-                                    eulerRotation: Qt.vector3d(
+                                    eulerRotation:tabardAlignment ? tabardAlignment.rotation : Qt.vector3d(
                                         root.number(visual.rotation ? visual.rotation[0] : 0, 0),
-                                        root.number(visual.rotation_y, 0),
+                                        root.number(visual.rotation_y, visual.rotation ? visual.rotation[1] : 0),
                                         root.number(visual.rotation ? visual.rotation[2] : 0, 0)
                                     )
+                                    Texture {
+                                        id:tabardTexture
+                                        textureData:root.surfaceHost && wornItem.visual.base_color_map
+                                            ? root.surfaceHost.gameEngineEmblemTexture(String(wornItem.visual.base_color_map),wornItem) : null
+                                    }
                                     Model {
                                         id: gameEquippedItemPrimitive
                                         objectName: "gameEquippedItemPrimitive"
@@ -3098,6 +5524,7 @@ Item {
                                         castsShadows: root.shadowMappingEnabled
                                         receivesShadows: root.shadowMappingEnabled
                                         materials: PrincipledMaterial {
+                                            baseColorMap: wornItem.visual.base_color_map ? tabardTexture : null
                                             baseColor: String(
                                                 wornItem.visual.base_color
                                                     || modelData.rarity_color
@@ -3120,8 +5547,15 @@ Item {
                                     RuntimeLoader {
                                         id: authoredEquippedItemLoader
                                         objectName: "gameAuthoredEquippedItemLoader"
+                                        onStatusChanged: {
+                                            wornItem.flailRig=null;wornItem.flailState=null;wornItem.flailSetupAttempts=0
+                                            if(status===RuntimeLoader.Success && wornItem.articulation.kind==="FLAIL")
+                                                Qt.callLater(wornItem.setupFlail)
+                                        }
                                         source: wornItem.authoredItemEligible
-                                            ? String(wornItem.itemAsset.source || "")
+                                            ? wornItem.articulation.kind==="FLAIL"
+                                                ? wornItem.flailPartSource(wornItem.articulation.part_sources.handle)
+                                                : String(wornItem.itemAsset.source || "")
                                             : ""
                                         visible: wornItem.authoredItemVisible
                                         scale: Qt.vector3d(
@@ -3142,42 +5576,141 @@ Item {
                                             )
                                         )
                                     }
+                                    // RuntimeLoader's imported static children are
+                                    // private. These ten bounded loaders use the
+                                    // exact painted parts from the full gallery GLB.
+                                    Repeater3D {
+                                        model: wornItem.authoredItemEligible && wornItem.articulation.kind==="FLAIL"
+                                            ? wornItem.articulation.part_sources.links : []
+                                        delegate: RuntimeLoader {
+                                            id: flailLink
+                                            required property int index
+                                            required property string modelData
+                                            objectName: "gameFlailChainLoader"
+                                            source: wornItem.flailPartSource(modelData)
+                                            scale: authoredEquippedItemLoader.scale
+                                            visible: wornItem.authoredItemVisible && status===RuntimeLoader.Success
+                                            Component.onCompleted: {
+                                                wornItem.flailLinkLoaders[index]=flailLink
+                                                Qt.callLater(wornItem.setupFlail)
+                                            }
+                                            Component.onDestruction: {
+                                                if(wornItem.flailLinkLoaders[index]===flailLink)
+                                                    wornItem.flailLinkLoaders[index]=null
+                                            }
+                                            onStatusChanged: if(status===RuntimeLoader.Success)Qt.callLater(wornItem.setupFlail)
+                                        }
+                                    }
+                                    RuntimeLoader {
+                                        id: authoredFlailHead
+                                        objectName: "gameFlailHeadLoader"
+                                        source: wornItem.authoredItemEligible && wornItem.articulation.kind==="FLAIL"
+                                            ? wornItem.flailPartSource(wornItem.articulation.part_sources.head) : ""
+                                        scale: authoredEquippedItemLoader.scale
+                                        visible: wornItem.authoredItemVisible && status===RuntimeLoader.Success
+                                        onStatusChanged: if(status===RuntimeLoader.Success)Qt.callLater(wornItem.setupFlail)
+                                    }
                                 }
                             }
                         }
                     }
 
+                    Model {
+                        id: particleBatchModel
+                        objectName: "gameEngineParticleBatchModel"
+                        geometry: root.particleBatchGeometry
+                        visible: root.paneLive
+                            && !root.dosFallbackActive
+                            && root.particleBatchCount > 0
+                        scale: Qt.vector3d(
+                            1,
+                            1,
+                            1
+                        )
+                        castsShadows: false
+                        receivesShadows: false
+                        materials: [clayParticleMaterial]
+                    }
+                    Model {
+                        objectName: "gameEngineAdditiveParticleBatchModel"
+                        geometry: root.additiveParticleGeometry
+                        visible: root.paneLive && !root.dosFallbackActive && root.additiveParticleCount > 0
+                        castsShadows: false
+                        receivesShadows: false
+                        materials: [luminousParticleMaterial]
+                    }
+                    RuntimeLoader {
+                        objectName: "gameEnchantingTable"
+                        source: Qt.resolvedUrl("../assets/authored/world/gg-enchanting-table.glb")
+                        visible: root.paneLive && !root.dosFallbackActive
+                            && root.enchantStation.x !== undefined
+                            && Math.hypot(root.enchantStation.x-root.number(root.player.x,0),
+                                root.enchantStation.z-root.number(root.player.z,0)) < 128
+                        position: Qt.vector3d(root.number(root.enchantStation.x,0),
+                            root.planetRenderY(root.number(root.enchantStation.x,0),
+                                root.number(root.enchantStation.y,0),root.number(root.enchantStation.z,0)),
+                            root.number(root.enchantStation.z,0))
+                    }
                     Repeater3D {
-                        model: particleRenderModel
-
-                        delegate: Model {
-                            id: particleModel
-                            required property var particleRow
-                            property var modelData: particleModel.particleRow
-                            property color tint: String(
-                                particleModel.modelData.color || "#c8a97e"
-                            )
-                            source: "#Cube"
-                            position: Qt.vector3d(
-                                root.number(particleModel.modelData.x, 0),
-                                root.number(particleModel.modelData.y, 0),
-                                root.number(particleModel.modelData.z, 0)
-                            )
-                            scale: Qt.vector3d(
-                                0.11 * root.sceneScale,
-                                0.11 * root.sceneScale,
-                                0.11 * root.sceneScale
-                            )
-                            castsShadows: false
-                            receivesShadows: false
-                            materials: [
-                                PrincipledMaterial {
-                                    baseColor: particleModel.tint
-                                    roughness: 0.36
-                                    metalness: 0.15
-                                }
-                            ]
+                        // Fixed slots prevent creating/destroying QML lights
+                        // for every spark or frame. All lights share one cap.
+                        model: root.number((root.render.policy || {}).max_dynamic_lights,6)
+                        delegate: PointLight {
+                            required property int index
+                            readonly property var sourceLight: root.localLightSources[index] || ({})
+                            objectName: "gameLocalVfxLight"
+                            // Visibility changes specialize every lit material
+                            // for a new light count. Keep the bounded pool in
+                            // the scene and turn unused slots off with zero
+                            // energy, including after wrapping enchanted gear.
+                            visible: root.paneLive && !root.dosFallbackActive
+                            position: root.attachedLightPosition(sourceLight)
+                            color: sourceLight.color || "#ffbf6c"
+                            brightness: root.number(sourceLight.light_energy,0)
+                            constantFade: 1.0
+                            linearFade: 0.0
+                            quadraticFade: WorldFx.pointLightQuadraticFade(
+                                root.number(sourceLight.light_radius_m,1))
+                            castsShadow: false
                         }
+                    }
+                }
+
+                Loader {
+                    active: root.page === "PERF" && root.paneLive
+                        && !root.dosFallbackActive && !root.standalonePlayerMode
+                    x: 96
+                    y: 12
+                    z: 20
+                    sourceComponent: Component {
+                        DebugView {
+                            objectName: "gameRenderDebugView"
+                            source: view3d
+                            resourceDetailsVisible: true
+                        }
+                    }
+                }
+
+                Rectangle {
+                    objectName: "gameCombatTargetFrame"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 14
+                    width: 240
+                    height: 58
+                    radius: 5
+                    color: "#d91b2427"
+                    border.color: root.ledgerGold
+                    visible: root.paneLive && Boolean(root.combatTarget.id)
+                    z: 18
+                    Text {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        color: root.text
+                        font.pixelSize: 13
+                        text: String(root.combatTarget.name || "Target")
+                            + "  ·  " + root.fixed(root.combatTarget.distance_m, 1) + " m"
+                            + "\n" + root.fixed(root.combatTarget.health, 0) + " / "
+                            + root.fixed(root.combatTarget.max_health, 0) + " HP"
                     }
                 }
 
@@ -3218,6 +5751,46 @@ Item {
                             ctx.clearRect(0, 0, w, h)
                             ctx.fillStyle = String(palette.background || "#030604")
                             ctx.fillRect(0, 0, w, h)
+                            var assetFrame = root.fallbackView.frame || ({})
+                            var glyphRows = assetFrame.glyphs || []
+                            if (glyphRows.length) {
+                                var frameCols = Math.max(1, root.number(assetFrame.cols, String(glyphRows[0] || "").length))
+                                var frameRows = glyphRows.length
+                                var cellAspect = 0.5
+                                var cellW = w / frameCols
+                                var cellH = cellW / cellAspect
+                                if (cellH * frameRows > h) {
+                                    cellH = h / frameRows
+                                    cellW = cellH * cellAspect
+                                }
+                                var originX = (w - cellW * frameCols) * 0.5
+                                var originY = (h - cellH * frameRows) * 0.5
+                                var framePalette = assetFrame.palette || []
+                                var fgRows = assetFrame.fg || []
+                                var bgRows = assetFrame.bg || []
+                                ctx.textAlign = "center"
+                                ctx.textBaseline = "middle"
+                                ctx.font = Math.max(7, Math.floor(cellH * 0.78)) + "px monospace"
+                                for (var frameRow = 0; frameRow < frameRows; ++frameRow) {
+                                    var glyphLine = String(glyphRows[frameRow] || "")
+                                    var fgLine = String(fgRows[frameRow] || "")
+                                    var bgLine = String(bgRows[frameRow] || "")
+                                    for (var frameCol = 0; frameCol < frameCols; ++frameCol) {
+                                        var bgIndex = parseInt(bgLine.substr(frameCol * 2, 2), 16)
+                                        var fgIndex = parseInt(fgLine.substr(frameCol * 2, 2), 16)
+                                        var cellX = originX + frameCol * cellW
+                                        var cellY = originY + frameRow * cellH
+                                        ctx.fillStyle = String(framePalette[isNaN(bgIndex) ? 0 : bgIndex] || "#030604")
+                                        ctx.fillRect(cellX, cellY, cellW + 0.6, cellH + 0.6)
+                                        var glyph = glyphLine.charAt(frameCol)
+                                        if (glyph && glyph !== " ") {
+                                            ctx.fillStyle = String(framePalette[isNaN(fgIndex) ? 0 : fgIndex] || "#9fe3a4")
+                                            ctx.fillText(glyph, cellX + cellW * 0.5, cellY + cellH * 0.55)
+                                        }
+                                    }
+                                }
+                                return
+                            }
                             ctx.strokeStyle = String(palette.grid || "#173117")
                             ctx.lineWidth = 1
                             var gridStep = Math.max(18, Math.min(64, Math.min(w, h) / 12))
@@ -3304,6 +5877,12 @@ Item {
                         }
                     }
 
+                    MouseArea {
+                        anchors.fill: dosFallbackCanvas
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onPressed: root.forceActiveFocus()
+                    }
+
                     Column {
                         anchors.left: parent.left
                         anchors.top: parent.top
@@ -3311,15 +5890,17 @@ Item {
                         spacing: 5
 
                         Text {
-                            text: "GG//DOS FRONTIER  ·  LOW GRAPHICS MODE"
+                            text: root.presentationReason === "MANUAL_DOS_MODE"
+                                ? "GG//DOS  ·  SAME WORLD  ·  F8 LOW POLY"
+                                : "GG//DOS  ·  LOW POLY HIDDEN  ·  F8 RETRIES"
                             color: root.ledgerGreen
                             font.family: "monospace"
                             font.pixelSize: 14
                             font.bold: true
                         }
                         Text {
-                            text: "RICH 3D UNAVAILABLE  ·  " + root.presentationReason
-                                + "\nSIMULATION CONTINUES  ·  FIXED 60 HZ  ·  SHARED DATA"
+                            text: String(root.presentationReason || "DOS")
+                                + "  ·  SIMULATION CONTINUES  ·  SHARED ASSETS"
                             color: root.text
                             font.family: "monospace"
                             font.pixelSize: 10
@@ -3405,19 +5986,32 @@ Item {
                     cursorShape: terrainPicking
                         ? Qt.CrossCursor
                         : (cameraDragging
-                            ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+                            ? Qt.ClosedHandCursor : root.worldHoverInfo.id ? Qt.PointingHandCursor : Qt.ArrowCursor)
                     property real dragStartX: 0
                     property real dragStartY: 0
-                    property real dragStartYaw: 0
-                    property real dragStartPitch: -27
                     property bool cameraDragging: false
                     property bool terrainPicking: false
                     property string brushLastKey: ""
                     property real brushLastX: Number.NaN
                     property real brushLastZ: Number.NaN
+                    property var pressGestures: ({})
+                    onEntered: root.worldMouseInside = true
+                    onExited: {root.worldMouseInside=false;root.worldHoverInfo=({})}
 
                     onPressed: function(mouse) {
                         root.forceActiveFocus()
+                        if (root.assetEditorMode && mouse.button===Qt.LeftButton && !(mouse.modifiers & Qt.ShiftModifier)) {
+                            var picked=root.assetPick(mouse.x,mouse.y)
+                            if(picked)root.assetEdit({op:"SELECT",identity:picked})
+                            if(picked && root.assetTool==="MOVE") {
+                                var entity=(root.assetEditorState.selected || {}).entity || ({})
+                                var t=(root.assetEditorState.selected.edit || {}).transform || ({})
+                                root.assetDrag={startX:mouse.x,startY:mouse.y,x:Number(t.x!==undefined?t.x:entity.x),
+                                    y:Number(t.y!==undefined?t.y:entity.y),z:Number(t.z!==undefined?t.z:entity.z)}
+                                root.assetEdit({op:"BEGIN_TRANSFORM"})
+                            }
+                            mouse.accepted=true;return
+                        }
                         if (
                             mouse.button === Qt.LeftButton
                             && (mouse.modifiers & Qt.ShiftModifier) !== 0
@@ -3439,18 +6033,37 @@ Item {
                             mouse.accepted = true
                             return
                         }
-                        if (mouse.button !== Qt.RightButton) {
+                        if (root.controlsLocked) {
                             mouse.accepted = false
                             return
                         }
                         cameraDragging = true
                         dragStartX = mouse.x
                         dragStartY = mouse.y
-                        dragStartYaw = root.orbitYaw
-                        dragStartPitch = root.orbitPitch
+                        var pressHit=root.worldPick(mouse.x,mouse.y)
+                        var presses=Object.assign({},pressGestures)
+                        presses[String(mouse.button)]={at:Date.now(),yaw:0,pitch:0,id:String(pressHit.id || '')}
+                        if (mouse.buttons === (Qt.LeftButton | Qt.RightButton)) {
+                            for (var pressKey in presses) presses[pressKey].cancelled=true
+                        }
+                        pressGestures=presses
+                        root.beginCameraLook(mouse.button)
                     }
 
                     onPositionChanged: function(mouse) {
+                        var point=cameraMouse.mapToItem(root,mouse.x,mouse.y)
+                        root.worldMouseX=point.x;root.worldMouseY=point.y
+                        if(root.assetEditorMode && root.assetDrag.startX!==undefined && pressed) {
+                            var now=Date.now();if(now-root.assetDragSentAt<40)return
+                            root.assetDragSentAt=now
+                            var angle=root.cameraHeading*Math.PI/180
+                            var meter=2*root.cameraDistance*Math.tan(25*Math.PI/180)/Math.max(1,view3d.height)
+                            var dx=(mouse.x-root.assetDrag.startX)*meter, dz=(mouse.y-root.assetDrag.startY)*meter
+                            root.assetEdit({op:"DRAG_PREVIEW",values:{x:root.assetDrag.x+dx*Math.cos(angle)+dz*Math.sin(angle),
+                                z:root.assetDrag.z-dx*Math.sin(angle)+dz*Math.cos(angle)}})
+                            return
+                        }
+                        if (!pressed) root.updateWorldHover(mouse.x,mouse.y,false)
                         if (terrainPicking && pressed) {
                             var selectedKey = root.pickTerrainCell(
                                 mouse.x,
@@ -3481,40 +6094,70 @@ Item {
                             return
                         }
                         if (cameraDragging && pressed) {
-                            root.orbitYaw = dragStartYaw
-                                + (mouse.x - dragStartX) * 0.55
-                            root.orbitPitch = Math.max(
-                                -55,
-                                Math.min(
-                                    -12,
-                                    dragStartPitch
-                                        - (mouse.y - dragStartY) * 0.35
-                                )
-                            )
+                            var dx=mouse.x-dragStartX,dy=mouse.y-dragStartY
+                            var presses=Object.assign({},pressGestures)
+                            for (var key in presses) {
+                                presses[key].yaw+=Math.abs(dx*.225)
+                                presses[key].pitch+=Math.abs(dy*.15)
+                            }
+                            pressGestures=presses
+                            root.dragCameraLook(dx,dy)
+                            dragStartX = mouse.x
+                            dragStartY = mouse.y
                         }
                     }
 
-                    onReleased: {
+                    onReleased: function(mouse) {
+                        if(root.assetDrag.startX!==undefined) {
+                            root.assetDrag=({});root.assetEdit({op:"END_TRANSFORM"});return
+                        }
                         if (terrainPicking) {
                             terrainPicking = false
                             brushLastKey = ""
                             brushLastX = Number.NaN
                             brushLastZ = Number.NaN
                         } else if (cameraDragging) {
-                            cameraDragging = false
-                            root.sendInput()
+                            root.endCameraLook(mouse.button)
+                            cameraDragging = root.mouseLeftHeld || root.mouseRightHeld
+                            var gesture=pressGestures[String(mouse.button)]
+                            var elapsed=gesture ? Date.now()-gesture.at : 10000
+                            var isClick=gesture && !gesture.cancelled && (elapsed<200 || (elapsed<800 && gesture.yaw<2.25 && gesture.pitch<2))
+                            var presses=Object.assign({},pressGestures);delete presses[String(mouse.button)];pressGestures=presses
+                            if (isClick && !cameraDragging) {
+                                if (mouse.button===Qt.LeftButton) root.selectWorld(gesture.id)
+                                else if (gesture.id) root.contextWorld(gesture.id)
+                            }
+                            root.updateWorldHover(mouse.x,mouse.y,true)
                         }
+                    }
+
+                    onCanceled: {
+                        if(root.assetDrag.startX!==undefined){root.assetDrag=({});root.assetEdit({op:"CANCEL_TRANSFORM"})}
+                        terrainPicking = false
+                        root.clearMovementInput()
+                        cameraDragging = false
+                        pressGestures=({})
                     }
 
                     onWheel: function(wheel) {
                         root.cameraDistance = Math.max(
-                            6,
-                            Math.min(48, root.cameraDistance
-                                - Number(wheel.angleDelta.y) / 120 * 2)
+                            0,
+                            Math.min(50, root.cameraDistance
+                                - Number(wheel.angleDelta.y) / 120)
                         )
                         root.sendInput()
                         wheel.accepted = true
                     }
+                }
+
+                GameNaturePrompt {
+                    surface: root
+                    z: 12
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.rightMargin: 20
+                    anchors.topMargin: 30
+                    visible: !root.standalonePlayerMode && root.natureTarget.available
                 }
 
                 Rectangle {
@@ -3524,6 +6167,7 @@ Item {
                     anchors.topMargin: 12
                     width: hudColumn.implicitWidth + 18
                     height: hudColumn.implicitHeight + 12
+                    visible: !root.standalonePlayerMode
                     color: root.panelOverlayRaised
                     border.color: "#4a514f"
                     border.width: 1
@@ -3555,7 +6199,7 @@ Item {
                         Text {
                             text: "ENT " + String(root.simulation.render_entity_count || 0)
                                 + " / " + String(root.simulation.active_entities || 0)
-                                + "  FX " + String(root.simulation.active_particles || 0)
+                                + "  FX " + String(root.particleBatchCount)
                             color: root.text
                             font.family: "monospace"
                             font.pixelSize: 10
@@ -3570,6 +6214,75 @@ Item {
                     }
                 }
 
+                Text {
+                    objectName: "gameWorldPlaceName"
+                    z: 5
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.topMargin: root.standalonePlayerMode ? 68 : 20
+                    visible: root.nearbyWorldPlace.length > 0 && !root.dosFallbackActive
+                    text: root.nearbyWorldPlace
+                    color: root.ledgerGold
+                    font.family: "monospace"
+                    font.pixelSize: 15
+                    font.letterSpacing: 1.2
+                    style: Text.Outline
+                    styleColor: "#22352f"
+                }
+
+                Rectangle {
+                    objectName: "gameWorldConversation"
+                    z: 25
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 120
+                    width: Math.min(460, parent.width - 40)
+                    height: worldConversationColumn.implicitHeight + 28
+                    visible: root.standalonePlayerMode && Boolean(root.dialogue.open)
+                        && ((root.dialogue.node || {}).choices || []).length > 0
+                    color: "#ef1b2927"
+                    border.color: root.ledgerGold
+                    border.width: 1
+                    radius: 3
+                    Column {
+                        id: worldConversationColumn
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 14
+                        spacing: 10
+                        Text {
+                            width: parent.width
+                            text: String((root.dialogue.node || {}).speaker || "NPC")
+                            color: root.ledgerGold
+                            font.family: "monospace"
+                            font.pixelSize: 16
+                            font.bold: true
+                        }
+                        Text {
+                            width: parent.width
+                            text: String((root.dialogue.node || {}).text || "")
+                            color: root.ink
+                            font.family: "monospace"
+                            font.pixelSize: 13
+                            wrapMode: Text.WordWrap
+                        }
+                        Repeater {
+                            model: (root.dialogue.node || {}).choices || []
+                            delegate: GgButton {
+                                required property var modelData
+                                width: worldConversationColumn.width
+                                implicitHeight: 28
+                                text: String(modelData.label || modelData.id || "")
+                                onClicked: {
+                                    if (String(modelData.id) === "leave") root.closeDialogue()
+                                    else root.talkNpc(String(modelData.id), String((root.dialogue.active || {}).npc_id || ""))
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // PitBull/oUF-inspired unit state: one compact data frame
                 // sits over the world and can later be replaced by an
                 // authored layout without changing the simulation contract.
@@ -3577,7 +6290,8 @@ Item {
                     objectName: "gameEngineUnitFrames"
                     z: 4
                     enabled: false
-                    visible: root.addonEnabled("UNIT_FRAMES")
+                    visible: !root.standalonePlayerMode
+                        && root.addonEnabled("UNIT_FRAMES")
                     anchors.left: parent.left
                     anchors.bottom: parent.bottom
                     anchors.leftMargin: sidebar.width + 14
@@ -3660,10 +6374,109 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.leftMargin: sidebar.width + 14
                     anchors.bottomMargin: 12
-                    text: "W/S MOVE · A/D TURN · Q/E STRAFE · RMB CAMERA · SPACE JUMP · SHIFT SPRINT · 1/2/3 MODE · R/F VERTICAL · Z/X/C ABILITIES"
+                    visible: !root.standalonePlayerMode
+                    text: "W/S MOVE · A/D TURN · E INTERACT · Q GRAPPLE · RMB CAMERA · SPACE JUMP · SHIFT BOOST · G FLIGHT · V HOVERBOARD · TAB TARGET · T ATTACK · R/F UP/DOWN · MAP: EXPLORE REGIONS"
                     color: root.muted
                     font.family: "monospace"
                     font.pixelSize: 10
+                }
+
+                Rectangle {
+                    id: planetMapOverlay
+                    objectName: "gameEnginePlanetMap"
+                    z: 20
+                    visible: !root.standalonePlayerMode && root.page === "MAP"
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: sidebar.width + 14
+                    anchors.rightMargin: inspector.width + 14
+                    anchors.margins: 12
+                    color: "#111b20"
+                    border.color: "#8c9f91"
+                    border.width: 1
+
+                    Image {
+                        id: planetMapImage
+                        objectName: "gameEnginePlanetMapImage"
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        source: "../assets/authored/world/gg-first-planet-map.svg"
+                        fillMode: Image.PreserveAspectFit
+                        smooth: true
+                    }
+
+                    Rectangle {
+                        id: playerMapMarker
+                        objectName: "gameEnginePlanetMapPlayerMarker"
+                        width: 14
+                        height: 14
+                        radius: width / 2
+                        color: "#ffe393"
+                        border.color: "#33291b"
+                        border.width: 2
+                        visible: {
+                            var bounds = root.planetMap.bounds_m || ({})
+                            var x = root.number(root.player.x, 0)
+                            var z = root.number(root.player.z, 0)
+                            x >= root.number(bounds.min_x, -2650)
+                                && x <= root.number(bounds.max_x, 2650)
+                                && z >= root.number(bounds.min_z, -2650)
+                                && z <= root.number(bounds.max_z, 2650)
+                        }
+                        x: {
+                            var bounds = root.planetMap.bounds_m || ({})
+                            var chart = root.planetMap.chart_layout || ({})
+                            var mapX = root.number(root.player.x, 0)
+                            var span = root.number(bounds.max_x, 2650)
+                                - root.number(bounds.min_x, -2650)
+                            var fraction = span > 0
+                                ? (mapX - root.number(bounds.min_x, -2650)) / span
+                                : 0.5
+                            var scale = planetMapImage.paintedWidth
+                                / root.number(chart.viewbox_width, 1440)
+                            return planetMapImage.x
+                                + (planetMapImage.width - planetMapImage.paintedWidth) / 2
+                                + (root.number(chart.plot_x, 64)
+                                    + fraction * root.number(chart.plot_width, 840)) * scale
+                                - width / 2
+                        }
+                        y: {
+                            var bounds = root.planetMap.bounds_m || ({})
+                            var chart = root.planetMap.chart_layout || ({})
+                            var mapZ = root.number(root.player.z, 0)
+                            var span = root.number(bounds.max_z, 2650)
+                                - root.number(bounds.min_z, -2650)
+                            var fraction = span > 0
+                                ? (root.number(bounds.max_z, 2650) - mapZ) / span
+                                : 0.5
+                            var scale = planetMapImage.paintedWidth
+                                / root.number(chart.viewbox_width, 1440)
+                            return planetMapImage.y
+                                + (planetMapImage.height - planetMapImage.paintedHeight) / 2
+                                + (root.number(chart.plot_y, 82)
+                                    + fraction * root.number(chart.plot_height, 840)) * scale
+                                - height / 2
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            radius: 16
+                            color: "transparent"
+                            border.color: "#ffe393"
+                            border.width: 1
+                            opacity: 0.72
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.AllButtons
+                        onPressed: function(mouse) { mouse.accepted = true }
+                        onWheel: function(wheel) { wheel.accepted = true }
+                    }
                 }
             }
 
@@ -3671,13 +6484,15 @@ Item {
                 id: inspector
                 objectName: "gameEngineInspector"
                 z: 30
+                visible: !root.standalonePlayerMode
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
                 anchors.margins: 10
                 width: root.inspectorCollapsed
                     ? 34
-                    : Math.max(244, Math.min(286, parent.width * 0.24))
+                    : root.assetEditorMode ? Math.min(390,Math.max(320,parent.width*.36))
+                      : Math.max(244, Math.min(286, parent.width * 0.24))
                 color: root.panelOverlay
                 border.color: "#46504f"
                 border.width: 1
@@ -3714,11 +6529,25 @@ Item {
                     }
                 }
 
+                Loader {
+                    id: stickyAssetPreview
+                    anchors.top:parent.top;anchors.left:parent.left;anchors.right:parent.right
+                    anchors.topMargin:38;anchors.leftMargin:10;anchors.rightMargin:10
+                    height:active ? 190 : 0
+                    active:root.assetEditorMode && !root.inspectorCollapsed
+                        && !!((root.assetEditorState.selected || ({})).source)
+                        && String(((root.assetEditorState.selected || ({})).detail || ({})).format)!=="GGMESH"
+                    sourceComponent:Component {GameAssetPreview {controller:root}}
+                }
+
+                Loader {
+                    active: inspector.visible && !root.inspectorCollapsed
+                    anchors.fill: parent
+                    sourceComponent: Component {
                 Flickable {
-                    visible: !root.inspectorCollapsed
                     anchors.fill: parent
                     anchors.margins: 10
-                    anchors.topMargin: 38
+                    anchors.topMargin: 38+stickyAssetPreview.height+(stickyAssetPreview.active ? 8 : 0)
                     clip: true
                     contentWidth: width
                     contentHeight: inspectorColumn.height
@@ -3728,6 +6557,60 @@ Item {
                         id: inspectorColumn
                         width: parent.width
                         spacing: 10
+
+                        GameAssetInspector {
+                            width: parent.width
+                            controller: root
+                            visible: root.assetEditorMode
+                        }
+
+                        Column {
+                            width: parent.width
+                            spacing: 7
+                            visible: root.page === "MAP"
+
+                            Text {
+                                text: "PLANET ATLAS"
+                                color: root.ledgerGold
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                font.bold: true
+                            }
+                            Text {
+                                width: parent.width
+                                text: String(root.planetMap.planet_id || "SANDOVER_PRIME")
+                                    + " · REV " + String(root.planetMap.map_revision || 1)
+                                    + "\nFIXED SEED · " + String(root.terrain.world_seed || 0)
+                                    + "\nPLAYER X/Z  " + root.fixed(root.player.x, 1)
+                                    + " / " + root.fixed(root.player.z, 1)
+                                    + " m · CELL " + String(root.player.cell_key || "0:0")
+                                color: root.text
+                                font.family: "monospace"
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
+                            }
+                            Repeater {
+                                model: root.planetMap.landmasses || []
+                                delegate: Button {
+                                    required property var modelData
+                                    width: parent.width
+                                    text: "EXPLORE " + String(modelData.name || modelData.id)
+                                    onClicked: root.exploreRegion(modelData.id)
+                                    font.family: "monospace"
+                                    font.pixelSize: 9
+                                }
+                            }
+                            Text {
+                                width: parent.width
+                                text: "PROCEDURAL: water, weather, fish, birds"
+                                    + "\nDETERMINISTIC: coast, terrain, seabed"
+                                    + "\nATLAS: bounded tangent-region map"
+                                color: root.muted
+                                font.family: "monospace"
+                                font.pixelSize: 9
+                                wrapMode: Text.WordWrap
+                            }
+                        }
 
                         Column {
                             width: parent.width
@@ -3758,15 +6641,19 @@ Item {
                                     onClicked: root.selectedItemId = String(modelData.instance_id)
                                 }
                             }
-                            Row {
+                            Flow {
+                                width: parent.width
+                                height: childrenRect.height
                                 spacing: 6
                                 GgButton {
                                     text: "EQUIP"
+                                    implicitWidth: 62
                                     enabled: root.selectedItemId !== ""
                                     onClicked: root.equipItem(root.selectedItemId)
                                 }
                                 GgButton {
                                     text: "DROP"
+                                    implicitWidth: 58
                                     enabled: root.selectedItemId !== ""
                                     onClicked: {
                                         root.dropItem(root.selectedItemId)
@@ -3775,14 +6662,21 @@ Item {
                                 }
                                 GgButton {
                                     text: "SOCKET"
+                                    implicitWidth: 70
                                     enabled: root.selectedItemId !== ""
                                     onClicked: root.socketItem(root.selectedItemId, "")
                                 }
                                 GgButton {
-                                    text: "ENCHANT"
-                                    enabled: root.selectedItemId !== ""
-                                    onClicked: root.enchantGear(root.selectedItemId, "")
+                                    text: "APPLY SCROLL"
+                                    implicitWidth: 122
+                                    enabled: root.selectedItemId !== "" && root.selectedEnchantScrollId !== ""
+                                    onClicked: root.enchantGear(root.selectedItemId,
+                                        root.selectedEnchantScrollId)
                                 }
+                            }
+                            GameEnchantingControls {
+                                width: parent.width
+                                game: root
                             }
                             Text {
                                 width: parent.width
@@ -3797,7 +6691,7 @@ Item {
                             }
                             Text {
                                 width: parent.width
-                                text: String(root.status.error || "")
+                                text: WorldFx.scrollError(String(root.status.error || ""))
                                 color: root.signalRed
                                 wrapMode: Text.WordWrap
                             }
@@ -3896,7 +6790,7 @@ Item {
                                             ? (vendorCard.vendorRow.offers.buy || []) : []
                                         delegate: GgButton {
                                             required property var modelData
-                                            width: parent.width
+                                            width: Math.max(0, vendorCard.width - 16)
                                             implicitHeight: 24
                                             text: "BUY " + String(modelData.item.name || modelData.definition_id)
                                                 + " · " + String(modelData.total_price || 0) + "G"
@@ -3917,7 +6811,7 @@ Item {
                                             ? (vendorCard.vendorRow.offers.sell || []) : []
                                         delegate: GgButton {
                                             required property var modelData
-                                            width: parent.width
+                                            width: Math.max(0, vendorCard.width - 16)
                                             implicitHeight: 24
                                             text: "SELL " + String(modelData.item.name || modelData.definition_id)
                                                 + " · +" + String(modelData.total_price || 0) + "G"
@@ -4114,6 +7008,29 @@ Item {
                                 }
                             }
 
+                            Row {
+                                width: parent.width
+                                spacing: 5
+                                GgButton {
+                                    text: "FX " + (root.fxPreviewStyle || "OFF")
+                                    implicitWidth: 108
+                                    implicitHeight: 25
+                                    onClicked: {
+                                        var count = WorldFx.PREVIEW_STYLES.length
+                                        root.fxPreviewIndex = root.fxPreviewIndex >= count - 1
+                                            ? -1 : root.fxPreviewIndex + 1
+                                        root.refreshRender()
+                                    }
+                                }
+                                Text {
+                                    text: "EFFECT PREVIEW"
+                                    color: root.muted
+                                    font.family: "monospace"
+                                    font.pixelSize: 10
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+
                             Column {
                                 width: parent.width
                                 spacing: 4
@@ -4170,7 +7087,7 @@ Item {
                                     text: "CRAFT"
                                     implicitWidth: 64
                                     implicitHeight: 25
-                                    onClicked: root.craftRecipe("recipe.field_ration")
+                                    onClicked: root.openCrafting("")
                                 }
                                 GgButton {
                                     text: "SOCKET"
@@ -4182,7 +7099,7 @@ Item {
                                     text: "GEAR CRAFT"
                                     implicitWidth: 86
                                     implicitHeight: 25
-                                    onClicked: root.craftGear("recipe.fiber_rope", "station.workbench")
+                                    onClicked: root.openCrafting("NEAREST")
                                 }
                                 GgButton {
                                     text: "PACK"
@@ -4266,10 +7183,13 @@ Item {
                                 width: parent.width
                                 spacing: 5
                                 GgButton {
-                                    text: "OPEN CACHE"
-                                    implicitWidth: 88
+                                    text: root.bank.nearby ? "OPEN BANK" : "OPEN CACHE"
+                                    implicitWidth: root.bank.nearby ? 102 : 88
                                     implicitHeight: 25
-                                    onClicked: root.openContainer("")
+                                    onClicked: root.openContainer(
+                                        root.bank.nearby
+                                            ? String(root.bank.container_id || "") : ""
+                                    )
                                 }
                                 GgButton {
                                     text: "LOOT CACHE"
@@ -4858,10 +7778,10 @@ Item {
                                 wrapMode: Text.WordWrap
                             }
                             Repeater {
-                                model: root.renderEntities.slice(0, 20)
+                                model: root.page === 'SCENE' ? Math.min(20,root.renderEntities.length) : 0
                                 delegate: Rectangle {
-                                    required property var modelData
                                     required property int index
+                                    readonly property var modelData: root.renderEntities[index] || ({})
                                     width: parent.width
                                     height: 23
                                     color: index % 2 ? "transparent" : "#1e2020"
@@ -4911,7 +7831,12 @@ Item {
                                 + "\nRENDER UPDATE " + String(root.renderUpdateHz) + " Hz"
                                     + "\nLAST TICK    " + root.fixed(root.simulation.last_tick_ms, 3) + " ms"
                                     + "\nMAX TICK     " + root.fixed(root.simulation.max_tick_ms, 3) + " ms"
-                                + "\nDRAW CALLS   " + String(root.render.draw_calls || 0)
+                                + "\nDRAW CALLS   " + (
+                                    root.render.draw_calls === null
+                                        || root.render.draw_calls === undefined
+                                        ? "GPU COUNTER N/A"
+                                        : String(root.render.draw_calls)
+                                )
                                     + "\nVISIBLE      " + String(root.render.visibility
                                         ? root.render.visibility.visible_instances : 0)
                                     + "\nTERRAIN      " + String(root.terrain.streaming
@@ -4935,11 +7860,12 @@ Item {
                                     verticalAlignment: Text.AlignVCenter
                                 }
                                 Repeater {
-                                    model: ["POTATO", "BALANCED", "MODERN", "CINEMATIC"]
+                                    model: ["POTATO", "PS2_CLASSIC", "BALANCED", "MODERN", "CINEMATIC"]
                                     delegate: GgButton {
                                         required property string modelData
-                                        text: modelData
-                                        implicitWidth: 61
+                                        text: modelData === "PS2_CLASSIC"
+                                            ? "PS2" : modelData
+                                        implicitWidth: modelData === "PS2_CLASSIC" ? 50 : 61
                                         implicitHeight: 24
                                         checked: root.render.profile === modelData
                                         onClicked: root.setRenderProfile(modelData)
@@ -4958,7 +7884,7 @@ Item {
                                         ? root.render.measurement.snapshot_build_ms : 0, 3) + " ms"
                                     + "\nQT FRAME     " + root.fixed(view3d.renderStats
                                         ? view3d.renderStats.frameTime : 0, 3) + " ms"
-                                    + " · GPU " + root.fixed(view3d.renderStats
+                                    + " · RENDER CPU " + root.fixed(view3d.renderStats
                                         ? view3d.renderStats.renderTime : 0, 3) + " ms"
                                 )
                                 color: root.ledgerGold
@@ -5077,7 +8003,7 @@ Item {
                         Column {
                             width: parent.width
                             spacing: 7
-                            visible: root.page === "ASSETS"
+                            visible: root.page === "ASSETS" && !root.assetEditorMode
 
                             Text {
                                 text: "ASSET / RUNTIME BOUNDARY"
@@ -5119,8 +8045,13 @@ Item {
                                         root.render.asset_instances
                                             ? root.render.asset_instances.authored_requested
                                             : 0
-                                    ) + "/" + String(root.assetInstanceBudget)
+                                    ) + "/" + String(
+                                        root.assets.crowd_instance_budget
+                                            || root.assetInstanceBudget
+                                    )
                                     + " instances"
+                                    + "\nRIGS           " + String(root.assetInstanceBudget)
+                                    + " full · remainder Blender crowd LOD"
                                     + "\nCHARACTERS     one active low-poly model"
                                     + "\nCROWD          " + String(
                                         root.assets.crowd_selected
@@ -5371,7 +8302,7 @@ Item {
                                     width: parent.width - 109
                                     text: root.bindingCaptureAction !== ""
                                         ? "PRESS A KEY…"
-                                        : "Q/E STRAFE · A/D TURN"
+                                        : "E INTERACT · Q GRAPPLE · A/D TURN"
                                     color: root.bindingCaptureAction !== ""
                                         ? root.ledgerGold : root.muted
                                     font.family: "monospace"
@@ -5459,7 +8390,78 @@ Item {
                         }
                     }
                 }
+                    }
+                }
             }
         }
     }
+
+    GameInventoryPanel {
+        objectName: "gameCharacterInventoryPanel"
+        anchors.fill: parent
+        z: 100
+        visible: root.page === "BAG"
+        game: root
+    }
+    GameLocalActionsPanel {
+        anchors.fill: parent
+        z: 110
+        game: root
+    }
+    GamePresentation {
+        anchors.fill: parent
+        z: 50
+        surfaceHost: root.surfaceHost
+        paneLive: root.paneLive
+        standalone: root.standalonePlayerMode
+        worldSurface: root
+        onClientControls: function(controls) {
+            root.mountedWorldState=controls.mounted_world || ({status:"GG",message:""})
+            root.syncClientCamera({player:{client_controls:controls}})
+            if(controls.services) {
+                var deadBefore=!!(root.localServiceState.lifecycle || {}).dead
+                root.localServiceState=LocalServiceState.retain(root.localServiceState,controls.services)
+                if(!deadBefore && (controls.services.lifecycle || {}).dead) localServices.openLifecycle()
+            }
+        }
+    }
+    Rectangle {
+        objectName:"gameMountedWorldNotice"
+        visible:root.paneLive && (root.mountedWorldState.status==="LOADING" || root.mountedWorldState.status==="UNAVAILABLE")
+        anchors.top:parent.top;anchors.horizontalCenter:parent.horizontalCenter;anchors.topMargin:60
+        width:Math.min(480,parent.width-32);height:message.implicitHeight+20;z:160
+        color:"#ed19232b";border.color:"#806d47";radius:5
+        Text {
+            id:message;anchors.centerIn:parent;width:parent.width-24
+            text:root.mountedWorldState.message || "";textFormat:Text.PlainText
+            color:"#eed494";font.pixelSize:12;wrapMode:Text.WordWrap;horizontalAlignment:Text.AlignHCenter
+        }
+    }
+    GgButton {
+        objectName: "gameLocalServicesButton"
+        text: "TJÄNSTER"
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: root.standalonePlayerMode ? 12 : 50
+        z: 120
+        enabled: !!root.surfaceHost
+        onClicked: localServices.open()
+    }
+    LocalGameServices {
+        id: localServices
+        surfaceHost: root.surfaceHost
+        game: root
+        services: root.localServiceState
+        inventory: root.status.items ? root.status.items.inventory || [] : []
+        people: root.localServiceState.people || []
+        playerName: root.status.player ? root.status.player.name || "Gold Goblin" : "Gold Goblin"
+        targetId: root.combatTarget.id || ""
+        onVisibleChanged: if(visible) {root.clearMovementInput();if(root.surfaceHost&&root.surfaceHost.gameEngineClientControl)root.surfaceHost.gameEngineClientControl(JSON.stringify({kind:"input",op:"Cancel"}))}
+        onServiceUpdated: function(snapshot) { root.localServiceState=LocalServiceState.retain(root.localServiceState,((snapshot.player || {}).client_controls || {}).services || root.localServiceState);root.refresh() }
+    }
+    GameItemBindingDialog { game:root }
+    GameLootBindingDialog { game:root }
+    GameEnchantingDialog { game:root }
+    GameDressingRoom { game:root }
+
 }

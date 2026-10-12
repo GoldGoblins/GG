@@ -1,0 +1,19 @@
+{
+  "schema": "gg.native-presentation-build.v1",
+  "abi": 1,
+  "source_sha256": "9ef75204e36c186aedb611ccd810c13fe455b61c6729cdb24c7db759eb9b6b0d",
+  "binary_sha256": "c2616fd2f11e1f9f531b5ecda7aa3bb413079473c50e87c7d6cf9e8116186fee",
+  "binary_bytes": 206472,
+  "lua_c_files": 24,
+  "sanitizers": false,
+  "probe": {
+    "status": "PASS",
+    "checks": [
+      "instance-buffer",
+      "audio-voices-limiter-lifetime",
+      "audio-reverb-stream-fade-lifetime",
+      "audio-stereo-pitch-voice-generation",
+      "Lua-events-instructions-memory-lifetime"
+    ]
+  }
+}

@@ -1,10 +1,10 @@
 """Data-only input and keybinding contract for the GAME ENGINE.
 
-The default grammar intentionally follows the classic World of Warcraft
-third-person convention: W/S move forward and backward, A/D turn in place,
-and Q/E strafe.  Bindings are kept as compact data so the same action names
-can be consumed by QML, replays, a future native client and an in-game editor.
-There is no arbitrary script execution in this layer.
+The default grammar uses W/S to move and A/D to turn in place. E interacts
+with the nearest NPC or world item; Q and E are not movement defaults.
+Bindings are compact data so QML, replays, a future native client and the
+in-game editor can consume the same action names. There is no arbitrary
+script execution in this layer.
 """
 
 from __future__ import annotations
@@ -13,12 +13,21 @@ from copy import deepcopy
 from typing import Any
 
 
-SCHEMA = "gg.game-engine.input.v1"
-VERSION = 1
+SCHEMA = "gg.game-engine.input.v2"
+VERSION = 2
 MODEL = "WOW_CLASSIC_THIRD_PERSON"
 
 
 ACTION_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    {"id":"POSTURE_TOGGLE","label":"Sit / stand","group":"MOVEMENT","default":["K"]},
+    {"id":"SHEATH_TOGGLE","label":"Draw / stow weapons","group":"COMBAT","default":["J"]},
+    {"id":"WALK_TOGGLE","label":"Walk / run","group":"MOVEMENT","default":["L"]},
+    {"id":"AUTORUN_TOGGLE","label":"Autorun","group":"MOVEMENT","default":["P"]},
+    {"id": "TARGET_NEXT", "label": "Cycle target (Shift reverses)",
+     "group": "COMBAT", "default": ["TAB"]},
+    {"id": "RELOAD_FIREARM", "label": "Reload firearms", "group": "COMBAT", "default": ["Y"]},
+    {"id": "PRIMARY_ATTACK", "label": "Primary attack",
+     "group": "COMBAT", "default": ["T"]},
     {
         "id": "MOVE_FORWARD",
         "label": "Move forward",
@@ -47,13 +56,25 @@ ACTION_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "STRAFE_LEFT",
         "label": "Strafe left",
         "group": "MOVEMENT",
-        "default": ["Q"],
+        "default": [],
     },
     {
         "id": "STRAFE_RIGHT",
         "label": "Strafe right",
         "group": "MOVEMENT",
+        "default": [],
+    },
+    {
+        "id": "INTERACT",
+        "label": "Interact",
+        "group": "WORLD",
         "default": ["E"],
+    },
+    {
+        "id": "GRAPPLE",
+        "label": "Grappling hook",
+        "group": "MOVEMENT",
+        "default": ["Q"],
     },
     {
         "id": "JUMP",
@@ -66,6 +87,24 @@ ACTION_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "label": "Sprint",
         "group": "MOVEMENT",
         "default": ["SHIFT"],
+    },
+    {
+        "id": "TOGGLE_FLIGHT",
+        "label": "Take off / land",
+        "group": "MOVEMENT",
+        "default": ["G"],
+    },
+    {
+        "id": "TOGGLE_HOVERBOARD",
+        "label": "Toggle hoverboard",
+        "group": "VEHICLES",
+        "default": ["V"],
+    },
+    {
+        "id": "MOUNT_BOAT",
+        "label": "Board / leave skiff",
+        "group": "VEHICLES",
+        "default": ["B"],
     },
     {
         "id": "VERTICAL_UP",
@@ -128,6 +167,8 @@ _SPECIAL_KEYS = {
     "LEFT",
     "RIGHT",
 }
+_STRAFE_ACTIONS = {"STRAFE_LEFT", "STRAFE_RIGHT"}
+_INTERACTION_KEYS = {"Q", "E"}
 
 
 def normalize_key(value: Any) -> str | None:
@@ -191,10 +232,25 @@ def normalize_bindings(state: Any) -> dict[str, Any]:
         keys: list[str] = []
         for raw_key in raw_keys[:3]:
             key = normalize_key(raw_key)
-            if key and key not in keys:
+            if (
+                key
+                and key not in keys
+                and not (action in _STRAFE_ACTIONS and key in _INTERACTION_KEYS)
+            ):
                 keys.append(key)
-        if keys:
+        if action in _STRAFE_ACTIONS:
             normalized["bindings"][action] = keys
+        elif keys or not raw_keys:
+            # An explicit empty list is an intentional unbinding. Restoring
+            # the default here would recreate collisions removed by set_binding.
+            # Missing or invalid binding values still retain their defaults.
+            normalized["bindings"][action] = keys
+    # Migrate the accidentally shipped V attack binding. V belongs to the
+    # board, including saves containing the conflicting old pair.
+    attacks = normalized["bindings"]["PRIMARY_ATTACK"]
+    if "V" in attacks:
+        normalized["bindings"]["PRIMARY_ATTACK"] = [k for k in attacks if k != "V"] or ["T"]
+        normalized["bindings"]["TOGGLE_HOVERBOARD"] = ["V"]
     return normalized
 
 
@@ -226,12 +282,20 @@ def set_binding(
             "error": "GAME_ENGINE_BINDING_KEY_INVALID",
             "key": str(key or ""),
         }
+
+    action_id = definition["id"]
+    if action_id in _STRAFE_ACTIONS and normalized_key in _INTERACTION_KEYS:
+        return normalized, {
+            "ok": False,
+            "error": "GAME_ENGINE_BINDING_RESERVED_FOR_INTERACTION",
+            "action": action_id,
+            "key": normalized_key,
+        }
     try:
         safe_slot = max(0, min(2, int(slot)))
     except (TypeError, ValueError):
         safe_slot = 0
 
-    action_id = definition["id"]
     for other_action, keys in normalized["bindings"].items():
         if other_action != action_id and normalized_key in keys:
             normalized["bindings"][other_action] = [

@@ -17,11 +17,21 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="gg-arb-"))
     crypto_contract.STATE_DIR = tmp
     crypto_flash_arb.reset_pools()
+    sized = crypto_flash_arb.optimal_borrow()
+    if sized <= 0:
+        raise AssertionError("seeded gap must have an optimal size")
+    best = crypto_flash_arb.quote_flash_arb(sized)
+    if not best.get("ok") or int(best["profit_usd"]) <= 0:
+        raise AssertionError("optimal size must clear the tip")
+    if int(best["tip_usd"]) * 2 + 1 < int(best["gross_usd"]):
+        raise AssertionError("tip share should be at least half the gross when the floor is not binding")
     first = crypto_flash_arb.commit_flash_arb(10 * 1_000_000)
     if not first.get("ok") or not first.get("committed"):
         raise AssertionError("seeded arb must profit: " + json.dumps(first)[:400])
     if int(first["profit_usd"]) <= 0:
         raise AssertionError("profit")
+    if int(first["tip_usd"]) <= 0 or int(first["profit_usd"]) >= int(first["gross_usd"]):
+        raise AssertionError("tip must take a share and leave a smaller net")
     equal = {
         "A": {"sol": 1000 * 10**9, "usd": 100_000 * 10**6},
         "B": {"sol": 1000 * 10**9, "usd": 100_000 * 10**6},

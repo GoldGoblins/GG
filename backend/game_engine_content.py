@@ -20,6 +20,7 @@ from backend import game_engine_npc_identity as identity_catalog
 from backend import game_engine_content_packs as content_packs
 from backend import game_engine_quests as quests_catalog
 from backend import game_engine_world_events as world_events_catalog
+from backend.game_engine_benilla_spells import authored_abilities
 
 
 SCHEMA = "gg.game-engine.content.v1"
@@ -59,6 +60,7 @@ def starter_content() -> dict[str, Any]:
                 "tags": ["MOBILITY", "FLY"],
                 "effect": {"impulse": 14.0, "particle_burst": 32},
             },
+            **authored_abilities(),
         },
         "items": item_catalog.starter_definitions(),
         "loot_tables": item_catalog.starter_loot_tables(),
@@ -73,6 +75,11 @@ def starter_content() -> dict[str, Any]:
         "world_events": world_events_catalog.catalog(),
         "vendors": economy_catalog.starter_vendors(),
         "recipes": {
+            "recipe.wrapping_paper": {
+                "id":"recipe.wrapping_paper","name":"Wrapping Paper","profession":"SURVIVAL",
+                "inputs":{"material.fiber":2,"material.resin":1},
+                "output":{"item.gg_wrapping_paper":2},"skill":"SURVIVAL",
+            },
             "recipe.field_ration": {
                 "id": "recipe.field_ration",
                 "name": "Field Ration",

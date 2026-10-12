@@ -9,6 +9,7 @@ Item {
     property color grid: "#242424"
     property real yMax: 0
     property bool fromZero: true
+    property bool linear: false
 
     function redraw() {
         if (!root.visible)
@@ -83,6 +84,8 @@ Item {
             function xAt(index) {
                 if (pts.length === 1)
                     return w
+                if (root.linear)
+                    return index / (pts.length - 1) * w
                 // New samples enter at the right with generous spacing, then
                 // compact toward the older left-side history.  This makes
                 // fresh activity immediate without throwing away context.
@@ -135,6 +138,17 @@ Item {
             ctx.lineJoin = "round"
             ctx.lineCap = "round"
             ctx.stroke()
+            if (root.linear && pts.length > 1) {
+                var lastY = yAt(pts[pts.length - 1])
+                ctx.save()
+                ctx.setLineDash([3, 4])
+                ctx.globalAlpha = 0.45
+                ctx.beginPath()
+                ctx.moveTo(0, lastY)
+                ctx.lineTo(w, lastY)
+                ctx.stroke()
+                ctx.restore()
+            }
             var marks = root.marks || []
             var n = pts.length
             for (i = 0; i < marks.length; i++) {
@@ -144,11 +158,7 @@ Item {
                     continue
                 if (mi > n - 1)
                     mi = n - 1
-                var mx = n <= 1
-                    ? w
-                    : (logSpan > 0
-                        ? 1 - Math.log(last - mi) / logSpan
-                        : mi / (last - 1)) * w
+                var mx = xAt(mi)
                 var my = yAt(m.px !== undefined && m.px !== null && Number(m.px) > 0
                     ? m.px
                     : pts[Math.round(mi)])
@@ -174,6 +184,7 @@ Item {
     onMarksChanged: root.redraw()
     onYMaxChanged: root.redraw()
     onFromZeroChanged: root.redraw()
+    onLinearChanged: root.redraw()
     onWidthChanged: root.redraw()
     onHeightChanged: root.redraw()
     onVisibleChanged: {

@@ -21,16 +21,17 @@ class ForensicResolver:
     module never executes those requests itself.
     """
 
-    def __init__(self, index: SourceIndex):
+    def __init__(self, index: SourceIndex | None):
         self.index = index
 
     def resolve_symbol_search(self, symbol: str) -> tuple[list[Fact], list[ProbeRequest]]:
         hits = []
-        for module, rows in self.index.symbols.items():
-            for item in rows:
-                leaf = item.name.split(".")[-1]
-                if leaf == symbol:
-                    hits.append(item)
+        if self.index is not None:
+            for module, rows in self.index.symbols.items():
+                for item in rows:
+                    leaf = item.name.split(".")[-1]
+                    if leaf == symbol:
+                        hits.append(item)
         facts = []
         for item in hits:
             facts.append(Fact(

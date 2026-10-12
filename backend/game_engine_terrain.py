@@ -14,6 +14,7 @@ import math
 from typing import Any
 
 from backend import game_engine_world as world
+from backend import game_engine_planet as planet_contract
 
 
 SCHEMA = "gg.game-engine.terrain.v1"
@@ -39,11 +40,20 @@ MAX_BRUSH_STRENGTH_M = 4.0
 BIOMES = (
     "FIRST_ISLAND",
     "LAND",
+    "BEACH",
     "CLIFF",
     "SHALLOW_WATER",
     "DEEP_WATER",
     "REEF",
+    "TEMPERATE",
+    "TUNDRA",
+    "JUNGLE",
+    "VOLCANIC",
+    "ABYSS",
+    "MAELSTROM",
 )
+LAND_BIOMES = {"FIRST_ISLAND", "LAND", "BEACH", "CLIFF", "TEMPERATE", "TUNDRA", "JUNGLE", "VOLCANIC"}
+WATER_BIOMES = {"SHALLOW_WATER", "DEEP_WATER", "REEF", "ABYSS", "MAELSTROM"}
 
 _LOD_GEOMETRY: dict[str, dict[str, int | str]] = {
     "NEAR": {
@@ -81,6 +91,25 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _gaussian_landform(
+    x: float,
+    z: float,
+    center_x: float,
+    center_z: float,
+    radius_x: float,
+    radius_z: float,
+) -> float:
+    dx = (x - center_x) / radius_x
+    dz = (z - center_z) / radius_z
+    return math.exp(-0.5 * (dx * dx + dz * dz))
+
+
+def _smooth_unit(value: float) -> float:
+    """Return a clamped cubic transition for authored terrain corridors."""
+    amount = max(0.0, min(1.0, float(value)))
+    return amount * amount * (3.0 - 2.0 * amount)
 
 
 def _u32(value: int) -> int:
@@ -744,7 +773,7 @@ def _height_delta_at(
     return max(-64.0, min(64.0, total))
 
 
-def height_at(
+def _starter_island_height(
     x: float,
     z: float,
     world_seed: int = DEFAULT_WORLD_SEED,
@@ -755,32 +784,169 @@ def height_at(
 ) -> float:
     """Return a cheap, continuous terrain height in local game metres.
 
-    The radial term makes the preview an island surrounded by water.  The
-    sinusoidal terms are deliberately low frequency and bounded: adjacent
-    cells meet continuously, while cell LOD can safely sample the same function
-    at a lower density.  The wave terms are phase-centred so the spawn point is
-    reproducible and remains a land surface.
+    The island uses one deterministic shared field for rendering, movement,
+    navigation and water depth.  Its uneven coast has a sheltered cove, a few
+    broad headlands and a low village green between raised landmarks.  Every
+    feature is wider than the coarsest terrain samples so cell LOD remains
+    continuous instead of turning these forms into noisy bumps.
     """
-    local_x = _safe_float(x)
-    local_z = _safe_float(z)
-    distance = math.hypot(local_x, local_z)
-    island_mass = max(0.0, 4.8 - distance * 0.055)
+    # Sample the compact authored island, then expand it. Brushes stay in
+    # world metres so an editor stroke of +2 m is still +2 m after the scale.
+    feel = world.WORLD_FEEL_SCALE if world.WORLD_FEEL_SCALE > 0.0 else 1.0
+    world_x = _safe_float(x)
+    world_z = _safe_float(z)
+    local_x = world_x / world.ISLAND_LAYOUT_SCALE
+    local_z = world_z / world.ISLAND_LAYOUT_SCALE
     seed = _u32(world_seed)
     phase = (seed & 0xFFFF) / 65535.0 * math.tau
 
-    ridge_x = math.sin(local_x * 0.080 + phase) - math.sin(phase)
-    ridge_z = math.sin(local_z * 0.115 - phase * 0.70) - math.sin(-phase * 0.70)
-    ridge_diagonal = (
-        math.sin((local_x - local_z) * 0.043 + phase * 0.35)
+    # The coast is an oblong, three-lobed shelf rather than a circular plate.
+    # The low-frequency waves are large enough to make real coves and points
+    # at the 16 m world-cell scale used by the renderer.
+    distance = math.hypot(local_x * 0.94, local_z * 1.02)
+    angle = math.atan2(local_z * 1.02, local_x * 0.94)
+    coast_fade = min(1.0, distance / 11.0)
+    coast_wave = (
+        2.50 * math.sin(angle * 3.0 + phase)
+        + 1.30 * math.sin(angle * 5.0 - phase * 0.7)
+        + 0.62 * math.sin(angle * 2.0 + phase * 0.4)
+    ) * coast_fade
+    harbor_cove = 2.35 * math.exp(
+        -0.5 * (((local_x - 1.0) / 6.0) ** 2 + ((local_z + 18.0) / 3.5) ** 2)
+    )
+    coast_distance = max(0.0, distance - coast_wave) + harbor_cove
+    shorefall = (
+        max(0.0, coast_distance - 10.0) * 0.045
+        + max(0.0, coast_distance - 14.0) * 0.100
+        + max(0.0, coast_distance - 17.0) * 0.180
+        + max(0.0, coast_distance - 20.0) * 0.220
+    )
+
+    # The village sits on several overlapping grassy shelves. The middle
+    # remains open enough for play, while the shoulders rise into separate
+    # headlands instead of reading as one circular tabletop.
+    plateau_t = max(0.0, min(1.0, (coast_distance - 13.0) / 3.5))
+    plateau_t = plateau_t * plateau_t * (3.0 - 2.0 * plateau_t)
+    island_plateau = 3.50 * (1.0 - plateau_t)
+
+    # A walkable green anchors the homes.  Higher ground carries the windmill,
+    # northern lookout and western headland, giving the island a readable
+    # skyline while keeping each climb gradual enough for the shared nav grid.
+    village_green = -0.95 * _gaussian_landform(
+        local_x, local_z, 0.0, 0.0, 5.8, 5.2
+    )
+    headlands = (
+        3.00
+        * _gaussian_landform(
+            local_x, local_z, -11.0, -10.0, 8.5, 7.5
+        )
+        + 2.25
+        * _gaussian_landform(
+            local_x, local_z, 4.0, 11.0, 8.0, 6.0
+        )
+        + 1.85
+        * _gaussian_landform(
+            local_x, local_z, -13.0, 1.0, 5.5, 7.5
+        )
+        + 1.80
+        * _gaussian_landform(
+            local_x, local_z, 12.0, 2.0, 5.8, 7.0
+        )
+        + 1.15
+        * _gaussian_landform(
+            local_x, local_z, 8.0, -9.5, 5.2, 4.2
+        )
+        + 0.85
+        * _gaussian_landform(
+            local_x, local_z, -3.5, 13.2, 5.0, 3.4
+        )
+    )
+    settlement_shelves = (
+        1.35 * _gaussian_landform(local_x, local_z, -5.5, 4.0, 3.6, 3.5)
+        + 1.40 * _gaussian_landform(local_x, local_z, 5.8, 5.2, 4.5, 3.8)
+        + 0.95 * _gaussian_landform(local_x, local_z, 5.2, -5.3, 4.0, 3.0)
+        + 0.95 * _gaussian_landform(local_x, local_z, -5.7, -6.2, 3.6, 3.4)
+        + 0.85 * _gaussian_landform(local_x, local_z, 0.0, 8.0, 4.0, 3.2)
+    )
+    ridge = 0.22 * (
+        math.sin((local_x + local_z) * 0.075 + phase * 0.35)
         - math.sin(phase * 0.35)
     )
-    ridge = 0.28 * ridge_x + 0.24 * ridge_z + 0.18 * ridge_diagonal
-    fine = 0.06 * (
-        math.sin(local_x * 0.23 + local_z * 0.19 + phase * 1.3)
+    fine = 0.08 * (
+        math.sin(local_x * 0.21 + local_z * 0.17 + phase * 1.3)
         - math.sin(phase * 1.3)
     )
 
-    height = island_mass - 2.9 + ridge * (0.60 + island_mass * 0.06) + fine
+    height = (
+        0.98
+        + island_plateau
+        - shorefall
+        + village_green
+        + headlands
+        + settlement_shelves
+        + ridge
+        + fine
+    )
+
+    # A broad south approach descends from the village to the sheltered cove.
+    # Its grade stays inside the ground-nav limit; the surrounding rim keeps
+    # the steeper cliff profile rather than turning the whole island into a ramp.
+    cove_depth = max(0.0, -local_z)
+    ramp_start = max(0.0, min(1.0, (cove_depth - 10.5) / 1.5))
+    ramp_start = ramp_start * ramp_start * (3.0 - 2.0 * ramp_start)
+    ramp_end = max(0.0, min(1.0, (cove_depth - 18.5) / 2.0))
+    ramp_end = ramp_end * ramp_end * (3.0 - 2.0 * ramp_end)
+    ramp_x = math.exp(-0.5 * ((local_x + 2.0) / 4.2) ** 2)
+    ramp_weight = ramp_start * (1.0 - ramp_end) * ramp_x
+    ramp_height = 6.15 - max(0.0, cove_depth - 12.0) * 0.95
+    height += (ramp_height - height) * ramp_weight
+
+    # Grass-capped sandstone sea stacks break up the open-water silhouette.
+    # They stay in the shared field, so rendering, swimming depth and ground
+    # queries agree on the same ledges.
+    east_distance = math.hypot(local_x - 24.0, local_z - 4.5)
+    east_stack = 3.10 - max(0.0, east_distance - 2.0) * 1.02
+    west_distance = math.hypot(local_x + 23.0, local_z + 4.0)
+    west_stack = 2.65 - max(0.0, west_distance - 1.85) * 0.98
+    south_distance = math.hypot(local_x - 4.0, local_z + 22.0)
+    south_stack = 2.10 - max(0.0, south_distance - 1.55) * 0.92
+    height = max(height, east_stack, west_stack, south_stack)
+
+    # The south cove is a real walking route from the village to the beach.
+    # Its centre drops 5.15 m over 18 m (about 0.29 m per metre), keeping a
+    # 4 m navigation step below the existing 1.25 m step limit.  Past the
+    # shoreline, the same corridor continues as a shallow underwater slope
+    # and blends back into the seabed by z=-24, avoiding a hidden drop-off.
+    # The profile is measured against the controller scale and jump apex; it
+    # avoids turning the whole coast into a ramp.
+    path_distance = abs(local_x + 2.0)
+    if path_distance <= 3.5:
+        path_width = 1.0
+    elif path_distance >= 7.5:
+        path_width = 0.0
+    else:
+        path_width = 1.0 - _smooth_unit((path_distance - 3.5) / 4.0)
+    if local_z < 0.0:
+        route_progress = max(0.0, min(1.0, -local_z / 18.0))
+        path_height = 5.60 + (0.45 - 5.60) * route_progress
+        seabed_progress = 0.0
+        if local_z < -18.0:
+            seabed_progress = max(0.0, min(1.0, (-local_z - 18.0) / 6.0))
+            path_height += (height - path_height) * seabed_progress
+        if path_distance <= 3.5:
+            path_height += (
+                0.018 * path_distance * path_distance * (1.0 - seabed_progress)
+            )
+        if local_z < -24.0:
+            path_width *= 1.0 - _smooth_unit((-local_z - 24.0) / 2.0)
+    else:
+        path_height = 5.60
+        path_width *= 1.0 - _smooth_unit(local_z / 3.0)
+    height += (path_height - height) * path_width
+    height = SEA_LEVEL + (height - SEA_LEVEL) * feel
+
+    local_x = world_x
+    local_z = world_z
     normalized_stamps = (
         brush_stamps
         if brush_stamps is not None
@@ -797,6 +963,42 @@ def height_at(
         overrides,
         brush_stamps=normalized_stamps,
         brush_index=normalized_index,
+    )
+    return round(height, 6)
+
+
+def height_at(
+    x: float,
+    z: float,
+    world_seed: int = DEFAULT_WORLD_SEED,
+    *,
+    overrides: dict[str, Any] | None = None,
+    brush_stamps: list[dict[str, Any]] | None = None,
+    brush_index: dict[tuple[int, int], tuple[dict[str, Any], ...]] | None = None,
+) -> float:
+    """Sample the immutable planet terrain plus bounded authored edits.
+
+    The starter cove keeps its established hand-shaped field. Outside it, the
+    same cell-independent function produces continent coastlines and a bounded
+    continental shelf that resolves into ridges, basins and trenches.
+    """
+    px, pz = _safe_float(x), _safe_float(z)
+    distance = math.hypot(px, pz) / world.PLANET_LAYOUT_SCALE
+    if distance <= 76.0:
+        height = _starter_island_height(px, pz, world_seed)
+    elif distance >= 232.0:
+        height = planet_contract.surface_height(px, pz, int(world_seed))
+    else:
+        planet_height = planet_contract.surface_height(px, pz, int(world_seed))
+        legacy = _starter_island_height(px, pz, world_seed)
+        blend = _smooth_unit((distance - 76.0) / (232.0 - 76.0))
+        height = legacy * (1.0 - blend) + planet_height * blend
+    height += _height_delta_at(
+        px,
+        pz,
+        overrides,
+        brush_stamps=brush_stamps,
+        brush_index=brush_index,
     )
     return round(height, 6)
 
@@ -985,17 +1187,30 @@ def _classify_biome(
 ) -> str:
     if int(x) == 0 and int(z) == 0:
         return "FIRST_ISLAND"
-    if minimum >= SEA_LEVEL + 0.35:
-        return "CLIFF" if maximum - minimum >= 1.35 else "LAND"
-    if maximum >= SEA_LEVEL - 0.35:
+    center_x = (int(x) + 0.5) * CELL_SIZE
+    center_z = (int(z) + 0.5) * CELL_SIZE
+    geography = planet_contract.region_at(center_x, center_z, world_seed)
+    if maximum >= SEA_LEVEL - 0.15 and land_fraction > 0.0:
+        if minimum < SEA_LEVEL + 0.85 or land_fraction < 0.75:
+            return "BEACH"
+        if maximum - minimum >= 1.8:
+            return "CLIFF"
+        if geography:
+            return str(geography["biome"])
+        return "LAND"
+    if maximum >= SEA_LEVEL - 0.65:
         return "REEF" if cell_seed(x, z, world_seed) % 7 == 0 else "SHALLOW_WATER"
     if land_fraction > 0.0 and cell_seed(x, z, world_seed) % 11 == 0:
         return "REEF"
+    if planet_contract.biome_at(center_x, center_z, world_seed) == "MAELSTROM":
+        return "MAELSTROM"
+    if maximum <= -650.0:
+        return "ABYSS"
     return "DEEP_WATER"
 
 
 def _movement_modes_for_biome(biome: str, land_fraction: float) -> list[str]:
-    if biome in {"FIRST_ISLAND", "LAND", "CLIFF"}:
+    if biome in LAND_BIOMES:
         return ["GROUND", "FLY"]
     if biome == "SHALLOW_WATER" and land_fraction >= 0.25:
         return ["GROUND", "SWIM", "FLY"]
@@ -1140,7 +1355,8 @@ def cell_view(
         if projected_error_px is not None
         else 64.0 / max(1.0, distance * distance)
     )
-    water_cell = biome in {"SHALLOW_WATER", "DEEP_WATER", "REEF"}
+    region = planet_contract.region_at(center_x, center_z, int(world_seed))
+    water_cell = biome in WATER_BIOMES
     surface_kind = "WATER" if water_cell else "LAND"
 
     if normalized_lod == "NEAR":
@@ -1158,6 +1374,9 @@ def cell_view(
         "lod": normalized_lod,
         "seed": cell_seed(cell_x, cell_z, int(world_seed)),
         "biome": biome,
+        "region_id": str(region["id"]) if region else (
+            "THE_MAELSTROM" if biome == "MAELSTROM" else "OCEAN"
+        ),
         "surface": surface_kind,
         "center_m": {
             "x": round(center_x, 3),
@@ -1261,6 +1480,7 @@ def build_terrain_view(
             cell_x,
             cell_z,
             lod,
+            planet_contract.MAP_REVISION,
             safe_seed,
             int(_safe_float((overrides or {}).get("revision"), 0.0))
             if isinstance(overrides, dict)
@@ -1316,6 +1536,7 @@ def build_terrain_view(
             player_cell_x,
             player_cell_z,
             "NEAR",
+            planet_contract.MAP_REVISION,
             safe_seed,
             int(_safe_float((overrides or {}).get("revision"), 0.0))
             if isinstance(overrides, dict)
@@ -1384,13 +1605,15 @@ def build_terrain_view(
         "schema": SCHEMA,
         "world_seed": safe_seed,
         "coordinate_frame": "LOCAL_TANGENT_PATCH_METRES",
-        "terrain_model": "CONTINUOUS_ANALYTIC_HEIGHTFIELD",
+        "terrain_model": "SEEDED_CONTINENTS_WITH_STATIC_BATHYMETRY",
+        "planet": planet_contract.map_contract(safe_seed),
         "water": {
             "sea_level_m": SEA_LEVEL,
             "surface_representation": "CELL_STREAMED_SHARED_SEA_LEVEL",
             "continuity": "SEAMLESS_CELL_EDGES",
             "zone_boundary": False,
             "depth_model": "SEA_LEVEL_MINUS_TERRAIN_HEIGHT",
+            "bathymetry": "SEEDED_CONTINENTAL_SHELF_RIDGES_AND_ABYSSAL_TRENCHES",
             "underwater_representation": "SAME_WORLD_CELLS",
         },
         "authoring": authoring_view,
@@ -1409,6 +1632,7 @@ def build_terrain_view(
             "x": player_cell_x,
             "z": player_cell_z,
             "biome": player_cell["biome"],
+            "region_id": player_cell.get("region_id", ""),
             "lod": player_cell["lod"],
         },
         "player_surface": {

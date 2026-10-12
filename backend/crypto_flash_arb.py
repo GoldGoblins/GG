@@ -1,8 +1,11 @@
-"""Julien-style atomic flash arb on two constant-product pools.
+"""Paper atomic arb on two constant-product pools, with a Jito-style tip.
 
-Borrow quote → swap cheap pool → swap rich pool → repay + fee.
-If leftover quote < min profit the whole snapshot is dropped (revert).
-Pools live in local state only. Not Aave, not mainnet.
+Borrow quote → swap the cheap pool → swap the rich pool → repay + fee.
+Size is searched, not guessed. A competitive bundle gives about half the
+gross to the tip (the public 2026 band starts at 50% and runs to 70%).
+The minimum tip is 1000 lamports plus a base signature fee. If the tip
+eats the edge, the snapshot is dropped. Pools live in local state only.
+Not a live searcher, not a sandwich, not mainnet.
 """
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from backend.crypto_contract import ensure_state_dir
+from backend.crypto_contract import ensure_state_dir, format_units
 
 SOL_DECIMALS = 9
 USD_DECIMALS = 6
@@ -18,6 +21,10 @@ SOL_SCALE = 10**SOL_DECIMALS
 USD_SCALE = 10**USD_DECIMALS
 SWAP_FEE_BPS = 30
 FLASH_FEE_BPS = 9
+# Half the gross. Below this, a competitive Jito auction does not land.
+TIP_SHARE_BPS = 5000
+MIN_TIP_LAMPORTS = 1000
+BASE_FEE_LAMPORTS = 5000
 POOLS_NAME = "arb-pools.json"
 
 
@@ -108,32 +115,61 @@ def _swap_sol_for_usd(pool: dict[str, Any], sol_in: int, fee_bps: int) -> int:
     return usd_out
 
 
+def _pool_px(pool: dict[str, Any]) -> int:
+    sol = int(pool["sol"])
+    if sol <= 0:
+        return 0
+    return int(pool["usd"]) * SOL_SCALE // sol
+
+
+def _tip_usd(gross_usd: int, usd_per_sol: int) -> int:
+    """Tip in USD atoms. Share of gross, never below the lamport floor."""
+    if gross_usd <= 0 or usd_per_sol <= 0:
+        return 0
+    share = gross_usd * TIP_SHARE_BPS // 10_000
+    floor = (MIN_TIP_LAMPORTS + BASE_FEE_LAMPORTS) * usd_per_sol // SOL_SCALE
+    return max(share, floor)
+
+
 def quote_flash_arb(usd_borrow: int, pools: dict[str, Any] | None = None) -> dict[str, Any]:
     snapshot = json.loads(json.dumps(pools or load_pools()))
     fee_bps = int(snapshot.get("fee_bps") or SWAP_FEE_BPS)
     flash_bps = int(snapshot.get("flash_bps") or FLASH_FEE_BPS)
     a = dict(snapshot["A"])
     b = dict(snapshot["B"])
-    price_a = int(a["usd"]) * SOL_SCALE // int(a["sol"])
-    price_b = int(b["usd"]) * SOL_SCALE // int(b["sol"])
+    price_a = _pool_px(a)
+    price_b = _pool_px(b)
+    mid_px = (price_a + price_b) // 2
     cheap, rich = ("A", "B") if price_a <= price_b else ("B", "A")
     buy_pool = a if cheap == "A" else b
     sell_pool = b if rich == "B" else a
     sol_bought = _swap_usd_for_sol(buy_pool, usd_borrow, fee_bps)
     usd_out = _swap_sol_for_usd(sell_pool, sol_bought, fee_bps)
     repay = usd_borrow + (usd_borrow * flash_bps + 9999) // 10_000
-    profit = usd_out - repay
+    gross = usd_out - repay
+    tip = _tip_usd(gross, mid_px)
+    net = gross - tip
+    if gross <= 0:
+        error = "NO_PROFIT"
+    elif net <= 0:
+        error = "TIP_EATS_EDGE"
+    else:
+        error = ""
     return {
         "borrow_usd": usd_borrow,
         "repay_usd": repay,
         "sol_bought": sol_bought,
         "usd_out": usd_out,
-        "profit_usd": profit,
+        "gross_usd": gross,
+        "tip_usd": tip,
+        "tip_share_bps": TIP_SHARE_BPS,
+        "profit_usd": net,
         "buy_pool": cheap,
         "sell_pool": rich,
         "price_a": price_usd_per_sol(snapshot["A"]),
         "price_b": price_usd_per_sol(snapshot["B"]),
-        "ok": profit > 0,
+        "ok": net > 0,
+        "error": error,
         "snapshot": {
             "A": a,
             "B": b,
@@ -141,6 +177,32 @@ def quote_flash_arb(usd_borrow: int, pools: dict[str, Any] | None = None) -> dic
             "flash_bps": flash_bps,
         },
     }
+
+
+def optimal_borrow(pools: dict[str, Any] | None = None) -> int:
+    """Largest net after the tip, searching a geometric size ladder."""
+    snapshot = json.loads(json.dumps(pools or load_pools()))
+    thin = min(int(snapshot["A"]["usd"]), int(snapshot["B"]["usd"]))
+    cap = max(USD_SCALE, thin // 20)
+    best = 0
+    best_net = 0
+    steps = 16
+    for step in range(steps):
+        if steps == 1:
+            borrow = cap
+        else:
+            growth = (cap / float(USD_SCALE)) ** (step / float(steps - 1))
+            borrow = int(USD_SCALE * growth)
+        borrow = max(USD_SCALE, min(cap, borrow))
+        try:
+            quoted = quote_flash_arb(borrow, snapshot)
+        except ValueError:
+            continue
+        net = int(quoted.get("profit_usd") or 0)
+        if quoted.get("ok") and net > best_net:
+            best_net = net
+            best = borrow
+    return best
 
 
 def swap_usd_for_sol(usd_in: int) -> dict[str, Any]:
@@ -185,7 +247,7 @@ def commit_flash_arb(usd_borrow: int) -> dict[str, Any]:
     current = load_pools()
     quoted = quote_flash_arb(usd_borrow, current)
     if not quoted["ok"]:
-        quoted["error"] = "NO_PROFIT"
+        quoted["error"] = str(quoted.get("error") or "NO_PROFIT")
         quoted["committed"] = False
         return quoted
     save_pools(quoted["snapshot"])
@@ -197,6 +259,13 @@ def commit_flash_arb(usd_borrow: int) -> dict[str, Any]:
 
 def pool_status() -> dict[str, Any]:
     pools = load_pools()
+    borrow = optimal_borrow(pools)
+    quote: dict[str, Any] = {}
+    if borrow > 0:
+        try:
+            quote = quote_flash_arb(borrow, pools)
+        except ValueError:
+            quote = {}
     return {
         "price_a": price_usd_per_sol(pools["A"]),
         "price_b": price_usd_per_sol(pools["B"]),
@@ -206,4 +275,12 @@ def pool_status() -> dict[str, Any]:
         "usd_b": pools["B"]["usd"],
         "fee_bps": pools.get("fee_bps", SWAP_FEE_BPS),
         "flash_bps": pools.get("flash_bps", FLASH_FEE_BPS),
+        "tip_share_bps": TIP_SHARE_BPS,
+        "optimal_ok": bool(quote.get("ok")),
+        "optimal_usd": format_units(borrow, USD_DECIMALS) if borrow else "—",
+        "optimal_tip": format_units(quote.get("tip_usd"), USD_DECIMALS) if quote else "—",
+        "optimal_net": format_units(quote.get("profit_usd"), USD_DECIMALS) if quote else "—",
+        "optimal_drop": str(quote.get("error") or ""),
+        "buy_pool": quote.get("buy_pool") or "",
+        "sell_pool": quote.get("sell_pool") or "",
     }

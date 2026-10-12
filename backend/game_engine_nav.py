@@ -73,13 +73,14 @@ def _walkable(
     height: float,
     normal_y: float,
     movement_mode: str,
+    water_level: float = terrain.SEA_LEVEL,
 ) -> bool:
     mode = world.normalize_movement_mode(movement_mode)
     if mode == "FLY":
         return True
     if mode == "SWIM":
-        return height <= terrain.SEA_LEVEL + 0.35
-    return height >= terrain.SEA_LEVEL and normal_y >= MIN_GROUND_NORMAL_Y
+        return height <= water_level + 0.35
+    return height >= water_level and normal_y >= MIN_GROUND_NORMAL_Y
 
 
 def build_nav_tiles(
@@ -113,7 +114,10 @@ def build_nav_tiles(
                     world_seed,
                     overrides=overrides,
                 )
-                walkable = _walkable(height, normal[1], mode)
+                from backend.game_engine_landscape import water_at
+                inland=water_at(center_x,center_z)
+                water_level=inland['level_m'] if inland else terrain.SEA_LEVEL
+                walkable = _walkable(height, normal[1], mode,water_level)
                 if not include_blocked and not walkable:
                     continue
                 slope_degrees = math.degrees(
@@ -134,12 +138,21 @@ def build_nav_tiles(
                         "slope_degrees": round(slope_degrees, 2),
                         "walkable": walkable,
                         "movement_mode": mode,
+                        # Keep exact decisions before normal/height rounding.
+                        # Changing locomotion needn't resample this terrain.
+                        "_walkable_modes": tuple(_walkable(height,normal[1],m,water_level) for m in ('GROUND','FLY','SWIM')),
                         "terrain_cell": world.cell_key(cell_x, cell_z),
                     }
                 )
                 if len(result) >= MAX_TILES:
                     return result
     return result
+
+
+def tiles_for_mode(tiles,movement_mode):
+    """Reuse terrain samples while applying the exact locomotion policy."""
+    mode=world.normalize_movement_mode(movement_mode);index=('GROUND','FLY','SWIM').index(mode)
+    return [dict(tile,movement_mode=mode,walkable=tile['_walkable_modes'][index]) for tile in tiles]
 
 
 def _tile_lookup(tiles: Iterable[dict[str, Any]]) -> dict[tuple[int, int], dict[str, Any]]:
@@ -161,7 +174,15 @@ def nearest_walkable_tile(
     z: float,
 ) -> dict[str, Any] | None:
     """Resolve a position to the nearest loaded walkable tile."""
-    lookup = _tile_lookup(tiles)
+    return _nearest_walkable_in_lookup(_tile_lookup(tiles), x, z)
+
+
+def _nearest_walkable_in_lookup(
+    lookup: dict[tuple[int, int], dict[str, Any]],
+    x: float,
+    z: float,
+) -> dict[str, Any] | None:
+    """Resolve a position without rebuilding an already prepared tile map."""
     if not lookup:
         return None
     wanted_x = _finite(x)
@@ -187,12 +208,15 @@ def _neighbors(
     result: list[tuple[tuple[int, int], dict[str, Any]]] = []
     origin = lookup[current]
     origin_height = float(origin.get("height_m", 0.0))
+    movement_mode = world.normalize_movement_mode(
+        origin.get("movement_mode", "GROUND")
+    )
     for coordinate in coordinates:
         row = lookup.get(coordinate)
         if row is None:
             continue
         height_delta = abs(float(row.get("height_m", 0.0)) - origin_height)
-        if height_delta > MAX_STEP_HEIGHT:
+        if movement_mode == "GROUND" and height_delta > MAX_STEP_HEIGHT:
             continue
         result.append((coordinate, row))
     return result
@@ -210,8 +234,8 @@ def plan_path(
     """Plan a bounded four-connected path through loaded walk tiles."""
     safe_limit = max(1, min(MAX_PATH_NODES, int(max_nodes)))
     lookup = _tile_lookup(tiles)
-    start = nearest_walkable_tile(lookup.values(), start_x, start_z)
-    goal = nearest_walkable_tile(lookup.values(), target_x, target_z)
+    start = _nearest_walkable_in_lookup(lookup, start_x, start_z)
+    goal = _nearest_walkable_in_lookup(lookup, target_x, target_z)
     if start is None or goal is None:
         return {
             "status": "NO_PATH",

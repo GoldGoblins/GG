@@ -13,4 +13,4 @@ if [[ -x "$SHARE" ]]; then
 fi
 PYTHON="${PYTHON:-/usr/bin/python3}"
 cd "$HERE"
-exec "$PYTHON" -B "$HERE/main.py"
+exec "$PYTHON" -B "$HERE/startup.py"

@@ -5,12 +5,19 @@ It receives the same bounded entity, terrain and player rows as the rich 3D
 surface.  A graphics-stage failure can therefore hide QtQuick3D while fixed
 step movement, inventory, NPC identity, loot, economy, progression and persistence continue to use
 exactly the same data.
+
+The cell frame is that picture.  Each column is a ray through the same
+authored asset volumes the low-poly view instances, quantized to a glyph
+plus a foreground and background color.  It is built on every snapshot, so
+the terminal image is already there when the graphics stage is hidden.
 """
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote, urlparse
 
 
 SCHEMA = "gg.game-engine.fallback.v1"
@@ -18,6 +25,14 @@ MODE = "DOS_2D"
 MAX_ENTITIES = 96
 MAX_TERRAIN_CELLS = 64
 MAX_TERMINAL_LINES = 16
+FRAME_COLS = 64
+FRAME_ROWS = 28
+FRAME_FAR_M = 42.0
+FRAME_NEAR_M = 0.35
+FRAME_FOV_RAD = math.radians(72.0)
+FRAME_EYE_M = 1.55
+_GLYPH_RAMP = " .:-=+*#%@"
+_STAMPS: dict[str, dict[str, Any] | None] = {}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -88,12 +103,328 @@ def _position(row: dict[str, Any]) -> tuple[float, float]:
     return _safe_float(row.get("x")), _safe_float(row.get("z"))
 
 
+def _hex_color(value: Any, default: str = "#8d684b") -> str:
+    text = _text(value, default, 16)
+    if len(text) == 7 and text.startswith("#"):
+        try:
+            int(text[1:], 16)
+        except ValueError:
+            return default
+        return text.lower()
+    return default
+
+
+def _mix_black(color: str, amount: float) -> str:
+    red = int(color[1:3], 16)
+    green = int(color[3:5], 16)
+    blue = int(color[5:7], 16)
+    keep = max(0.0, min(1.0, 1.0 - amount))
+    return "#{:02x}{:02x}{:02x}".format(
+        int(red * keep),
+        int(green * keep),
+        int(blue * keep),
+    )
+
+
+def _asset_file(asset: dict[str, Any]) -> Path | None:
+    source = _text(asset.get("source"), "", 512)
+    if source.startswith("file:"):
+        path = Path(unquote(urlparse(source).path))
+        return path if path.is_file() else None
+    relative = _text(asset.get("relative_source"), "", 256)
+    if not relative:
+        return None
+    candidate = Path(__file__).resolve().parents[1] / "qml" / relative
+    return candidate if candidate.is_file() else None
+
+
+def _stamp_for_asset(asset: dict[str, Any]) -> dict[str, Any] | None:
+    path = _asset_file(asset)
+    if path is None:
+        return None
+    key = str(path)
+    cached = _STAMPS.get(key)
+    if key in _STAMPS:
+        return cached
+    try:
+        from backend.game_engine_geometry import mesh_column_stamp
+
+        stamp = mesh_column_stamp(path)
+    except Exception:
+        stamp = None
+    _STAMPS[key] = stamp
+    return stamp
+
+
+def _box_stamp(height: float, half_x: float, half_z: float, color: str) -> dict[str, Any]:
+    return {
+        "min_x": -half_x,
+        "max_x": half_x,
+        "min_y": 0.0,
+        "max_y": height,
+        "min_z": -half_z,
+        "max_z": half_z,
+        "nx": 1,
+        "nz": 1,
+        "height": [max(0.2, height)],
+        "color": [color],
+    }
+
+
+def _volume_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    kind = _text(row.get("kind"), "PROP", 32).upper()
+    if kind == "PLAYER" or bool(row.get("hidden")):
+        return None
+    asset = row.get("asset") if isinstance(row.get("asset"), dict) else {}
+    color = _hex_color(row.get("color"))
+    stamp = _stamp_for_asset(asset)
+    if stamp is None:
+        height = _safe_float(asset.get("height_m"), 1.8 if kind in {"NPC", "ACTOR"} else 1.2)
+        stamp = _box_stamp(max(0.4, height), 0.45, 0.45, color)
+    return {
+        "x": _safe_float(row.get("x")),
+        "y": _safe_float(row.get("y")),
+        "z": _safe_float(row.get("z")),
+        "yaw": _safe_float(row.get("yaw")),
+        "sx": max(0.05, abs(_safe_float(row.get("sx"), 1.0))),
+        "sy": max(0.05, abs(_safe_float(row.get("sy"), 1.0))),
+        "sz": max(0.05, abs(_safe_float(row.get("sz"), 1.0))),
+        "stamp": stamp,
+        "fallback_color": color,
+    }
+
+
+def _sample_stamp(
+    stamp: dict[str, Any],
+    local_x: float,
+    local_z: float,
+    fallback: str,
+) -> tuple[float, str]:
+    span_x = float(stamp["max_x"]) - float(stamp["min_x"])
+    span_z = float(stamp["max_z"]) - float(stamp["min_z"])
+    if span_x <= 1e-6 or span_z <= 1e-6:
+        return 0.0, fallback
+    unit_x = (local_x - float(stamp["min_x"])) / span_x
+    unit_z = (local_z - float(stamp["min_z"])) / span_z
+    if unit_x < 0.0 or unit_x > 1.0 or unit_z < 0.0 or unit_z > 1.0:
+        return 0.0, fallback
+    nx = int(stamp["nx"])
+    nz = int(stamp["nz"])
+    ix = min(nx - 1, int(unit_x * nx))
+    iz = min(nz - 1, int(unit_z * nz))
+    index = iz * nx + ix
+    height = float(stamp["height"][index])
+    color = _hex_color(stamp["color"][index], fallback)
+    if color == "#000000":
+        color = fallback
+    return height, color
+
+
+def _ray_hit(
+    volume: dict[str, Any],
+    origin_x: float,
+    origin_z: float,
+    direction_x: float,
+    direction_z: float,
+) -> tuple[float, float, float, str] | None:
+    """Return world distance, bottom, top and color for one asset volume."""
+    yaw = float(volume["yaw"])
+    cosine = math.cos(yaw)
+    sine = math.sin(yaw)
+    dx = origin_x - float(volume["x"])
+    dz = origin_z - float(volume["z"])
+    local_origin_x = (dx * cosine - dz * sine) / float(volume["sx"])
+    local_origin_z = (dx * sine + dz * cosine) / float(volume["sz"])
+    local_dir_x = (direction_x * cosine - direction_z * sine) / float(volume["sx"])
+    local_dir_z = (direction_x * sine + direction_z * cosine) / float(volume["sz"])
+    stamp = volume["stamp"]
+    slabs: list[tuple[float, float]] = []
+    for origin, direction, lower, upper in (
+        (local_origin_x, local_dir_x, float(stamp["min_x"]), float(stamp["max_x"])),
+        (local_origin_z, local_dir_z, float(stamp["min_z"]), float(stamp["max_z"])),
+    ):
+        if abs(direction) < 1e-8:
+            if origin < lower or origin > upper:
+                return None
+            continue
+        inverse = 1.0 / direction
+        enter = (lower - origin) * inverse
+        leave = (upper - origin) * inverse
+        if enter > leave:
+            enter, leave = leave, enter
+        slabs.append((enter, leave))
+    if not slabs:
+        return None
+    enter = max(pair[0] for pair in slabs)
+    leave = min(pair[1] for pair in slabs)
+    if leave < enter or leave < FRAME_NEAR_M:
+        return None
+    start = max(enter, FRAME_NEAR_M)
+    if start > FRAME_FAR_M:
+        return None
+    steps = 6
+    span = max(0.0, min(leave, FRAME_FAR_M) - start)
+    for step in range(steps):
+        distance = start + span * ((step + 0.5) / steps)
+        local_x = local_origin_x + local_dir_x * distance
+        local_z = local_origin_z + local_dir_z * distance
+        column_height, color = _sample_stamp(
+            stamp,
+            local_x,
+            local_z,
+            volume["fallback_color"],
+        )
+        if column_height <= 0.05:
+            continue
+        bottom = float(volume["y"]) + float(stamp["min_y"]) * float(volume["sy"])
+        top = bottom + column_height * float(volume["sy"])
+        return distance, bottom, top, color
+    return None
+
+
+def _ground_color(terrain_rows: Iterable[dict[str, Any]], x: float, z: float) -> str:
+    best_distance = 1e9
+    best = "#c4a574"
+    for row in terrain_rows:
+        if not isinstance(row, dict):
+            continue
+        center = row.get("center_m") if isinstance(row.get("center_m"), dict) else row
+        dx = _safe_float(center.get("x")) - x
+        dz = _safe_float(center.get("z")) - z
+        distance = dx * dx + dz * dz
+        if distance >= best_distance:
+            continue
+        best_distance = distance
+        surface = _text(row.get("surface"), "LAND", 24).upper()
+        biome = _text(row.get("biome"), "", 32).upper()
+        if surface == "WATER" or "WATER" in biome or "REEF" in biome:
+            best = "#1d6d78"
+        elif "CLIFF" in biome or "ROCK" in biome:
+            best = "#6e5340"
+        else:
+            best = "#c4a574"
+    return best
+
+
+def build_cell_frame(
+    entity_rows: Iterable[dict[str, Any]] = (),
+    terrain_rows: Iterable[dict[str, Any]] = (),
+    *,
+    player_x: Any = 0.0,
+    player_y: Any = 0.0,
+    player_z: Any = 0.0,
+    player_yaw: Any = 0.0,
+    cols: int = FRAME_COLS,
+    rows: int = FRAME_ROWS,
+) -> dict[str, Any]:
+    """Project the current asset poses into one terminal cell buffer."""
+    safe_cols = max(16, min(96, int(cols)))
+    safe_rows = max(12, min(48, int(rows)))
+    origin_x = _safe_float(player_x)
+    origin_z = _safe_float(player_z)
+    eye_y = _safe_float(player_y) + FRAME_EYE_M
+    yaw = _safe_float(player_yaw)
+    volumes: list[tuple[float, dict[str, Any]]] = []
+    for row in list(entity_rows)[:MAX_ENTITIES]:
+        if not isinstance(row, dict):
+            continue
+        volume = _volume_for_row(row)
+        if volume is None:
+            continue
+        dx = float(volume["x"]) - origin_x
+        dz = float(volume["z"]) - origin_z
+        distance = dx * dx + dz * dz
+        if distance > (FRAME_FAR_M + 8.0) ** 2:
+            continue
+        volumes.append((distance, volume))
+    volumes.sort(key=lambda item: item[0])
+    volumes = volumes[:48]
+    ground = _ground_color(terrain_rows, origin_x, origin_z)
+    sky = "#07141c"
+    palette = [sky, _mix_black(ground, 0.45), ground]
+    glyphs = [[" "] * safe_cols for _ in range(safe_rows)]
+    fg_index = [[0] * safe_cols for _ in range(safe_rows)]
+    bg_index = [[0] * safe_cols for _ in range(safe_rows)]
+
+    def color_index(color: str) -> int:
+        wanted = _hex_color(color, sky)
+        if wanted in palette:
+            return palette.index(wanted)
+        if len(palette) >= 256:
+            return 1
+        palette.append(wanted)
+        return len(palette) - 1
+
+    ground_index = color_index(ground)
+    ground_bg = color_index(_mix_black(ground, 0.55))
+    horizon = int(safe_rows * 0.62)
+    half_fov = FRAME_FOV_RAD * 0.5
+    aspect = (safe_cols * 0.5) / safe_rows
+    focal_y = (safe_rows * 0.5) * aspect / math.tan(half_fov)
+    for column in range(safe_cols):
+        offset = ((column + 0.5) / safe_cols * 2.0 - 1.0) * half_fov
+        direction_x = math.sin(yaw + offset)
+        direction_z = math.cos(yaw + offset)
+        hits: list[tuple[float, float, float, str]] = []
+        for _distance, volume in volumes:
+            hit = _ray_hit(volume, origin_x, origin_z, direction_x, direction_z)
+            if hit is not None:
+                hits.append(hit)
+        hits.sort(key=lambda item: item[0])
+        filled = [False] * safe_rows
+        for distance, bottom, top, color in hits:
+            perp = max(FRAME_NEAR_M, distance * math.cos(offset))
+            shade = 1.0 - min(1.0, perp / FRAME_FAR_M)
+            glyph = _GLYPH_RAMP[min(len(_GLYPH_RAMP) - 1, int(shade * (len(_GLYPH_RAMP) - 1)))]
+            if glyph == " ":
+                glyph = "."
+            foreground = color_index(color)
+            background = color_index(_mix_black(color, 0.62))
+            top_row = int(round(horizon - (top - eye_y) / perp * focal_y))
+            bottom_row = int(round(horizon - (bottom - eye_y) / perp * focal_y))
+            if bottom_row < top_row:
+                top_row, bottom_row = bottom_row, top_row
+            top_row = max(0, top_row)
+            bottom_row = min(safe_rows - 1, bottom_row)
+            for row_index in range(top_row, bottom_row + 1):
+                if filled[row_index]:
+                    continue
+                glyphs[row_index][column] = glyph
+                fg_index[row_index][column] = foreground
+                bg_index[row_index][column] = background
+                filled[row_index] = True
+        for row_index in range(horizon, safe_rows):
+            if filled[row_index]:
+                continue
+            glyphs[row_index][column] = "~" if ground == "#1d6d78" else "."
+            fg_index[row_index][column] = ground_index
+            bg_index[row_index][column] = ground_bg
+    return {
+        "renderer": "DOS_ASSET_COLUMNS",
+        "source": "AUTHORED_ASSET_VOLUMES",
+        "cols": safe_cols,
+        "rows": safe_rows,
+        "palette": palette,
+        "glyphs": ["".join(row) for row in glyphs],
+        "fg": ["".join(f"{value:02x}" for value in row) for row in fg_index],
+        "bg": ["".join(f"{value:02x}" for value in row) for row in bg_index],
+        "camera": {
+            "x": round(origin_x, 3),
+            "y": round(eye_y, 3),
+            "z": round(origin_z, 3),
+            "yaw": round(yaw, 4),
+        },
+    }
+
+
 def build_view(
     entity_rows: Iterable[dict[str, Any]] = (),
     terrain_rows: Iterable[dict[str, Any]] = (),
     *,
     player_x: Any = 0.0,
+    player_y: Any = 0.0,
     player_z: Any = 0.0,
+    player_yaw: Any = 0.0,
     state: Any = "IDLE",
     tick: Any = 0,
     active_entities: Any = 0,
@@ -112,11 +443,15 @@ def build_view(
 ) -> dict[str, Any]:
     """Build a bounded terminal map without inventing gameplay state."""
     safe_player_x = _safe_float(player_x)
+    safe_player_y = _safe_float(player_y)
     safe_player_z = _safe_float(player_z)
+    safe_player_yaw = _safe_float(player_yaw)
     safe_radius = max(6.0, min(256.0, _safe_float(radius_m, 18.0)))
+    entity_rows = list(entity_rows)[:MAX_ENTITIES]
+    terrain_rows = list(terrain_rows)[:MAX_TERRAIN_CELLS]
 
     entities: list[dict[str, Any]] = []
-    for row in list(entity_rows)[:MAX_ENTITIES]:
+    for row in entity_rows:
         if not isinstance(row, dict):
             continue
         x, z = _position(row)
@@ -202,6 +537,7 @@ def build_view(
                 "z": round(_safe_float(center.get("z")), 3),
                 "glyph": _terrain_glyph(row),
                 "surface": _text(row.get("surface"), "LAND", 24).upper(),
+                "biome": _text(row.get("biome"), "", 32).upper(),
             }
         )
 
@@ -351,9 +687,19 @@ def build_view(
         },
         "camera": {
             "center_x": round(safe_player_x, 3),
+            "center_y": round(safe_player_y, 3),
             "center_z": round(safe_player_z, 3),
+            "yaw": round(safe_player_yaw, 4),
             "radius_m": round(safe_radius, 3),
         },
+        "frame": build_cell_frame(
+            entity_rows,
+            terrain_rows,
+            player_x=safe_player_x,
+            player_y=safe_player_y,
+            player_z=safe_player_z,
+            player_yaw=safe_player_yaw,
+        ),
         "entities": entities,
         "terrain": terrain,
         "combat": dict(combat_view),

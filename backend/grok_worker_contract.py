@@ -29,12 +29,22 @@ SESSION_STATE_PATH = Path(
     "/home/GG/.local/state/goldgoblins/gg-ai-desktop/grok-worker-session.json"
 )
 
-GROK_BIN = Path(
-    os.environ.get(
-        "GG_GROK_BIN",
-        "/home/GG/.local/share/goldgoblins/tools/grok-build/1.0.5/grok",
+def _desktop_grok_bin() -> Path:
+    """The binary `grok update` replaces, then the old pinned copy."""
+    override = os.environ.get("GG_GROK_BIN", "").strip()
+    if override:
+        return Path(override)
+    candidates = (
+        Path.home() / ".grok" / "bin" / "grok",
+        Path("/home/GG/.local/share/goldgoblins/tools/grok-build/1.0.5/grok"),
     )
-)
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return candidates[0]
+
+
+GROK_BIN = _desktop_grok_bin()
 DEV_GROK_HOME = Path(
     os.environ.get(
         "GG_GROK_HOME",

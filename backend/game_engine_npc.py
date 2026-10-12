@@ -449,6 +449,7 @@ def build_interaction_view(
         "available": selected is not None,
         "radius_m": INTERACTION_RADIUS_M,
         "target_id": str(selected.get("id", "")) if selected else "",
+        "target_name": str(selected.get("name",selected.get("id",""))) if selected else "",
         "target_distance_m": (
             round(_safe_float(selected.get("distance_m")), 3)
             if selected

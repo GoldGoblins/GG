@@ -32,7 +32,7 @@ _OSINT = re.compile(
     re.IGNORECASE,
 )
 _RESEARCH = re.compile(
-    r"\b(research|research desk|researcha|undersök(?:a|ning)?|evidence|evidens|källor|metodminne|sql preview)\b",
+    r"\b(research|research desk|researcha|undersök(?:a|ning)?|evidence|evidens|källor|metodminne|sql preview|ghidra|rea|reverse engineering)\b",
     re.IGNORECASE,
 )
 _QIP = re.compile(
@@ -80,9 +80,12 @@ _BARE = {
     "research": "RESEARCH",
     "research desk": "RESEARCH",
     "evidens": "RESEARCH",
+    # Compatibility intents; WorkspaceSurface redirects these to RESEARCH / WASM LAB.
     "qip": "QIP",
     "wasm": "QIP",
     "webassembly": "QIP",
+    "ghidra": "RESEARCH",
+    "rea": "RESEARCH",
     "game engine": "GAME_ENGINE",
     "gameengine": "GAME_ENGINE",
     "spelmotor": "GAME_ENGINE",

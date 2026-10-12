@@ -42,111 +42,76 @@ def log_returns(closes: list[float]) -> list[float]:
 
 
 def garch_1_1(returns: list[float]) -> dict[str, Any]:
-    """Variance-targeted GARCH(1,1) with fixed persistence."""
+    """Causal variance-targeted GARCH with an expanding historical baseline.
+
+    Every output uses only observations through that index. No whole-sample
+    initialization or future variance estimate enters a historical forecast.
+    """
     sample = [value for value in returns if math.isfinite(value)]
-    if len(sample) < 8:
-        return {
-            "ok": False,
-            "sigma": [],
-            "last_sigma": 0.0,
-            "unconditional": 0.0,
-            "alpha": GARCH_ALPHA,
-            "beta": GARCH_BETA,
-        }
-    mean = sum(sample) / len(sample)
-    var = sum((value - mean) ** 2 for value in sample) / len(sample)
-    var = max(var, 1e-12)
-    persistence = GARCH_ALPHA + GARCH_BETA
-    omega = var * max(1e-6, 1.0 - persistence)
-    sigma2 = var
+    mean = m2 = 0.0
+    sigma2 = 1e-12
     series: list[float] = []
-    for value in sample:
-        sigma2 = omega + GARCH_ALPHA * (value * value) + GARCH_BETA * sigma2
-        sigma2 = max(sigma2, 1e-12)
+    baselines: list[float] = []
+    omega = 0.0
+    for count, value in enumerate(sample, 1):
+        delta = value - mean
+        mean += delta / count
+        m2 += delta * (value - mean)
+        var = max(m2 / count if count > 1 else value * value, 1e-12)
+        if count == 1:
+            sigma2 = var
+        omega = var * (1.0 - GARCH_ALPHA - GARCH_BETA)
+        sigma2 = max(omega + GARCH_ALPHA * value * value + GARCH_BETA * sigma2, 1e-12)
         series.append(math.sqrt(sigma2))
+        baselines.append(math.sqrt(var))
     return {
-        "ok": True,
+        "ok": len(sample) >= 8,
         "sigma": series,
-        "last_sigma": series[-1],
-        "unconditional": math.sqrt(var),
+        "baseline_sigma": baselines,
+        "last_sigma": series[-1] if series else 0.0,
+        "unconditional": baselines[-1] if baselines else 0.0,
         "alpha": GARCH_ALPHA,
         "beta": GARCH_BETA,
         "omega": omega,
-        "persistence": persistence,
+        "persistence": GARCH_ALPHA + GARCH_BETA,
+        "method": "CAUSAL_EXPANDING_VARIANCE",
     }
 
 
 def hmm_two_state(returns: list[float]) -> dict[str, Any]:
-    """Two-state HMM on absolute returns: LOW vs HIGH vol.
+    """Online two-state volatility filter with adaptive exponential emissions.
 
-    Emissions are treated as exponential magnitudes.  A short EM pass
-    estimates the two means; Viterbi then labels each bar.
+    This is a causal filter, not a batch EM fit or Viterbi reconstruction.
+    The probability is the latest filtered high-state probability; persistence
+    describes observed state continuity, not prediction accuracy.
     """
     magnitudes = [abs(value) for value in returns if math.isfinite(value)]
-    if len(magnitudes) < 16:
-        return {
-            "ok": False,
-            "states": [],
-            "last_state": "UNKNOWN",
-            "p_high": 0.5,
-            "cluster_accuracy": 0.0,
-        }
-    ordered = sorted(magnitudes)
-    low_mean = max(1e-8, ordered[len(ordered) // 3])
-    high_mean = max(low_mean * 1.5, ordered[(2 * len(ordered)) // 3])
-    for _ in range(4):
-        low_sum = 0.0
-        high_sum = 0.0
-        low_n = 0
-        high_n = 0
-        for value in magnitudes:
-            d_low = abs(value - low_mean)
-            d_high = abs(value - high_mean)
-            if d_low <= d_high:
-                low_sum += value
-                low_n += 1
-            else:
-                high_sum += value
-                high_n += 1
-        if low_n:
-            low_mean = max(1e-8, low_sum / low_n)
-        if high_n:
-            high_mean = max(low_mean * 1.2, high_sum / high_n)
-
-    def emit(state: str, value: float) -> float:
-        mean = low_mean if state == "LOW" else high_mean
-        return math.exp(-value / mean) / mean
-
+    low_mean, high_mean = 0.001, 0.01
+    p_high = 0.2
     states: list[str] = []
-    prev = "LOW"
-    high_hits = 0
+    probabilities: list[float] = []
     for value in magnitudes:
-        stay = HMM_STAY_LOW if prev == "LOW" else HMM_STAY_HIGH
-        switch = 1.0 - stay
-        p_keep = stay * emit(prev, value)
-        other = "HIGH" if prev == "LOW" else "LOW"
-        p_switch = switch * emit(other, value)
-        current = prev if p_keep >= p_switch else other
-        states.append(current)
-        if current == "HIGH":
-            high_hits += 1
-        prev = current
-
-    last = states[-1]
-    # Persistence check used as a cheap clustering score, not a live edge claim.
-    same = 0
-    for index in range(1, len(states)):
-        if states[index] == states[index - 1]:
-            same += 1
-    cluster = same / max(1, len(states) - 1)
+        prior = p_high * HMM_STAY_HIGH + (1 - p_high) * (1 - HMM_STAY_LOW)
+        log_low = math.log(max(1e-12, 1 - prior)) - math.log(low_mean) - value / low_mean
+        log_high = math.log(max(1e-12, prior)) - math.log(high_mean) - value / high_mean
+        delta = max(-700.0, min(700.0, log_low - log_high))
+        p_high = 1.0 / (1.0 + math.exp(delta))
+        states.append("HIGH" if p_high >= 0.5 else "LOW")
+        probabilities.append(p_high)
+        low_mean = max(1e-8, low_mean + 0.05 * (1 - p_high) * (value - low_mean))
+        high_mean = max(low_mean * 1.2, high_mean + 0.05 * p_high * (value - high_mean))
+    same = sum(a == b for a, b in zip(states, states[1:]))
     return {
-        "ok": True,
+        "ok": len(magnitudes) >= 16,
         "states": states,
-        "last_state": last,
-        "p_high": high_hits / len(states),
+        "probabilities": probabilities,
+        "last_state": states[-1] if states else "UNKNOWN",
+        "p_high": p_high,
+        "high_fraction": sum(s == "HIGH" for s in states) / max(1, len(states)),
         "low_mean": low_mean,
         "high_mean": high_mean,
-        "cluster_accuracy": round(cluster, 4),
+        "state_persistence": round(same / max(1, len(states) - 1), 4),
+        "method": "CAUSAL_TWO_STATE_FILTER",
     }
 
 
@@ -192,7 +157,8 @@ def snapshot(closes: list[float]) -> dict[str, Any]:
         "hmm": {
             "last_state": str(hmm.get("last_state") or "UNKNOWN"),
             "p_high": round(float(hmm.get("p_high") or 0.0), 4),
-            "cluster_accuracy": float(hmm.get("cluster_accuracy") or 0.0),
+            "state_persistence": float(hmm.get("state_persistence") or 0.0),
+            "method": hmm["method"],
         },
         "size_scale": round(scale, 4),
         "note": "Size follows vol regime. Direction is not treated as the edge.",

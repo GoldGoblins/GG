@@ -29,7 +29,10 @@ class LiveAidService:
         if root.is_symlink() or not root.is_dir():
             raise LiveAidBridgeError("REPO_ROOT_INVALID")
         self.repo_root = root.resolve(strict=True)
-        self.index = SourceIndex.build(self.repo_root)
+        # Python symbol checks need a repository index, but QML/JSON/shell
+        # analysis does not. Building it here walked and parsed the entire
+        # workspace on every desktop launch, even when Live Aid was unused.
+        self.index: SourceIndex | None = None
         self.engine = DiagnosticEngine(self.index)
         self.resolver = ForensicResolver(self.index)
         self._sessions: dict[tuple[str, str], AuthoringSession] = {}
@@ -48,6 +51,14 @@ class LiveAidService:
             raise LiveAidBridgeError("SOURCE_NAME_INVALID")
         if len(source.encode("utf-8")) > 262_144:
             raise LiveAidBridgeError("DRAFT_TOO_LARGE")
+
+        detected_language = (
+            language or DiagnosticEngine.detect_language(source_name)
+        ).casefold()
+        if detected_language in {"py", "python"} and self.index is None:
+            self.index = SourceIndex.build(self.repo_root)
+            self.engine.source_index = self.index
+            self.resolver = ForensicResolver(self.index)
 
         key = (object_id, source_name)
         session = self._sessions.get(key)

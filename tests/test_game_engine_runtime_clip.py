@@ -80,9 +80,11 @@ Item {{
         app.processEvents()
     assert runtime_loader.property("errorString") == "Success!"
 
+    from types import SimpleNamespace
+    bridge = SimpleNamespace(_game_engine_runtime_clip_driver=None)
     before = _timeline_rows(runtime_loader)
     assert len(before) == 27
-    assert ChatSurfaceHost.gameEngineRuntimeClip(None, runtime_loader, "walk") is True
+    assert ChatSurfaceHost.gameEngineRuntimeClip(bridge, runtime_loader, "walk") is True
     after = dict(
         (name, (running, enabled))
         for name, running, enabled in _timeline_rows(runtime_loader)
@@ -92,9 +94,15 @@ Item {{
     assert after["sprint"] == (False, False)
     assert sum(running or enabled for running, enabled in after.values()) == 1
 
-    assert ChatSurfaceHost.gameEngineRuntimeClip(None, runtime_loader, "") is True
+    assert ChatSurfaceHost.gameEngineRuntimeClip(bridge, runtime_loader, "") is True
     stopped = _timeline_rows(runtime_loader)
     assert all(not running and not enabled for _, running, enabled in stopped)
+
+    assert ChatSurfaceHost.gameEngineRuntimeClip(bridge, runtime_loader, 'walk')
+    bridge._game_engine_runtime_clip_driver.close()
+    bridge._game_engine_runtime_clip_driver.close()
+    assert all(not running and not enabled for _, running, enabled in _timeline_rows(runtime_loader))
+    assert not ChatSurfaceHost.gameEngineRuntimeClip(bridge, runtime_loader, 'idle')
 
     print("GAME_ENGINE_RUNTIME_CLIP_TEST=PASS")
     return 0

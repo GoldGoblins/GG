@@ -94,6 +94,7 @@ def validate_offer(
         safe_quantity = 0
     if safe_quantity < 1:
         return False, {"error": "TRADE_INSTANCE_QUANTITY_INVALID"}
+    if instance.get('bound_to'):return False,{'error':'TRADE_ITEM_BOUND'}
     return tradeable_definition(definition)
 
 

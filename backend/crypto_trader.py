@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.crypto_contract import ensure_state_dir, format_units
+from backend import crypto_backtest
 from backend.crypto_indicators import (
     aroon_osc,
     bb_percent,
@@ -899,7 +900,7 @@ def _price_atoms(close: float) -> int:
 
 
 def _apply_fee(amount: int) -> int:
-    return amount * (10_000 - FEE_BPS) // 10_000
+    return amount * (10_000 - crypto_backtest.EXECUTION_BPS) // 10_000
 
 
 def _quarter_id(ts: int) -> int:
@@ -1259,6 +1260,8 @@ def load_backtest_prev() -> dict[str, Any]:
 
 
 def save_backtest(payload: dict[str, Any]) -> dict[str, Any]:
+    if not crypto_backtest.PERSIST.get():
+        return payload
     if isinstance(payload, dict) and not payload.get("ran_at"):
         payload["ran_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     path = _backtest_path()
@@ -1421,7 +1424,7 @@ def _seed_vault(
         state["cost_px"] = price
         return
     state["usd"] = 0
-    state["sol"] = start_sol
+    state["sol"] = _apply_fee(start_sol)
     state["banked_usd"] = 0
     state["banked_sol"] = 0
     state["cost_px"] = price
@@ -1434,31 +1437,16 @@ def _seed_vault(
 
 
 def _cpmm_buy(usd_in: int, price: int) -> tuple[int, str]:
-    try:
-        from backend import crypto_flash_arb
-
-        filled = crypto_flash_arb.swap_usd_for_sol(int(usd_in))
-        sol_got = int(filled.get("sol") or 0)
-        if sol_got > 0:
-            return sol_got, "cpmm-A"
-    except (ValueError, TypeError, OSError, KeyError):
-        pass
-    usd_net = _apply_fee(int(usd_in))
-    return usd_net * SOL_SCALE // price, "paper"
+    """Compatibility wrapper: market paper fills never route through the lab pool."""
+    if price <= 0:
+        raise ValueError("CRYPTO_PRICE")
+    return _apply_fee(int(usd_in)) * SOL_SCALE // price, "paper"
 
 
 def _cpmm_sell(sol_in: int, price: int) -> tuple[int, str]:
-    try:
-        from backend import crypto_flash_arb
-
-        filled = crypto_flash_arb.swap_sol_for_usd(int(sol_in))
-        usd_out = int(filled.get("usd") or 0)
-        if usd_out > 0:
-            return usd_out, "cpmm-A"
-    except (ValueError, TypeError, OSError, KeyError):
-        pass
-    usd_gross = int(sol_in) * price // SOL_SCALE
-    return _apply_fee(usd_gross), "paper"
+    if price <= 0:
+        raise ValueError("CRYPTO_PRICE")
+    return _apply_fee(int(sol_in) * price // SOL_SCALE), "paper"
 
 
 def apply_tick(
@@ -1700,13 +1688,9 @@ def _paper_fill(
     execute_contracts: bool,
     buy: bool,
 ) -> tuple[int, str]:
-    if buy:
-        if execute_contracts:
-            return _cpmm_buy(usd_in, price)
-        return _apply_fee(usd_in) * SOL_SCALE // price, "paper"
-    if execute_contracts:
-        return _cpmm_sell(sol_in, price)
-    return _apply_fee(sol_in * price // SOL_SCALE), "paper"
+    # execute_contracts is retained for compatibility; this is a simulation.
+    # The ARB tab's local CPMM is not a quote for the observed market price.
+    return _cpmm_buy(usd_in, price) if buy else _cpmm_sell(sol_in, price)
 
 
 def _grid_regime(tf_flow: dict[str, str] | None) -> str:
@@ -2380,7 +2364,9 @@ def apply_horizons(
         if claim > peak:
             state["peak_tokens"] = claim
             peak = claim
-        dd_halt = peak > 0 and claim * 10_000 < peak * (10_000 - PEAK_DD_BPS)
+        # Nominal token inventory excludes quote cash; it is not portfolio
+        # drawdown. The shared forward runner enforces mark-to-market risk.
+        state["token_inventory_drawdown"] = peak > 0 and claim * 10_000 < peak * (10_000 - PEAK_DD_BPS)
         _touch_swing_low(state, price)
         _touch_swing_high(state, price)
         oversold = False
@@ -2788,6 +2774,12 @@ def _equity_atoms(state: dict[str, Any], last_close: float) -> int:
     return int(state.get("banked_sol") or 0) + int(state.get("sol") or 0)
 
 
+def _mark_usd(state: dict[str, Any], price: float) -> float:
+    """Portfolio equity includes both token holdings and every cash bucket."""
+    cash = _powder_usd(state) + int(state.get("banked_usd") or 0)
+    return _equity_atoms(state, price) / SOL_SCALE * price + cash / USD_SCALE
+
+
 def _new_bucket() -> dict[str, Any]:
     return {
         "fills": 0,
@@ -2848,6 +2840,15 @@ def _advance_tape(
     state: dict[str, Any],
     last_close: float,
 ) -> None:
+    mark_usd = _mark_usd(state, last_close)
+    tape["mark_state"] = state
+    tape["mark_close"] = last_close
+    rows = tape.setdefault("accounting", [])
+    row = {"ts": int(ts), "usd": mark_usd}
+    if rows and rows[-1]["ts"] == int(ts):
+        rows[-1] = row
+    else:
+        rows.append(row)
     if not state.get("seeded"):
         return
     month_now = time.strftime("%Y-%m", time.gmtime(int(ts)))
@@ -2877,6 +2878,9 @@ def _advance_tape(
 
 
 def _note_fill(tape: dict[str, Any], row: dict[str, Any]) -> None:
+    if tape.get("accounting") and tape.get("mark_state") is not None:
+        price = float(tape["mark_close"])
+        tape["accounting"][-1]["usd"] = _mark_usd(tape["mark_state"], price)
     if str(row.get("id") or "") == "lot-seed" or str(row.get("venue") or "") == "seed":
         return
     side = str(row.get("side") or "")
@@ -2906,6 +2910,7 @@ def _close_tape(
     last_close: float,
     ts: int,
 ) -> None:
+    _advance_tape(tape, ts, state, last_close)
     eq = _equity_atoms(state, last_close)
     sol = round(eq / SOL_SCALE, 4) if eq else 0.0
     if tape["prev_week"]:
@@ -2996,6 +3001,9 @@ def _frame_span(data: dict[str, Any]) -> int:
 
 def _walk_primary(frames: dict[str, dict[str, Any]]) -> str:
     """1h clock on long history. 1m as clock melts the desktop."""
+    for name, data in frames.items():
+        if data.get("evaluation_primary"):
+            return name
     spans: dict[str, int] = {}
     for name, data in frames.items():
         span = _frame_span(data)
@@ -3523,6 +3531,8 @@ def _replay_float_15m(
     base_osc: dict[str, dict[str, Any]],
     base_flow: dict[str, str],
     tf_qual: dict[str, dict[str, list[float | None]]] | None = None,
+    tf_sig: dict[str, list[str]] | None = None,
+    tf_reg: dict[str, list[str]] | None = None,
 ) -> None:
     """Only the 15m bars in this 1h window, and only on a 4-stoch pile-up."""
     if primary in ("1m", "5m", "15m"):
@@ -3584,7 +3594,11 @@ def _replay_float_15m(
             "stoch": prev_s,
             "stoch_stack": stack_prev,
         }
-        tf_osc = {name: dict(row) for name, row in (base_osc or {}).items()}
+        # Sample every TF at this 15m close, before the enclosing hour closes.
+        tf_osc, _unused, causal_flow = _snapshot_tfs(
+            frames, tf_rsi, tf_stoch, tf_stoch_stack, tf_times,
+            tf_sig or {}, tf_reg or {}, t_close, "15m", j, px, tf_qual,
+        )
         tf_osc["15m"] = {
             "rsi": now_r,
             "stoch": now_s,
@@ -3604,7 +3618,7 @@ def _replay_float_15m(
             t_close,
             False,
             notes,
-            tf_flow=base_flow,
+            tf_flow=causal_flow,
             tf_osc=tf_osc,
         )
         prev_map["15m"] = {
@@ -3669,6 +3683,7 @@ def run_flow_backtest(
         else:
             tf_sig[name] = signal_series(h, lo, c, v)
             tf_reg[name] = regime_series(h, lo, c)
+    resume = crypto_backtest.restored("gg")
     state = default_state()
     state["armed"] = True
     state["seed_style"] = "long"
@@ -3685,7 +3700,12 @@ def run_flow_backtest(
     prev_count = 0
     tape = _fresh_tape()
     by_horizon = {name: 0 for name in HORIZONS}
-    start = 80 if n > 80 else 1
+    if resume:
+        state = resume["state"]
+        lots = list(resume.get("recent_lots") or [])
+        opens = _open_lots_from(lots)
+    event_start = len(lots)
+    start = n - 1 if resume else crypto_backtest.start_index(src)
     now0 = times[0] if times else 1_598_000_000
     pri_super = tf_sig.get(primary) or []
     pri_rsi = tf_rsi.get(primary) or []
@@ -3733,21 +3753,26 @@ def run_flow_backtest(
         macro = str(tf_flow.get("1h") or tf_flow.get(primary) or "range")
         before = len(lots)
         prev_now = int(times[i - 1]) + int(BAR_SEC.get(primary) or 0) if i > 0 else int(ts)
-        _replay_float_15m(
-            state,
-            lots,
-            frames,
-            tf_rsi,
-            tf_stoch,
-            tf_stoch_stack,
-            tf_times,
-            prev_now,
-            now,
-            primary,
-            tf_osc,
-            tf_flow,
-            tf_qual,
-        )
+        # Shared evaluation/forward accounts decide on their declared clock.
+        # Do not backdate new fills to 15m prices after that hour has finished.
+        if not src.get("evaluation_primary"):
+            _replay_float_15m(
+                state,
+                lots,
+                frames,
+                tf_rsi,
+                tf_stoch,
+                tf_stoch_stack,
+                tf_times,
+                prev_now,
+                now,
+                primary,
+                tf_osc,
+                tf_flow,
+                tf_qual,
+                tf_sig,
+                tf_reg,
+            )
         apply_horizons(
             state,
             lots,
@@ -3759,6 +3784,7 @@ def run_flow_backtest(
             tf_flow=tf_flow,
             open_rows=opens,
         )
+        _advance_tape(tape, int(ts), state, closes[i])
         prev_count = int(state.get("trades_today") or 0)
         banked = int(state.get("banked_sol") or 0)
         if banked < prev_banked:
@@ -3829,6 +3855,14 @@ def run_flow_backtest(
         start_sol=int(state.get("start_sol") or START_SOL),
     )
     report.update(stats)
+    report["accounting"] = tape.get("accounting", [])
+    report["inventory_tokens"] = (banked + float_sol) / SOL_SCALE
+    report["quote_balance"] = _powder_usd(state) / USD_SCALE
+    if crypto_backtest.STREAM.get():
+        keep = [row for row in lots if not row.get("closed")]
+        keep_ids = {row.get("id") for row in keep}
+        keep += [row for row in lots[-48:] if row.get("id") not in keep_ids]
+        crypto_backtest.checkpoint(report, "gg", {"state": state, "recent_lots": keep}, lots[event_start:], banked + float_sol, _powder_usd(state))
     if stats.get("equity_sol"):
         report["tokens"] = stats["equity_sol"]
     report["chart"] = _backtest_chart(frames, lots, equity=tape["equity"])

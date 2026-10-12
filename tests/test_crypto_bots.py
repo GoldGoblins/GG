@@ -19,6 +19,11 @@ def main() -> int:
     ids = [row["id"] for row in crypto_bots.catalog()]
     if ids != ["gg", "stoch_rsi", "dca", "dca_swing", "hybrid", "optimal"]:
         raise AssertionError("books " + str(ids))
+    verdicts = {row["id"]: row.get("verdict") for row in crypto_bots.catalog()}
+    if verdicts["stoch_rsi"] != "PARK" or verdicts["optimal"] != "KEEP":
+        raise AssertionError("board " + str(verdicts))
+    if verdicts["dca_swing"] != "WATCH":
+        raise AssertionError("swing is a watch, not a keep")
     if crypto_bots.selected() != "gg":
         raise AssertionError("default book")
     if crypto_bots.set_book("stoch_rsi") != "stoch_rsi":

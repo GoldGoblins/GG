@@ -775,3 +775,4 @@ def apply_world_action(
 
 def summary(state: Any) -> dict[str, Any]:
     return copy.deepcopy(state) if isinstance(state, dict) else starter_state()
+

@@ -99,7 +99,7 @@ Item {
             height: 18
 
             Repeater {
-                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "QIP", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW", "RESEARCH"]
+                model: ["CODE", "TERMINAL", "WEB", "EXTERNAL", "SITE", "CRYPTO", "MARKETPLACE", "TMOG", "OSINT", "RESEARCH", "MEDIA", "DRAW", "GAME_ENGINE", "NODES", "FLOW"]
 
                 delegate: Text {
                     required property string modelData
@@ -229,8 +229,8 @@ Item {
                 + "DRAW hosts Krita, GIMP, Inkscape or darktable in this box "
                 + "when they are on PATH, plus a small sketch pad. OSINT is "
                 + "the native OSIRIS public-feed dashboard; its RECON page "
-                + "stays read-only and target-free. QIP is a local-only WASM "
-                + "component lab; host imports and I/O stay blocked. GAME ENGINE "
+                + "stays read-only and target-free. RESEARCH combines evidence, "
+                + "method memory, reverse engineering and the local WASM lab. GAME ENGINE "
                 + "is a separate local Quick3D playground with fixed-step "
                 + "simulation, bounded pools and deterministic replay. NODES is "
                 + "the Geometry Nodes-style editor for agent and information "

@@ -5,6 +5,7 @@ import QtQuick.Layouts
 Item {
     id: root
     objectName: "workspaceResearchPane"
+    signal documentationRequested(string url)
 
     property var surfaceHost: null
     property color frameBorder: "#4a4a4a"
@@ -29,7 +30,7 @@ Item {
     property string evalName: "WORKBENCH"
     property string notice: "LOCAL · READY"
     property var sqlPreview: ({})
-    readonly property var tabs: ["BACKLOG", "EVIDENCE", "MEMORY", "WEB SKILLS", "SQL", "EVALS"]
+    readonly property var tabs: ["BACKLOG", "EVIDENCE", "MEMORY", "WEB SKILLS", "SQL", "EVALS", "WASM LAB", "REVERSE", "GAMES"]
 
     readonly property var status: {
         try { return JSON.parse(root.statusJson || "{}") } catch (err) { return {} }
@@ -68,6 +69,10 @@ Item {
             root.sqlResult = String(raw || "{}")
             try { root.sqlPreview = JSON.parse(root.sqlResult) } catch (err) { root.sqlPreview = {} }
             root.notice = String(root.sqlPreview.summary || root.sqlPreview.status || "PREVIEW")
+            return
+        }
+        if (String(op || "") === "lab_verify") {
+            try { var check = JSON.parse(String(raw || "{}")); root.notice = String(check.detail || check.status || "") } catch (err) { }
             return
         }
         try {
@@ -116,7 +121,36 @@ Item {
         root.skillScript = ""
     }
 
+    function evidenceContext(card) {
+        var details = {}
+        try { details = JSON.parse(String(card.details_json || "{}")) } catch (err) { }
+        if (!details.collection)
+            return "Recorded: " + String(card.observed_at || "unknown")
+        var location = details.location_precision === "PLACE_NAME_ESTIMATE"
+            ? "Estimated place from headline"
+            : (details.location_precision === "REFERENCE_LOCATION" ? "Reference location" : "Source-reported location")
+        if (details.lat !== undefined && details.lon !== undefined)
+            location += " " + String(details.lat) + ", " + String(details.lon)
+        var measurements = []
+        if (details.magnitude !== undefined)
+            measurements.push("M" + String(details.magnitude))
+        if (details.depth_km !== undefined)
+            measurements.push("Depth " + String(details.depth_km) + " km")
+        if (details.alt_m !== undefined)
+            measurements.push("Altitude " + String(details.alt_m) + " m")
+        if (details.heading !== undefined)
+            measurements.push("Heading " + String(details.heading) + "°")
+        return "Collected: " + String(details.collected_at || "unknown")
+            + " · Event time: " + String(details.event_time || "unknown")
+            + " · " + String(details.freshness || "unknown")
+            + " · " + location
+            + (measurements.length ? " · " + measurements.join(" · ") : "")
+            + " · Awaiting independent corroboration"
+    }
+
     Component.onCompleted: root.refresh()
+    onSurfaceHostChanged: root.refresh()
+    onVisibleChanged: { if (visible) root.refresh() }
 
     Rectangle { anchors.fill: parent; color: "#161616" }
 
@@ -125,28 +159,30 @@ Item {
         anchors.margins: 10
         spacing: 8
 
-        Row {
+        RowLayout {
+            id: heading
             width: parent.width
             spacing: 12
             Text {
-                text: "RESEARCH DESK"
+                text: "RESEARCH"
                 color: "#d8dee9"
                 font.family: "monospace"
                 font.pixelSize: 16
                 font.bold: true
             }
             Text {
-                text: "LOCAL INDEX · NO NETWORK · NO MODEL · NO APPLY AUTHORITY"
+                text: "Sources · experiments · reusable methods"
                 color: "#8db89a"
                 font.family: "monospace"
                 font.pixelSize: 11
-                anchors.verticalCenter: parent.verticalCenter
+                Layout.fillWidth: true
+                elide: Text.ElideRight
             }
-            Item { width: Math.max(0, parent.width - 470); height: 1 }
             GgButton { text: "REFRESH"; onClicked: root.refresh() }
         }
 
-        Row {
+        Flow {
+            id: sectionBar
             width: parent.width
             spacing: 0
             Repeater {
@@ -162,6 +198,7 @@ Item {
         }
 
         Text {
+            id: summary
             width: parent.width
             text: root.notice + " · tasks " + root.tasks.length
                 + " · evidence " + root.evidence.length
@@ -176,16 +213,16 @@ Item {
         StackLayout {
             id: pages
             width: parent.width
-            height: Math.max(120, parent.height - 82)
+            height: Math.max(120, parent.height - heading.height - sectionBar.height - summary.height - 24)
             currentIndex: Math.max(0, root.tabs.indexOf(root.page))
 
             Item {
                 Column {
                     anchors.fill: parent
                     spacing: 8
-                    GgFrame {
+                    ResearchFrame {
                         width: parent.width
-                        height: 82
+                        height: 116
                         leftLegend: "SCOUT / SHIP BACKLOG"
                         Column {
                             anchors.fill: parent
@@ -203,7 +240,7 @@ Item {
                     }
                     ListView {
                         width: parent.width
-                        height: Math.max(60, parent.height - 92)
+                        height: Math.max(60, parent.height - 126)
                         clip: true
                         model: root.tasks
                         spacing: 5
@@ -230,7 +267,7 @@ Item {
             Item {
                 Column {
                     anchors.fill: parent; spacing: 8
-                    GgFrame {
+                    ResearchFrame {
                         width: parent.width; height: 112; leftLegend: "EVIDENCE CARD"
                         Column { anchors.fill: parent; anchors.margins: 8; spacing: 5
                             Row {
@@ -245,8 +282,9 @@ Item {
                     }
                     ListView { width: parent.width; height: Math.max(60, parent.height - 122); clip: true; model: root.evidence; spacing: 5; ScrollBar.vertical: GgScrollBar {}
                         delegate: Column { required property var modelData; width: ListView.view.width; spacing: 2
-                            Text { text: String(modelData.title || "") + " · " + String(modelData.provenance || ""); color: "#c8a97e"; font.family: "monospace"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width }
-                            Text { text: String(modelData.claim || "") + (String(modelData.source_url || "").length ? " · " + String(modelData.source_url) : ""); color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 11; wrapMode: Text.WordWrap; width: parent.width }
+                            Text { textFormat: Text.PlainText; text: String(modelData.title || "") + " · " + String(modelData.provenance || ""); color: "#c8a97e"; font.family: "monospace"; font.pixelSize: 12; elide: Text.ElideRight; width: parent.width }
+                            Text { textFormat: Text.PlainText; text: String(modelData.claim || "") + (String(modelData.source_url || "").length ? " · " + String(modelData.source_url) : ""); color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 11; wrapMode: Text.WordWrap; width: parent.width }
+                            Text { textFormat: Text.PlainText; text: root.evidenceContext(modelData); color: "#7f8993"; font.family: "monospace"; font.pixelSize: 10; wrapMode: Text.WordWrap; width: parent.width }
                         }
                     }
                 }
@@ -254,7 +292,7 @@ Item {
 
             Item {
                 Row { anchors.fill: parent; spacing: 10
-                    GgFrame { width: parent.width * 0.47; height: parent.height; leftLegend: "SOURCE / MEMORY"
+                    ResearchFrame { width: parent.width * 0.47; height: parent.height; leftLegend: "SOURCE / MEMORY"
                         Column { anchors.fill: parent; anchors.margins: 8; spacing: 6
                             GgField { width: parent.width; placeholderText: "Source title"; text: root.sourceTitle; onTextChanged: root.sourceTitle = text }
                             TextArea { width: parent.width; height: 150; placeholderText: "Paste a bounded note, transcript excerpt or observation"; text: root.sourceText; onTextChanged: root.sourceText = text; color: "#e6e6e6"; placeholderTextColor: "#5d6670"; font.family: "monospace"; font.pixelSize: 11; wrapMode: TextArea.Wrap; background: Rectangle { color: "#121212"; border.color: "#6a6a6a"; border.width: 1 } }
@@ -262,13 +300,39 @@ Item {
                             Text { text: "Sources are clipped, hashed and optionally copied into long memory."; color: "#7f8993"; font.family: "monospace"; font.pixelSize: 10; wrapMode: Text.WordWrap; width: parent.width }
                         }
                     }
-                    GgFrame { width: parent.width * 0.53 - 10; height: parent.height; leftLegend: "PROCEDURAL METHODS"
+                    ResearchFrame { width: parent.width * 0.53 - 10; height: parent.height; leftLegend: "PROCEDURAL METHODS"
                         Column { anchors.fill: parent; anchors.margins: 8; spacing: 6
                             GgField { width: parent.width; placeholderText: "Method name"; text: root.methodName; onTextChanged: root.methodName = text }
                             GgField { width: parent.width; placeholderText: "Trigger / when useful"; text: root.methodTrigger; onTextChanged: root.methodTrigger = text }
                             TextArea { width: parent.width; height: 100; placeholderText: "One bounded step per line"; text: root.methodSteps; onTextChanged: root.methodSteps = text; color: "#e6e6e6"; placeholderTextColor: "#5d6670"; font.family: "monospace"; font.pixelSize: 11; wrapMode: TextArea.Wrap; background: Rectangle { color: "#121212"; border.color: "#6a6a6a"; border.width: 1 } }
                             GgButton { text: "SAVE METHOD"; onClicked: root.addMethod() }
-                            ListView { width: parent.width; height: Math.max(40, parent.height - 240); clip: true; model: root.methods; spacing: 4; delegate: Text { required property var modelData; width: ListView.view.width; text: String(modelData.name || "") + " · " + String(modelData.status || "PROPOSED"); color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 10; elide: Text.ElideRight } }
+                            ListView {
+                                width: parent.width; height: Math.max(40, parent.height - 240)
+                                clip: true; model: root.methods; spacing: 6
+                                ScrollBar.vertical: GgScrollBar {}
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: ListView.view.width; height: 116
+                                    color: "#1d1d1d"; border.color: modelData.status === "VERIFIED" ? "#8db89a" : "#42484e"
+                                    Column {
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.margins: 8; y: 7; spacing: 5
+                                        Text { width: parent.width; text: String(modelData.name || "") + " · " + String(modelData.status || "PROPOSED")
+                                            color: "#d8dee9"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight }
+                                        Text { width: parent.width; height: 45
+                                            text: { try { return JSON.parse(String(modelData.steps_json || "[]")).slice(0, 3).join("\n") } catch (e) { return "" } }
+                                            color: "#a8b0b8"; font.family: "monospace"; font.pixelSize: 10
+                                            wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight }
+                                        Row {
+                                            width: parent.width; spacing: 6
+                                            GgButton { text: "TEST STATUS"; onClicked: root.command("lab_verify", {"method_id": String(modelData.id || "")}) }
+                                            Text { width: parent.width - 115; anchors.verticalCenter: parent.verticalCenter
+                                                text: String(modelData.proof || "Independent test pending")
+                                                color: "#7f8993"; font.family: "monospace"; font.pixelSize: 10; elide: Text.ElideRight }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -276,7 +340,7 @@ Item {
 
             Item {
                 Column { anchors.fill: parent; spacing: 8
-                    GgFrame { width: parent.width; height: 148; leftLegend: "WEB SKILL FACTORY · REPLAY SHAPE ONLY"
+                    ResearchFrame { width: parent.width; height: 174; leftLegend: "WEB SKILL FACTORY · REPLAY SHAPE ONLY"
                         Column { anchors.fill: parent; anchors.margins: 8; spacing: 5
                             Row {
                                 width: parent.width
@@ -288,7 +352,7 @@ Item {
                             TextArea { width: parent.width; height: 58; placeholderText: "Playwright-style script text; stored and checked, never executed by this surface"; text: root.skillScript; onTextChanged: root.skillScript = text; color: "#e6e6e6"; placeholderTextColor: "#5d6670"; font.family: "monospace"; font.pixelSize: 10; background: Rectangle { color: "#121212"; border.color: "#6a6a6a"; border.width: 1 } }
                         }
                     }
-                    ListView { width: parent.width; height: Math.max(60, parent.height - 158); clip: true; model: root.skills; spacing: 5; ScrollBar.vertical: GgScrollBar {}
+                    ListView { width: parent.width; height: Math.max(60, parent.height - 184); clip: true; model: root.skills; spacing: 5; ScrollBar.vertical: GgScrollBar {}
                         delegate: Rectangle { required property var modelData; width: ListView.view.width; height: 48; color: "#1d1d1d"; border.color: String(modelData.status || "") === "VERIFIED" ? "#8db89a" : "#42484e"; border.width: 1
                             Text { anchors.left: parent.left; anchors.right: verify.left; anchors.margins: 7; anchors.verticalCenter: parent.verticalCenter; text: String(modelData.name || "") + " · " + String(modelData.status || "DRAFT") + " · NOT_EXECUTED"; color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight }
                             GgButton { id: verify; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.rightMargin: 6; text: "VERIFY"; onClicked: root.command("verify_web_skill", {"skill_id": String(modelData.id || "")}) }
@@ -299,14 +363,14 @@ Item {
 
             Item {
                 Row { anchors.fill: parent; spacing: 8
-                    GgFrame { width: parent.width * 0.55; height: parent.height; leftLegend: "SQL LOGICAL PREVIEW · NO DATABASE"
+                    ResearchFrame { width: parent.width * 0.55; height: parent.height; leftLegend: "SQL LOGICAL PREVIEW · NO DATABASE"
                         Column { anchors.fill: parent; anchors.margins: 8; spacing: 6
                             TextArea { width: parent.width; height: 180; text: root.sqlText; onTextChanged: root.sqlText = text; color: "#e6e6e6"; font.family: "monospace"; font.pixelSize: 12; wrapMode: TextArea.Wrap; background: Rectangle { color: "#121212"; border.color: "#6a6a6a"; border.width: 1 } }
                             GgButton { text: "PREVIEW ONLY"; onClicked: root.command("sql_preview", {"sql": root.sqlText}) }
                             Text { width: parent.width; text: root.sqlPreview.summary ? String(root.sqlPreview.summary) + " · risk " + String(root.sqlPreview.risk || "LOW") + " · executed=" + String(root.sqlPreview.executed) : "Nothing executed. Preview exposes statement, tables, CTEs and warnings."; color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 10; wrapMode: Text.WordWrap }
                         }
                     }
-                    GgFrame { width: parent.width * 0.45 - 8; height: parent.height; leftLegend: "PREVIEW GRAPH"
+                    ResearchFrame { width: parent.width * 0.45 - 8; height: parent.height; leftLegend: "PREVIEW GRAPH"
                         ListView { anchors.fill: parent; anchors.margins: 8; clip: true; model: root.sqlPreview.nodes || []; delegate: Text { required property var modelData; width: ListView.view.width; text: String(modelData.kind || "") + " · " + String(modelData.label || ""); color: "#c8a97e"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight } }
                     }
                 }
@@ -314,7 +378,7 @@ Item {
 
             Item {
                 Column { anchors.fill: parent; spacing: 8
-                    GgFrame { width: parent.width; height: 80; leftLegend: "EVAL / OBSERVABILITY"
+                    ResearchFrame { width: parent.width; height: 80; leftLegend: "EVAL / OBSERVABILITY"
                         Row { anchors.fill: parent; anchors.margins: 8; spacing: 6
                             GgField { width: parent.width - 260; placeholderText: "Evaluation name"; text: root.evalName; onTextChanged: root.evalName = text }
                             GgButton { text: "START RUN"; onClicked: root.command("start_run", {"task_id": "", "eval_name": root.evalName}) }
@@ -325,6 +389,22 @@ Item {
                     ListView { width: parent.width; height: Math.max(60, parent.height - 120); clip: true; model: root.runs; spacing: 5; ScrollBar.vertical: GgScrollBar {}
                         delegate: Text { required property var modelData; width: ListView.view.width; text: String(modelData.eval_name || "WORKBENCH") + " · " + String(modelData.status || "RUNNING") + " · score " + String(modelData.score === null ? "—" : modelData.score); color: "#c8cdd4"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight }
                     }
+                }
+            }
+
+            QipSurface { surfaceHost: root.surfaceHost }
+
+            ResearchReverseSurface {
+                id: reversePane
+                surfaceHost: root.surfaceHost
+                onFindingSaved: { root.refresh(); root.page = "EVIDENCE" }
+                onDocumentationRequested: function(url) { root.documentationRequested(url) }
+            }
+            ResearchGamesSurface {
+                surfaceHost: root.surfaceHost
+                onAnalysisRequested: function(path) {
+                    root.page = "REVERSE"
+                    if (path.length > 0) reversePane.inspectArtifact(path)
                 }
             }
         }

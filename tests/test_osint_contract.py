@@ -8,6 +8,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 if str(PROJECT) not in sys.path:
     sys.path.insert(0, str(PROJECT))
 
@@ -417,7 +418,7 @@ def main() -> int:
     assert "--disable-gpu" not in main_py
     assert "--enable-webgl" in main_py
 
-    from PySide6.QtCore import QObject, QUrl, Slot, qInstallMessageHandler
+    from PySide6.QtCore import QObject, QUrl, Slot, QMetaObject, qInstallMessageHandler
     from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
     from PySide6.QtGui import QGuiApplication
     from backend.osint_host import OsintHost
@@ -476,7 +477,36 @@ def main() -> int:
          "lon": 18.0, "severity": 2}
     ]
 
+    fixture["news_stream"] = [
+        {"id": "svt", "title": "Svenska nyheter", "kind": "news", "source": "SVT NYHETER", "language": "sv"},
+        {"id": "ekot", "title": "Ekot nyheter", "kind": "news", "source": "SR EKOT", "language": "sv"},
+        {"id": "bbc", "title": "World news", "kind": "news", "source": "BBC WORLD", "language": "en"},
+    ]
+
     class FakeSurfaceHost(QObject):
+        def __init__(self):
+            super().__init__()
+            self.refreshes = 0
+            self.recorded = []
+            self.nearby_transitions = []
+
+        @Slot(bool)
+        def osintSetNearbyActive(self, enabled: bool) -> None:
+            self.nearby_transitions.append(enabled)
+
+        @Slot(result=str)
+        def osintNearbySnapshot(self) -> str:
+            return json.dumps({"status": "SYSTEM_CACHE", "rows": [], "sources": []})
+
+        @Slot(str, str, result=str)
+        def osintRecordEvidence(self, kind: str, event_id: str) -> str:
+            self.recorded.append((kind, event_id))
+            return json.dumps({"status": "EVIDENCE_RECORDED"})
+
+        @Slot(str, result=str)
+        def researchCommand(self, raw: str = "{}") -> str:
+            return json.dumps({"status": "READY", "tasks": [], "sources": [], "evidence": []})
+
         @Slot(str, result=str)
         def osintSnapshot(self, page: str = "OVERVIEW") -> str:
             payload = dict(fixture)
@@ -485,6 +515,7 @@ def main() -> int:
 
         @Slot(str, result=bool)
         def osintRefresh(self, page: str = "OVERVIEW") -> bool:
+            self.refreshes += 1
             return False
 
         @Slot(str)
@@ -526,14 +557,50 @@ def main() -> int:
         lambda _kind, _context, message: messages.append(str(message))
     )
     app.processEvents()
+    news_list = surface.findChild(QObject, "overviewNewsList")
+    assert news_list is not None and news_list.property("count") == 3
+    surface.setProperty("streamMode", "SVENSKA")
+    app.processEvents()
+    assert news_list.property("count") == 2
+    surface.setProperty("streamMode", "SIGNALS")
+    app.processEvents()
+    assert news_list.property("count") == len(fixture["stream"])
+    surface.setProperty("streamMode", "NEWS")
     assert surface.findChild(QObject, "osintMapPage") is not None
     assert surface.findChild(QObject, "osintSourcesPage") is not None
     globe = surface.findChild(QObject, "osintGlobe")
     assert globe is not None
     assert int(globe.property("pointCount")) == 4
+    globe.setProperty("mapReady", True)
+    globe.setProperty("savedView", {"zoom": 2})
+    surface.setProperty("nearbyEnabled", True)
+    app.processEvents()
+    assert not surface.property("nearbyActive"), "nearby activated while zoomed out"
+    globe.setProperty("savedView", {"zoom": 15.5})
+    app.processEvents()
+    assert surface.property("nearbyActive"), "nearby failed to activate at close zoom"
+    globe.setProperty("savedView", {"zoom": 2})
+    app.processEvents()
+    assert not surface.property("nearbyActive"), "nearby failed to pause after zoom-out"
+    assert True in fake.nearby_transitions and False in fake.nearby_transitions
+    globe.setProperty("mapReady", False)
     assert surface.setProperty("page", "MAP")
     app.processEvents()
     assert str(surface.property("page")) == "MAP"
+    refreshes = fake.refreshes
+    requests = []
+    surface.researchRequested.connect(requests.append)
+    assert surface.setProperty("selectedEvent", {"kind": "earthquakes", "id": "quake"})
+    assert QMetaObject.invokeMethod(surface, "saveEvidence")
+    app.processEvents()
+    assert fake.recorded == [("earthquakes", "quake")]
+    assert requests == ["EVIDENCE"], "OSINT did not hand off to shared Research"
+    assert str(surface.property("page")) == "MAP"
+    assert surface.findChild(QObject, "osintResearchPage") is None
+    assert surface.findChild(QObject, "osintQipPage") is None
+    assert surface.findChild(QObject, "workspaceResearchPane") is None
+    assert surface.findChild(QObject, "workspaceQipPane") is None
+    assert fake.refreshes == refreshes, "saving evidence refreshed public feeds"
     bad_messages = [
         message for message in messages
         if any(token in message for token in (

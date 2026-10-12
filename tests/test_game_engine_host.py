@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,9 @@ def main() -> int:
         DEFAULT_INTEREST_RADIUS,
         DEFAULT_RENDER_RADIUS,
         DEFAULT_PLANET_RADIUS_METERS,
+        HOUSE_ROOF_CLEARANCE_M,
+        ISLAND_LAYOUT_SCALE,
+        WORLD_PROP_SCALE,
         MOVEMENT_MODES,
         local_to_planet,
         orbit_camera_position,
@@ -50,6 +55,7 @@ def main() -> int:
         game_engine_physics as physics,
         game_engine_progression as progression,
         game_engine_render as render,
+        game_engine_settlement as settlement,
         game_engine_terrain as terrain,
     )
 
@@ -65,12 +71,28 @@ def main() -> int:
         raise AssertionError("game surface must stay independent of OSINT/WebEngine")
     if "GameEngine" in osint_qml:
         raise AssertionError("OSINT surface must stay independent of Game Engine")
-    if qml.count("Repeater3D") != 4:
-        raise AssertionError("3D render pools and terrain cells must use Repeater3D")
+    # World instancing, fauna and articulated equipment add independent pools.
+    # Check the retained terrain/entity bindings rather than freezing their count.
+    for model in ("terrainRenderModel", "entityRenderModel"):
+        if not re.search(rf"Repeater3D\s*\{{\s*model:\s*{model}\b", qml):
+            raise AssertionError(f"retained 3D render pool missing: {model}")
     if "root.suspendRuntime()" not in qml or "Component.onDestruction" not in qml:
         raise AssertionError("game runtime is not suspended with the surface")
-    if "interval: root.renderUpdateIntervalMs" not in qml:
-        raise AssertionError("game surface has no bounded render cadence")
+    # Rendering follows the scene graph's frame clock. It must stop when the
+    # pane or simulation is inactive and pass frame time to camera/gear physics.
+    frame_animation = re.search(r"FrameAnimation\s*\{(.*?)\n    \}", qml, re.S)
+    if frame_animation is None:
+        raise AssertionError("game surface has no scene-graph render cadence")
+    frame_body = re.sub(r"\s+", " ", frame_animation.group(1))
+    for frame_feature in (
+        'objectName: "gameRenderFrameAnimation"',
+        "running: root.paneLive && root.surfaceHost !== null && (root.running || root.replaying)",
+        "root.followCamera(refreshTimer.frameTime)",
+        "root.refreshRender()",
+        "root.updateEquipmentPhysics(refreshTimer.frameTime)",
+    ):
+        if frame_feature not in frame_body:
+            raise AssertionError(f"render-frame lifecycle missing: {frame_feature}")
     for render_feature in (
         "SceneEnvironment.NoAA",
         "SceneEnvironment.MSAA",
@@ -147,13 +169,13 @@ def main() -> int:
         "inspectorCollapsed",
         "terrainRenderModel",
         "entityRenderModel",
-        "particleRenderModel",
+        "particleBatchModel",
         "syncRenderModels",
         "QtQuick3D.AssetUtils",
         "RuntimeLoader",
         "authoredAsset",
         "entityAsset",
-        "AUTHORED_SKINNED",
+        "authoredCharacterSource",
         "authoredAssetVisible",
         "gameAuthoredAssetLoader",
         "AUTHORED_STATIC",
@@ -231,13 +253,10 @@ def main() -> int:
         "entityDynamic",
         "renderDynamicSignature",
         "characterVisual",
-        "gameEngineCharacterGeometry",
-        "gameEngineCharacterGeometryForRole",
         "gameEngineItemGeometry",
         "gameEngineWorldPropGeometry",
-        "lowPolyCharacterGeometry",
-        "characterGeometryForCast",
-        "gameCharacterBodyModel",
+        "root.crewSource",
+        "source: entityModel.authoredCharacterSource",
         "gameEngineRuntimeClip",
         "entityAssetMotion",
         "authoredAssetClipStatus",
@@ -249,6 +268,9 @@ def main() -> int:
     ):
         if control not in qml:
             raise AssertionError(f"{control} bridge missing from game surface")
+    for prototype_body in ("lowPolyCharacterGeometry", "gameCharacterBodyModel"):
+        if prototype_body in qml:
+            raise AssertionError("approved character assets must not restore a prototype body")
     button_qml = (PROJECT / "qml" / "components" / "GgButton.qml").read_text(
         encoding="utf-8"
     )
@@ -258,31 +280,58 @@ def main() -> int:
     runtime = GameEngineRuntime()
     try:
         initial = runtime.snapshot()
+        starter = content.starter_content()
+        npc_spawns = npc.spawns_from_content(starter)
+        life_spawns = life.spawns_from_content(starter)
+        fixtures = settlement.catalog()["fixtures"]
+        # The enlarged approved village has 34 core props, its beacon, two
+        # shared route meshes and the separately authored settlement fixtures.
+        expected_world_props = 35 + 2 + len(fixtures)
+        expected_sim_entities = 1 + expected_world_props + len(npc_spawns)
+        expected_character_count = 1 + len(npc_spawns) + len(life_spawns)
+        expected_render_entities = expected_sim_entities + len(life_spawns) + 4
+        expected_people = set(starter["npc_individuals"]) | {
+            str(row["id"]) for row in npc_spawns + life_spawns
+        }
+        assert len(npc_spawns) == 6
+        assert len(life_spawns) == 24 == life.MAX_PROXIES
         assert initial["schema"] == "gg.game-engine.runtime.v1"
         assert initial["state"] == "IDLE"
-        assert initial["simulation"]["active_entities"] == 39
-        assert initial["simulation"]["active_npcs"] == 6
+        assert initial["simulation"]["active_entities"] == expected_sim_entities
+        assert initial["simulation"]["active_npcs"] == len(npc_spawns)
         assert initial["people"]["schema"] == identity.SCHEMA
-        assert initial["people"]["population"] == 10
-        assert initial["people"]["unique_names"] == 10
-        assert initial["gear"]["slots"] == 15
+        assert initial["people"]["population"] == len(expected_people)
+        assert initial["people"]["unique_names"] == len(expected_people)
+        assert {row["id"] for row in initial["people"]["people"]} == expected_people
+        assert initial["gear"]["slots"] == 19
         assert initial["gear"]["runes"] == 6
         assert initial["gear"]["gems"] == 6
         assert initial["gear"]["runewords"] == 3
         assert initial["render"]["ambient_life"] == {
-            "visible": 4,
+            "visible": len(life_spawns),
             "budget": life.MAX_PROXIES,
             "simulation": "RENDER_ONLY_DETERMINISTIC_SCHEDULES",
         }
         assert "BOUNDED_AMBIENT_LIFE_PROXIES" in initial["capabilities"]
         assert "DATA_DRIVEN_AMBIENT_SCHEDULES" in initial["capabilities"]
         assert "BOUNDED_PLAYER_STIMULI" in initial["capabilities"]
-        assert len(initial["render"]["entities"]) == 47
+        assert len(initial["render"]["entities"]) == expected_render_entities
         assert initial["life"]["schema"] == life.SCHEMA
-        assert initial["life"]["population"] == 4
+        assert initial["life"]["population"] == len(life_spawns)
         assert initial["life"]["clock"]["phase"] == "DAWN"
-        assert initial["life"]["activities"]["NOTICE_PLAYER"] == 1
-        assert initial["life"]["stimuli"]["PLAYER_NEAR"] == 1
+        assert sum(initial["life"]["activities"].values()) == len(life_spawns)
+        assert sum(initial["life"]["stimuli"].values()) == len(life_spawns)
+        # Expanded village homes no longer sit next to the origin. Preserve
+        # the attention behavior check with a stationary, controlled resident.
+        attention_spawn = {
+            "id": "host-stimulus-fixture", "x": 1.0, "z": 1.0,
+            "radius": 1.0, "speed": 0.2, "sense_radius": 2.0,
+        }
+        near_resident = life.proxy_rows([attention_spawn], 0, player_x=0, player_z=0)[0]
+        assert near_resident["life"]["activity"] == "NOTICE_PLAYER"
+        assert near_resident["life"]["stimulus"] == "PLAYER_NEAR"
+        far_resident = life.proxy_rows([attention_spawn], 0, player_x=100, player_z=100)[0]
+        assert far_resident["life"]["stimulus"] == "NONE"
         assert initial["life"]["simulation"] == (
             "RENDER_ONLY_DETERMINISTIC_SCHEDULES"
         )
@@ -290,7 +339,7 @@ def main() -> int:
         assert initial["render"]["update_hz"] == RENDER_UPDATE_HZ
         assert initial["render"]["renderer"] == "QTQUICK3D_NATIVE_GEOMETRY"
         assert initial["render"]["world_asset_instances"] == {
-            "native_requested": 32,
+            "native_requested": expected_world_props,
             "primitive_fallback": 0,
             "budget": 96,
         }
@@ -299,7 +348,19 @@ def main() -> int:
             for row in initial["render"]["entities"]
             if row.get("kind") not in {"PLAYER", "NPC", "ACTOR", "GROUND_ITEM", "CHEST"}
         ]
-        assert len(world_rows) == 32
+        assert len(world_rows) == expected_world_props
+        # Independently state the core scene contents; settlement additions
+        # must be present without replacing an existing village prop.
+        core_kinds = Counter({
+            "HOUSE": 7, "PALM": 7, "BARREL": 1, "MANGROVE": 3,
+            "ROCK": 2, "PROP": 1, "DOCK": 1, "WATER_WHEEL": 1,
+            "WINDMILL": 1, "MARKET_STALL": 1, "FISH_RACK": 1,
+            "BOAT": 1, "BRIDGE": 1, "LIGHT": 2, "PATH": 4,
+            "TIDE_BEACON": 1, "SETTLEMENT_ROADS": 1, "SETTLEMENT_FENCES": 1,
+        })
+        assert Counter(row["kind"] for row in world_rows) == (
+            core_kinds + Counter(row["kind"] for row in fixtures)
+        )
         assert all(isinstance(row.get("asset"), dict) for row in world_rows)
         assert all(
             row["asset"].get("geometry_key")
@@ -322,7 +383,6 @@ def main() -> int:
             "world.prop.mangrove",
             "world.prop.shrine",
             "world.prop.barrel",
-            "world.ramp",
             "world.stilt_hut",
             "world.palm",
             "world.dock",
@@ -330,8 +390,8 @@ def main() -> int:
         }
         palms = [row for row in world_rows if row["asset"]["geometry_key"] == "world.palm"]
         assert palms
-        assert all(0.85 <= float(row.get("sx", 0)) <= 1.15 for row in palms)
-        assert all(2.0 <= float(row.get("sy", 0)) <= 2.5 for row in palms)
+        assert all(0.85 <= float(row.get("sx", 0)) / WORLD_PROP_SCALE <= 1.15 for row in palms)
+        assert all(2.0 <= float(row.get("sy", 0)) / WORLD_PROP_SCALE <= 2.5 for row in palms)
         assert all(
             str((row.get("asset") or {}).get("mode") or "") == "AUTHORED_STATIC"
             for row in palms
@@ -341,12 +401,12 @@ def main() -> int:
             for row in world_rows
             if row["asset"]["geometry_key"] == "world.stilt_hut"
         ]
-        assert len(huts) == 5
-        assert all(float(row.get("sy", 0)) >= 1.8 for row in huts)
+        assert len(huts) == core_kinds["HOUSE"] + sum(row["kind"] == "HOUSE" for row in fixtures)
         assert all(
-            abs(float(row.get("sx", 0)) - float(row.get("sy", 0))) <= 0.05
+            math.isclose(float(row.get("sy", 0)), HOUSE_ROOF_CLEARANCE_M * WORLD_PROP_SCALE / 2)
             for row in huts
         )
+        assert all(float(row.get("sx", 0)) > 0 and float(row.get("sz", 0)) > 0 for row in huts)
         docks = [
             row
             for row in world_rows
@@ -354,7 +414,9 @@ def main() -> int:
         ]
         assert docks
         assert all(
-            abs(float(row.get("sx", 0)) - float(row.get("sy", 0))) <= 0.05
+            math.isclose(float(row.get("sx", 0)), 1.10 * ISLAND_LAYOUT_SCALE, abs_tol=0.001)
+            and math.isclose(float(row.get("sy", 0)), 1.40 * WORLD_PROP_SCALE, abs_tol=0.001)
+            and math.isclose(float(row.get("sz", 0)), 1.20 * ISLAND_LAYOUT_SCALE, abs_tol=0.001)
             for row in docks
         )
         assert initial["render"]["authored_asset_renderer"] == (
@@ -364,18 +426,20 @@ def main() -> int:
         assert initial["render"]["presentation"]["fallback_mode"] == render.DOS_2D
         assert initial["render"]["presentation"]["simulation_unchanged"] is True
         assert initial["render"]["fallback"]["schema"] == fallback.SCHEMA
-        assert len(initial["render"]["fallback"]["entities"]) == 47
+        assert len(initial["render"]["fallback"]["entities"]) == expected_render_entities
         assert initial["player"]["movement_mode"] == "GROUND"
         assert initial["controller"]["model"] == "WOW_CLASSIC_THIRD_PERSON"
         assert initial["controller"]["input_space"] == "CHARACTER_FORWARD_RIGHT"
         assert initial["controller"]["movement_grammar"] == (
-            "W_S_MOVE_A_D_TURN_Q_E_STRAFE"
+            "W_S_MOVE_A_D_TURN_E_INTERACT_Q_GRAPPLE"
         )
         assert initial["keybindings"]["schema"] == input_contract.SCHEMA
         assert initial["keybindings"]["bindings"]["TURN_LEFT"][0] == "A"
         assert initial["keybindings"]["bindings"]["TURN_RIGHT"][0] == "D"
-        assert initial["keybindings"]["bindings"]["STRAFE_LEFT"] == ["Q"]
-        assert initial["keybindings"]["bindings"]["STRAFE_RIGHT"] == ["E"]
+        assert initial["keybindings"]["bindings"]["STRAFE_LEFT"] == []
+        assert initial["keybindings"]["bindings"]["STRAFE_RIGHT"] == []
+        assert initial["keybindings"]["bindings"]["MOVE_FORWARD"][0] == "W"
+        assert initial["keybindings"]["bindings"]["MOVE_BACK"][0] == "S"
         assert initial["addons"]["schema"] == addons.SCHEMA
         assert initial["addons"]["active_count"] == len(addons.ADDON_DEFINITIONS)
         assert any(
@@ -383,12 +447,26 @@ def main() -> int:
             for row in initial["addons"]["addons"]
         )
         assert input_contract.action_for_key(initial["keybindings"], "Q") == [
-            "STRAFE_LEFT"
+            "GRAPPLE"
         ]
+        assert input_contract.action_for_key(initial["keybindings"], "E") == ["INTERACT"]
+        assert input_contract.normalize_bindings({"bindings": {}})["bindings"][
+            "PRIMARY_ATTACK"
+        ] == ["T"]
+        assert input_contract.normalize_bindings({"bindings": {"PRIMARY_ATTACK": []}})[
+            "bindings"
+        ]["PRIMARY_ATTACK"] == []
+        legacy_bindings = input_contract.normalize_bindings({
+            "bindings": {"PRIMARY_ATTACK": ["V"], "TOGGLE_HOVERBOARD": ["V"]}
+        })
+        assert legacy_bindings["bindings"]["PRIMARY_ATTACK"] == ["T"]
+        assert legacy_bindings["bindings"]["TOGGLE_HOVERBOARD"] == ["V"]
         remapped = runtime.set_keybinding("STRAFE_LEFT", "T")
         assert remapped["keybinding_result"]["ok"] is True
         assert remapped["keybindings"]["bindings"]["STRAFE_LEFT"][0] == "T"
         assert "T" not in remapped["keybindings"]["bindings"]["STRAFE_RIGHT"]
+        assert input_contract.action_for_key(remapped["keybindings"], "T") == ["STRAFE_LEFT"]
+        assert remapped["keybindings"]["bindings"]["PRIMARY_ATTACK"] == []
         addon_off = runtime.set_addon("NPC_TRACKER", False)
         assert addon_off["addon_result"]["ok"] is True
         assert not next(
@@ -403,6 +481,10 @@ def main() -> int:
             settings_runtime.reset()
             restored_settings = settings_runtime.load_state()
             assert restored_settings["keybindings"]["bindings"]["STRAFE_LEFT"][0] == "T"
+            assert restored_settings["keybindings"]["bindings"]["PRIMARY_ATTACK"] == []
+            assert input_contract.action_for_key(restored_settings["keybindings"], "T") == [
+                "STRAFE_LEFT"
+            ]
             assert not next(
                 row for row in restored_settings["addons"]["addons"]
                 if row["id"] == "NPC_TRACKER"
@@ -434,8 +516,8 @@ def main() -> int:
         assert initial["assets"]["selected"]["status"] == "READY"
         assert initial["assets"]["selected"]["mode"] == "AUTHORED_SKINNED"
         assert initial["assets"]["selected"]["format"] == "GLTF2"
-        assert initial["assets"]["selected"]["skeleton"]["joints"] == 18
-        assert initial["assets"]["selected"]["animations"] == 4
+        assert initial["assets"]["selected"]["skeleton"]["joints"] == 61
+        assert initial["assets"]["selected"]["animations"] == 58
         assert initial["assets"]["character_visual"] == {
             "policy": assets.CHARACTER_VISUAL_POLICY,
             "preferred": assets.CHARACTER_VISUAL_PREFERRED,
@@ -452,14 +534,14 @@ def main() -> int:
             "READY"
         )
         assert initial["render"]["asset_instances"] == {
-            "authored_requested": 7,
-            "procedural_requested": 1,
-            "preview_fallback": 3,
+            "authored_requested": expected_character_count,
+            "procedural_requested": 0,
+            "preview_fallback": 0,
             "budget": assets.MAX_AUTHORED_INSTANCES,
         }
         assert initial["render"]["item_asset_instances"] == {
-            "authored_requested": 0,
-            "procedural_requested": 8,
+            "authored_requested": 8,
+            "procedural_requested": 0,
             "primitive_fallback": 0,
             "budget": assets.MAX_AUTHORED_ITEM_INSTANCES,
         }
@@ -473,9 +555,9 @@ def main() -> int:
             for row in initial["render"]["entities"]
             if row.get("kind") in {"PLAYER", "NPC", "ACTOR"}
         ]
-        assert len(character_rows) == 11
-        assert [row["asset"]["instance_rank"] for row in character_rows[:8]] == list(
-            range(8)
+        assert len(character_rows) == expected_character_count
+        assert [row["asset"]["instance_rank"] for row in character_rows] == list(
+            range(expected_character_count)
         )
         assert character_rows[0]["kind"] == "PLAYER"
         assert character_rows[0]["asset"]["mode"] == "AUTHORED_SKINNED"
@@ -484,8 +566,7 @@ def main() -> int:
         assert npc_rows
         assert all(row["asset"]["mode"] == "AUTHORED_SKINNED" for row in npc_rows)
         assert all(
-            row["asset"]["mode"]
-            in {assets.PROCEDURAL_CHARACTER_MODE, "PROCEDURAL_BUDGET", "PREVIEW_FALLBACK"}
+            row["asset"]["mode"] == "AUTHORED_SKINNED"
             for row in actor_rows
         )
         moving_snapshot = runtime.step()
@@ -510,7 +591,7 @@ def main() -> int:
             for row in moving_render["render"]["entities"]
             if row.get("kind") in {"PLAYER", "NPC", "ACTOR"}
         ]
-        assert len(moving_character_rows) == 11
+        assert len(moving_character_rows) == expected_character_count
         assert moving_character_rows[0]["asset"]["mode"] == "AUTHORED_SKINNED"
         assert all(
             row["asset"]["mode"] == "AUTHORED_SKINNED"
@@ -518,21 +599,27 @@ def main() -> int:
             if row["kind"] == "NPC"
         )
         assert all(
-            row["asset"]["mode"]
-            in {assets.PROCEDURAL_CHARACTER_MODE, "PROCEDURAL_BUDGET", "PREVIEW_FALLBACK"}
+            row["asset"]["mode"] == "AUTHORED_SKINNED"
             for row in moving_character_rows
             if row["kind"] == "ACTOR"
         )
         assert initial["world"]["schema"] == "gg.game-engine.world.v1"
         assert initial["world"]["streaming"]["visible_zones"] is False
         expected_loaded_cells = (2 * DEFAULT_INTEREST_RADIUS + 1) ** 2
-        expected_render_cells = (2 * DEFAULT_RENDER_RADIUS + 1) ** 2
+        # The normal third-person camera uses the nearby 4-cell render ring;
+        # the larger profile cap is reserved for the zoomed-out editor camera.
+        expected_render_radius = 4
+        expected_render_cells = (2 * expected_render_radius + 1) ** 2
+        assert expected_render_radius <= DEFAULT_RENDER_RADIUS
+        assert expected_render_radius <= render.PROFILES[initial["render"]["profile"]][
+            "max_render_radius"
+        ]
         assert len(initial["world"]["streaming"]["loaded_cells"]) == expected_loaded_cells
         assert initial["world"]["streaming"]["interest_radius"] == DEFAULT_INTEREST_RADIUS
         assert initial["world"]["streaming"]["coverage_diameter_m"] == 112.0
         assert len(initial["world"]["streaming"]["render_cells"]) == expected_render_cells
-        assert initial["world"]["streaming"]["render_radius"] == DEFAULT_RENDER_RADIUS
-        assert initial["world"]["streaming"]["render_coverage_diameter_m"] == 336.0
+        assert initial["world"]["streaming"]["render_radius"] == expected_render_radius
+        assert initial["world"]["streaming"]["render_coverage_diameter_m"] == 144.0
         assert initial["world"]["streaming"]["loaded_cells"][0]["lod"] == "NEAR"
         assert any(
             cell["lod"] == "HORIZON"
@@ -561,7 +648,9 @@ def main() -> int:
         assert len(initial["terrain"]["cells"][0]["normal_grid"]) == 25 * 3
         assert initial["terrain"]["streaming"]["lod_counts"]["NEAR"] == 1
         assert initial["terrain"]["streaming"]["render_triangles"] > 0
-        assert len(initial["terrain"]["streaming"]["biome_counts"]) >= 3
+        assert set(initial["terrain"]["streaming"]["biome_counts"]) == {
+            "CLIFF", "FIRST_ISLAND"
+        }
         assert initial["navigation"]["schema"] == nav.SCHEMA
         assert initial["navigation"]["model"] == "TILED_HEIGHTFIELD_ASTAR"
         assert initial["navigation"]["streaming"]["loaded_cells"] == expected_loaded_cells
@@ -579,15 +668,17 @@ def main() -> int:
         nav_path = nav.plan_path(nav_tiles, 0.0, 0.0, 12.0, 12.0)
         assert nav_path["status"] == "READY"
         assert nav_path["waypoints"]
-        assert controller.movement_direction(0.0, 1.0, 0.0) == (0.0, -1.0, 1.0)
-        assert controller.movement_direction(0.0, 0.0, 1.0) == (1.0, 0.0, 1.0)
+        # Approved Blender crew meshes face +Z at yaw zero. Movement and
+        # optional strafe must agree with that facing, independent of camera orbit.
+        assert controller.movement_direction(0.0, 1.0, 0.0) == (0.0, 1.0, 1.0)
+        assert controller.movement_direction(0.0, 0.0, 1.0) == (-1.0, 0.0, 1.0)
         controller_step = controller.ground_step(
             camera_yaw=0.0,
             forward=1.0,
             strafe=0.0,
             dt=1.0 / 60.0,
         )
-        assert controller_step["vz"] < 0.0
+        assert controller_step["vz"] > 0.0
         turn_step = controller.ground_step(
             character_yaw=0.0,
             forward=0.0,
@@ -606,7 +697,7 @@ def main() -> int:
             current_yaw=0.0,
             dt=1.0 / 60.0,
         )
-        assert strafe_step["vx"] > 0.0
+        assert strafe_step["vx"] < 0.0
         assert abs(strafe_step["yaw"]) < 0.000001
         camera_independent = controller.ground_step(
             camera_yaw=90.0,
@@ -617,9 +708,9 @@ def main() -> int:
             dt=1.0 / 60.0,
         )
         assert abs(camera_independent["vx"]) < 0.000001
-        assert camera_independent["vz"] < 0.0
-        assert controller.character_basis(0.0)["forward"] == (0.0, -1.0)
-        assert controller.character_basis(0.0)["right"] == (1.0, 0.0)
+        assert camera_independent["vz"] > 0.0
+        assert controller.character_basis(0.0)["forward"] == (0.0, 1.0)
+        assert controller.character_basis(0.0)["right"] == (-1.0, 0.0)
         runtime.reset()
         runtime.set_input(json.dumps({"turn": 1.0}))
         before_turn = runtime.snapshot()["player"]
@@ -677,10 +768,12 @@ def main() -> int:
             initial["terrain"]["cells"][0]
         )
         assert initial_geometry is not None
-        assert initial_geometry.stride() == geometry.VERTEX_STRIDE
-        assert initial_geometry.attributeCount() == 4
+        assert initial_geometry.stride() == geometry.TERRAIN_VERTEX_STRIDE
+        assert initial_geometry.attributeCount() == 5
+        assert initial_geometry.attribute(3).semantic == QQuick3DGeometry.Attribute.ColorSemantic
+        assert initial_geometry.attribute(3).offset == 32
         assert len(initial_geometry.vertexData()) == (
-            (25 + 4 * 5 * 2) * geometry.VERTEX_STRIDE
+            (25 + 4 * 5 * 2) * geometry.TERRAIN_VERTEX_STRIDE
         )
         assert len(initial_geometry.indexData()) == 64 * 3 * 2
         character_geometry = geometry.build_character_geometry()
@@ -841,22 +934,23 @@ def main() -> int:
         assert terrain.cell_view(0, 0, lod="ORBIT")["geometry"]["representation"] == "POINT_DETAIL"
         assert initial["render"]["schema"] == "gg.game-engine.render.v1"
         assert initial["render"]["measurement"]["kind"] == "CPU_HOST_SNAPSHOT_TIMING"
-        assert initial["render"]["instancing"]["per_tick_allocations"] == 0
+        assert initial["render"]["instancing"]["strategy"] == "BOUNDED_QML_MODELS_FOR_WORLD_ENTITIES"
+        assert initial["render"]["instancing"]["native_bridge"] == "QQUICK3D_INSTANCING_LINKED_FOR_FLORA"
         assert {row["name"] for row in initial["render"]["optional_layers"]} == {
             "DLSS",
             "FSR",
             "XeSS",
             "GPU_TIMESTAMPS",
         }
-        assert initial["content"]["abilities"] == 3
-        assert initial["content"]["items"] == 12
-        assert initial["content"]["ambient_life"] == 4
+        assert initial["content"]["abilities"] == 7
+        assert initial["content"]["items"] == len(starter["items"])
+        assert initial["content"]["ambient_life"] == len(life_spawns)
         assert initial["content"]["vendors"] == 1
         assert initial["economy"]["schema"] == economy.SCHEMA
         assert initial["economy"]["wallet"]["gold"] == economy.STARTER_PLAYER_GOLD
-        assert initial["items"]["catalog"]["loot_tables"] == 2
+        assert initial["items"]["catalog"]["loot_tables"] == 187
         assert initial["items"]["catalog"]["insertables"] == 12
-        assert initial["items"]["catalog"]["asset_rows"] == 35
+        assert initial["items"]["catalog"]["asset_rows"] == 74
         assert initial["items"]["counts"]["by_location"]["GROUND"] == 4
         assert initial["items"]["interaction_target"]["action"] == "PICKUP"
         assert initial["render"]["item_instances"]["ground"] == 4
@@ -929,8 +1023,18 @@ def main() -> int:
         assert remembered.line_of_sight is False
         perception_runtime = GameEngineRuntime()
         try:
-            perception_runtime._x[0] = 3.6
-            perception_runtime._z[0] = 3.4
+            guardian = next(
+                index for index in perception_runtime._npc_indices
+                if perception_runtime._npc_ids[index] == "npc-guardian-01"
+            )
+            # A controlled open-ground pair keeps the visibility and memory
+            # checks independent of the enlarged authored village placements.
+            with perception_runtime._lock:
+                perception_runtime._x[guardian] = 0.0
+                perception_runtime._z[guardian] = 3.0
+                perception_runtime._y[guardian] = perception_runtime._terrain_height_locked(0, 3) + 0.65
+                perception_runtime._x[0] = 0.0
+                perception_runtime._z[0] = 0.0
             perception_runtime.step()
             visible_agent = next(
                 row for row in perception_runtime.snapshot()["npc"]["agents"]
@@ -963,10 +1067,17 @@ def main() -> int:
 
         occluded_runtime = GameEngineRuntime()
         try:
-            occluded_runtime._x[0] = 6.0
-            occluded_runtime._z[0] = 3.5
+            guardian = next(
+                index for index in occluded_runtime._npc_indices
+                if occluded_runtime._npc_ids[index] == "npc-guardian-01"
+            )
             with occluded_runtime._lock:
-                wall_x, wall_z = 6.75, 4.0
+                occluded_runtime._x[0] = 0.0
+                occluded_runtime._z[0] = 0.0
+                occluded_runtime._x[guardian] = 0.0
+                occluded_runtime._z[guardian] = 2.8
+                occluded_runtime._y[guardian] = occluded_runtime._terrain_height_locked(0, 2.8) + 0.65
+                wall_x, wall_z = 0.0, 1.4
                 wall = occluded_runtime._spawn_entity_locked(
                     "WALL",
                     wall_x,
@@ -997,8 +1108,13 @@ def main() -> int:
             deterministic_b.shutdown()
         interaction_runtime = GameEngineRuntime()
         try:
-            interaction_runtime._x[0] = 6.8
-            interaction_runtime._z[0] = 5.6
+            wanderer = next(
+                index
+                for index in interaction_runtime._npc_indices
+                if interaction_runtime._npc_ids[index] == "npc-wanderer-01"
+            )
+            interaction_runtime._x[0] = interaction_runtime._x[wanderer]
+            interaction_runtime._z[0] = interaction_runtime._z[wanderer]
             interaction_view = interaction_runtime.snapshot()["npc"]["interaction"]
             assert interaction_view["available"] is True
             interaction_result = interaction_runtime.npc_interact()
@@ -1100,13 +1216,13 @@ def main() -> int:
         assert runtime.select_spec("WARDEN")["progression"]["spec"] == "WARDEN"
         placed_runtime = runtime.editor_place("RAMP")
         assert placed_runtime["editor"]["placement_count"] == 1
-        assert placed_runtime["simulation"]["active_entities"] == 40
+        assert placed_runtime["simulation"]["active_entities"] == expected_sim_entities + 1
         undo_runtime = runtime.editor_undo()
         assert undo_runtime["editor"]["placement_count"] == 0
-        assert undo_runtime["simulation"]["active_entities"] == 39
+        assert undo_runtime["simulation"]["active_entities"] == expected_sim_entities
         placed_npc = runtime.editor_place("NPC")
         assert placed_npc["editor"]["placement_count"] == 1
-        assert placed_npc["simulation"]["active_entities"] == 40
+        assert placed_npc["simulation"]["active_entities"] == expected_sim_entities + 1
         assert placed_npc["simulation"]["active_npcs"] == 7
         assert any(
             row["kind"] == "NPC" for row in placed_npc["render"]["entities"]
@@ -1196,7 +1312,16 @@ def main() -> int:
         assert invalid_mode["error"] == "GAME_ENGINE_MOVEMENT_MODE_INVALID"
         assert invalid_mode["allowed"] == list(MOVEMENT_MODES)
 
-        swim = runtime.set_movement_mode("SWIM")
+        # The island origin is dry land. Exercise swimming in real deep water
+        # and start at its moving surface, rather than inside the terrain.
+        with runtime._lock:
+            runtime._x[0], runtime._z[0] = 0.0, -300.0
+            assert runtime._water_depth_locked(0, -300) > 5.0
+        runtime.set_movement_mode("SWIM")
+        with runtime._lock:
+            runtime._y[0] = runtime._water_sample_locked(0, -300)["height_m"] + 0.18
+            runtime._vx[0] = runtime._vy[0] = runtime._vz[0] = 0.0
+        swim = runtime.snapshot()
         assert swim["player"]["movement_mode"] == "SWIM"
         assert swim["player"]["medium"] == "WATER"
         assert swim["terrain"]["player_surface"]["medium"] == "WATER"
@@ -1213,7 +1338,7 @@ def main() -> int:
             runtime.step()
         swimming = runtime.snapshot()
         assert swimming["player"]["movement_mode"] == "SWIM"
-        assert swimming["player"]["y"] > 0.65
+        assert swimming["player"]["y"] > swim["player"]["y"]
 
         runtime.set_movement_mode("FLY")
         runtime.set_input(
@@ -1232,6 +1357,7 @@ def main() -> int:
         assert flying["player"]["y"] > swimming["player"]["y"]
 
         runtime.set_movement_mode("GROUND")
+        runtime.reset()
 
         runtime.set_input(json.dumps({"throttle": 1, "steer": 0, "boost": True}))
         for _ in range(240):

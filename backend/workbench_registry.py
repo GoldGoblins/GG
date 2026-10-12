@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - desktop target is POSIX
     fcntl = None
 
 
-STATE = Path.home() / ".local" / "state" / "goldgoblins" / "gg-ai-desktop"
+STATE = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop")
 REGISTRY_PATH = STATE / "workbench-registry-v1.json"
 SCHEMA = "gg.ai-desktop.workbench-registry.v1"
 
@@ -233,16 +233,16 @@ BUILTIN_EXTENSIONS: tuple[dict[str, Any], ...] = (
         views=("OSINT",),
     ),
     _contribution(
-        "gg.surface.qip",
-        "QIP Lab",
+        "gg.surface.research",
+        "Research",
         kind="SURFACE",
         group="WORKSPACE",
-        description="Local-only component and WASM lab.",
+        description="Shared evidence and method memory, WASM lab, reverse engineering, web-skill checks, SQL previews and eval traces.",
         activation="onCommand",
-        host_kind="QIP",
+        host_kind="RESEARCH",
         surface_id="workspace",
-        commands=("workspace.QIP",),
-        views=("QIP",),
+        commands=("workspace.RESEARCH",),
+        views=("RESEARCH", "BACKLOG", "EVIDENCE", "MEMORY", "WEB SKILLS", "SQL", "EVALS", "WASM LAB", "REVERSE"),
     ),
     _contribution(
         "gg.surface.media",
@@ -304,18 +304,7 @@ BUILTIN_EXTENSIONS: tuple[dict[str, Any], ...] = (
         commands=("workspace.FLOW",),
         views=("FLOW",),
     ),
-    _contribution(
-        "gg.surface.research",
-        "Research Desk",
-        kind="SURFACE",
-        group="WORKSPACE",
-        description="Local backlog, evidence, method memory, web-skill checks, SQL previews and eval traces.",
-        activation="onCommand",
-        host_kind="RESEARCH",
-        surface_id="workspace",
-        commands=("workspace.RESEARCH",),
-        views=("RESEARCH", "BACKLOG", "EVIDENCE", "MEMORY", "WEB SKILLS", "SQL", "EVALS"),
-    ),
+
 )
 
 _BUILTIN_BY_ID = {row["id"]: row for row in BUILTIN_EXTENSIONS}
@@ -324,6 +313,8 @@ _HOST_TO_ID = {
     for row in BUILTIN_EXTENSIONS
     if row.get("hostKind")
 }
+# Older saved QIP choices resolve to the single Research contribution.
+_HOST_TO_ID["QIP"] = _HOST_TO_ID["RESEARCH"]
 _ID = re.compile(r"^[a-z][a-z0-9._-]{0,47}$")
 _PROFILE_KEY = re.compile(r"^[a-z][a-z0-9._-]{0,47}/[a-z][a-z0-9._-]{0,47}$")
 

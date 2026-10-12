@@ -132,7 +132,13 @@ def main() -> int:
         promoted = runtime.snapshot()
         assert promoted["living_world"]["promoted_count"] == 1
         assert promoted["simulation"]["active_npcs"] == 7
-        assert promoted["simulation"]["render_entity_count"] == 47
+        # Promotion replaces one ambient presentation with one physical
+        # presentation. Saved scenery can grow without changing that rule.
+        rows=promoted['render']['entities']
+        assert promoted['simulation']['render_entity_count']==len(rows)<=96
+        assert len({row['id'] for row in rows})==len(rows)
+        for identity in promoted['living_world']['promoted_ids']:
+            assert sum(row['id']==identity or (row.get('individual') or {}).get('id')==identity for row in rows)==1
         assert promoted["social"]["relationship_count"] >= 1
 
         saved = runtime.save_state()

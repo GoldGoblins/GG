@@ -21,8 +21,14 @@ FORBIDDEN_CONFIG_KEYS = {"password", "passphrase", "secret", "token"}
 PUT_ALLOWLIST = (
     "robots.txt",
     "wp-content/mu-plugins/gg-site-completion.php",
+    "wp-content/mu-plugins/gg-site-local-legal.php",
+    "wp-content/uploads/gg-local-site-sync.json",
+    "wp-content/debug.log",
+    "wp-content/uploads/gg-local-site-sync-status.json",
+    "error_log",
     "wp-content/themes/blankslate/header.php",
     "wp-content/themes/blankslate/page.php",
+    "wp-content/themes/blankslate/footer.php",
 )
 GET_ALLOWLIST = PUT_ALLOWLIST
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")

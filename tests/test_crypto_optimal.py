@@ -62,6 +62,8 @@ def main() -> int:
     assert report["parallel_agent_brain"] == "FORBIDDEN"
     assert report["model_agents"] is False
     assert "crypto_desk.front_man" in report["ingredients"]
+    assert "fee_hold" in report["ingredients"]
+    assert int(report["fee_hold_bps"]) == 2 * 30 + 10
     assert "pnl_sol" in report
     assert int(report.get("fills") or 0) >= 1
 

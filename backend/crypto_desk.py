@@ -12,14 +12,14 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from backend import crypto_vol
+from backend import crypto_vol, crypto_backtest
 
 
 SCHEMA = "gg.crypto.desk.v1"
 WARMUP = 40
 MAX_TRADES = 8
-FEE_BPS = 12
-SLIPPAGE_BPS = 5
+FEE_BPS = crypto_backtest.FEE_BPS
+SLIPPAGE_BPS = crypto_backtest.SLIPPAGE_BPS
 VOL_LEAD_Z = 1.25
 PRICE_QUIET_BPS = 25.0
 CROWD_MOVE_BPS = 80.0
@@ -227,8 +227,16 @@ def run_desk(frames: dict[str, Any]) -> dict[str, Any]:
     fills: list[dict[str, Any]] = []
     last_board: dict[str, Any] = {}
     red_count = 0
+    frame = next((frames[key] for key in ("1h", "15m", "5m", "1m") if key in frames), next(iter(frames.values()), {}))
+    times = list(frame.get("times") or [])
+    day = None
+    trades_today = 0
 
     for index in range(WARMUP, len(closes)):
+        stamp = int(times[index]) if index < len(times) else index * 3600
+        current_day = stamp // 86400
+        if current_day != day:
+            day, trades_today = current_day, 0
         seat_456 = _seat_456(closes, volumes, index)
         seat_067 = _seat_067(closes, volumes, index)
         seat_218 = _seat_218(closes, index)
@@ -242,7 +250,7 @@ def run_desk(frames: dict[str, Any]) -> dict[str, Any]:
             seat_218,
             seat_240,
             has_volume=has_volume,
-            trades_today=len(fills),
+            trades_today=trades_today,
             in_position=in_position,
             thin=thin,
         )
@@ -260,7 +268,7 @@ def run_desk(frames: dict[str, Any]) -> dict[str, Any]:
         if man["light"] == "RED":
             red_count += 1
             if in_position and "INVALIDATION" in man["reasons"]:
-                cash = units * price * (1.0 - friction)
+                cash += units * price * (1.0 - friction)
                 fills.append(
                     {
                         "side": "SELL",
@@ -276,8 +284,9 @@ def run_desk(frames: dict[str, Any]) -> dict[str, Any]:
             spend = cash * min(1.0, max(0.0, scale))
             if spend <= 0:
                 continue
-            units = spend / (price * (1.0 + friction))
+            units = spend * (1.0 - friction) / price
             cash -= spend
+            trades_today += 1
             entry = price
             fills.append(
                 {
@@ -290,7 +299,7 @@ def run_desk(frames: dict[str, Any]) -> dict[str, Any]:
 
     if units > 0:
         price = closes[-1]
-        cash = units * price * (1.0 - friction)
+        cash += units * price * (1.0 - friction)
         fills.append({"side": "SELL", "reason": "EOD_MARK", "price": round(price, 6)})
         units = 0.0
 

@@ -7,6 +7,7 @@ Ingredients that already run in this desktop:
 * DESK Front Man — hard veto only: crowd spike, no volume, day cap, invalidation
 * thin tape — smaller clip, not a skip
 * HYBRID barriers — stop / take / trail / time on the tactical clip
+* fee hold — a time exit inside the round-trip fee band stays open
 * CORE_KEEP — half the SOL bag is not for the clip
 
 This module never places venue orders and never arms mainnet.
@@ -19,6 +20,7 @@ from typing import Any
 from backend import crypto_desk
 from backend import crypto_trader
 from backend import crypto_vol
+from backend import crypto_backtest
 from backend.crypto_hybrid import HybridConfig, PaperPositionExecutor
 from backend.crypto_indicators import rsi as rsi_series
 from backend.crypto_trader import (
@@ -39,6 +41,8 @@ CLIP_FRACTION = 0.35
 DEGEN_BUY = 38.0
 THIN_SIZE = 0.35
 MAX_BARS = 4000
+# Two DEX fees plus a small slip. A clock exit inside this band only pays the venue.
+FEE_HOLD_BPS = 2 * FEE_BPS + 10
 MAINNET = "NOT_ARMED"
 HARD_VETO = frozenset({"CROWD_SPIKE", "NO_VOLUME", "TRADE_CAP"})
 
@@ -49,6 +53,7 @@ def live_gate(
     *,
     in_position: bool,
     trades_today: int = 0,
+    entry_price: float = 0.0,
 ) -> dict[str, Any]:
     """Front Man + vol size for the live tick. Does not call a model."""
     n = min(len(closes), len(volumes) if volumes else len(closes))
@@ -64,14 +69,13 @@ def live_gate(
             "mainnet": MAINNET,
         }
     index = n - 1
-    padded_vol = list(volumes[:n]) if volumes else [1.0] * n
+    padded_vol = list(volumes[:n]) if volumes else [0.0] * n
     if len(padded_vol) < n:
-        padded_vol.extend([padded_vol[-1] if padded_vol else 1.0] * (n - len(padded_vol)))
+        padded_vol.extend([0.0] * (n - len(padded_vol)))
     seat_456 = crypto_desk._seat_456(closes[:n], padded_vol, index)
     seat_067 = crypto_desk._seat_067(closes[:n], padded_vol, index)
     seat_218 = crypto_desk._seat_218(closes[:n], index)
-    entry = float(closes[index])
-    seat_240 = crypto_desk._seat_240(closes[:n], index, entry if in_position else 0.0)
+    seat_240 = crypto_desk._seat_240(closes[:n], index, entry_price if in_position else 0.0)
     vol_z = crypto_desk._zscore(padded_vol[: index + 1], 24)
     thin = any(value > 0 for value in padded_vol) and vol_z <= crypto_desk.THIN_VOLUME_Z
     man = crypto_desk.front_man(
@@ -138,23 +142,24 @@ def _gate_at(
     rsi_all: list[float | None],
     sigmas: list[float],
     states: list[str],
-    uncond: float,
+    uncond: list[float],
     in_position: bool,
     trades_today: int,
+    entry_price: float = 0.0,
 ) -> dict[str, Any]:
     """O(window) gate using once-per-run vol/RSI series."""
     n = index + 1
     padded_vol = volumes[:n]
     seat_456 = crypto_desk._seat_456(closes[:n], padded_vol, index)
     seat_067 = crypto_desk._seat_067(closes[:n], padded_vol, index)
-    entry = float(closes[index])
-    seat_240 = crypto_desk._seat_240(closes[:n], index, entry if in_position else 0.0)
+    seat_240 = crypto_desk._seat_240(closes[:n], index, entry_price if in_position else 0.0)
     vol_z = crypto_desk._zscore(padded_vol, 24)
     thin = any(value > 0 for value in padded_vol) and vol_z <= crypto_desk.THIN_VOLUME_Z
     ret_i = index - 1
-    sigma = sigmas[ret_i] if 0 <= ret_i < len(sigmas) else uncond
+    baseline = uncond[ret_i] if 0 <= ret_i < len(uncond) else 1e-6
+    sigma = sigmas[ret_i] if 0 <= ret_i < len(sigmas) else baseline
     regime = states[ret_i] if 0 <= ret_i < len(states) else "UNKNOWN"
-    scale = crypto_vol.size_scale(sigma, uncond, regime)
+    scale = crypto_vol.size_scale(sigma, baseline, regime)
     if scale <= 0:
         scale = 0.75
     if thin:
@@ -218,7 +223,7 @@ def apply_live_votes(
     return out
 
 
-def _precompute(closes: list[float]) -> tuple[list[float | None], list[float], list[str], float]:
+def _precompute(closes: list[float]) -> tuple[list[float | None], list[float], list[str], list[float]]:
     rsi_all: list[float | None]
     try:
         rsi_all = list(rsi_series(closes, 14))
@@ -229,7 +234,7 @@ def _precompute(closes: list[float]) -> tuple[list[float | None], list[float], l
     hmm = crypto_vol.hmm_two_state(returns)
     sigmas = [float(x) for x in (garch.get("sigma") or [])]
     states = [str(x) for x in (hmm.get("states") or [])]
-    uncond = float(garch.get("unconditional") or 0.0)
+    uncond = list(garch.get("baseline_sigma") or [])
     return rsi_all, sigmas, states, uncond
 
 
@@ -240,7 +245,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     closes = [float(x) for x in (src.get("closes") or [])]
     highs = [float(x) for x in (src.get("highs") or closes)]
     lows = [float(x) for x in (src.get("lows") or closes)]
-    volumes = [float(x) for x in (src.get("volumes") or [1.0] * len(closes))]
+    volumes = [float(x) for x in (src.get("volumes") or [0.0] * len(closes))]
     n = min(len(closes), len(highs), len(lows), len(volumes))
     if n < WARMUP + 16:
         raise RuntimeError("CRYPTO_HISTORY")
@@ -259,19 +264,25 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         n = MAX_BARS
     rsi_all, sigmas, states, uncond = _precompute(closes)
 
-    seed_px = _price_atoms(closes[WARMUP])
+    begin = crypto_backtest.start_index(src)
+    resume = crypto_backtest.restored("optimal")
+    bar_sec = int(crypto_trader.BAR_SEC[primary])
+    seed_px = _price_atoms(closes[begin])
     if seed_px <= 0:
         raise RuntimeError("CRYPTO_PRICE")
-    start_sol = int(START_SOL)
-    core_sol = int(start_sol * CORE_KEEP)
-    float_sol = start_sol - core_sol
+    start_sol = int(crypto_backtest.START_USD * 1_000_000) * SOL_SCALE // seed_px
+    seeded_sol = start_sol * (10000 - crypto_backtest.EXECUTION_BPS) // 10000
+    core_sol = int(seeded_sol * CORE_KEEP)
+    float_sol = seeded_sol - core_sol
+    float_cost_usd = (float_sol * seed_px // SOL_SCALE) * 10000 // (10000 - crypto_backtest.EXECUTION_BPS)
     cash_usd = 0
     cfg = HybridConfig(
         use_timesfm=False,
         cooldown_bars=4,
         max_trades_day=MAX_TRADES_DAY,
     )
-    executor: PaperPositionExecutor | None = None
+    executor: PaperPositionExecutor | None = PaperPositionExecutor(begin, times[begin], closes[begin], cfg) if float_sol > 0 else None
+    cooldown_until_i = 0
     lots: list[dict[str, Any]] = []
     fills_today = 0
     current_day = ""
@@ -284,11 +295,26 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "invalidation": 0,
         "band_sell": 0,
     }
+    fee_holds = 0
+    accounting: list[dict[str, Any]] = []
 
     def _day(ts: int) -> str:
         return str(ts // 86400)
 
-    for index in range(WARMUP, n):
+    if resume:
+        if resume["config"] != cfg.as_dict():
+            raise ValueError("CRYPTO_PAPER_PARAMETERS_CHANGED")
+        core_sol = resume["core_sol"]
+        float_sol = resume["float_sol"]
+        float_cost_usd = resume["float_cost_usd"]
+        cash_usd = resume["cash_usd"]
+        fills_today = resume["fills_today"]
+        current_day = resume["current_day"]
+        executor = crypto_backtest.executor_from(resume.get("executor"), times, bar_sec, cfg)
+        cooldown_until_i = (int(resume["cooldown_until_ts"]) - times[0]) // bar_sec
+    start = n - 1 if resume else begin
+    for index in range(start, n):
+        accounting.append({"ts": times[index], "usd": (core_sol + float_sol) / SOL_SCALE * closes[index] + cash_usd / 1_000_000})
         day = _day(times[index])
         if day != current_day:
             current_day = day
@@ -304,13 +330,20 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
             uncond=uncond,
             in_position=in_pos,
             trades_today=fills_today,
+            entry_price=float(executor.entry_px) if executor is not None else 0.0,
         )
         px = closes[index]
         px_atoms = _price_atoms(px)
         if px_atoms <= 0:
             continue
         if executor is not None:
-            hit = executor.check(index, highs[index], lows[index], px)
+            hit = executor.check(index, highs[index], lows[index], px, (src.get("opens") or [None] * n)[index])
+            if hit and hit[0] == "time_limit":
+                entry = max(1e-12, float(executor.entry_px))
+                move_bps = (float(px) - entry) / entry * 10_000.0
+                if 0.0 <= move_bps < FEE_HOLD_BPS:
+                    hit = None
+                    fee_holds += 1
             force_invalid = "INVALIDATION" in gate["reasons"]
             if hit or force_invalid or gate.get("allow_sell"):
                 reason = (
@@ -321,36 +354,44 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
                 exit_px = float(hit[1]) if hit else px
                 exit_atoms = _price_atoms(exit_px) or px_atoms
                 proceeds = float_sol * exit_atoms // SOL_SCALE
-                fee = proceeds * FEE_BPS // 10_000
+                fee = proceeds * crypto_backtest.EXECUTION_BPS // 10_000
                 net = max(0, proceeds - fee)
                 cash_usd += net
                 lots.append(
                     {
                         "id": "opt-" + str(index),
+                        "ts": times[index],
                         "side": "sell",
-                        "price": exit_px,
-                        "sol": float_sol / SOL_SCALE,
-                        "profit_usd": net,
+                        "price": exit_atoms,
+                        "sol": float_sol,
+                        "usd": net,
+                        "profit_usd": net - float_cost_usd,
+                        "venue": "optimal-paper",
+                        "closed": True,
                     }
                 )
                 barrier_counts[reason] = barrier_counts.get(reason, 0) + 1
                 float_sol = 0
+                float_cost_usd = 0
                 executor = None
+                cooldown_until_i = index + max(0, cfg.cooldown_bars)
                 fills_today += 1
+                accounting[-1]["usd"] = core_sol / SOL_SCALE * px + cash_usd / 1_000_000
                 continue
-        if executor is None and gate.get("allow_buy") and fills_today < MAX_TRADES_DAY:
+        if executor is None and gate.get("allow_buy") and fills_today < MAX_TRADES_DAY and index >= cooldown_until_i:
             if cash_usd > 0:
                 scale = float(gate.get("size_scale") or 0.0)
                 spend = int(cash_usd * min(1.0, max(0.15, scale * CLIP_FRACTION)))
                 if spend <= 0:
                     vetoes += 1
                     continue
-                fee = spend * FEE_BPS // 10_000
+                fee = spend * crypto_backtest.EXECUTION_BPS // 10_000
                 bought = (spend - fee) * SOL_SCALE // px_atoms
                 if bought <= 0:
                     continue
                 cash_usd -= spend
                 float_sol += bought
+                float_cost_usd += spend
             elif float_sol <= 0:
                 vetoes += 1
                 continue
@@ -358,17 +399,23 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
             lots.append(
                 {
                     "id": "opt-" + str(index),
+                    "ts": times[index],
                     "side": "buy",
-                    "price": px,
-                    "sol": float_sol / SOL_SCALE,
+                    "price": px_atoms,
+                    "sol": float_sol,
+                    "usd": float_cost_usd,
                     "profit_usd": 0,
+                    "venue": "optimal-paper",
+                    "closed": True,
                 }
             )
             fills_today += 1
+            accounting[-1]["usd"] = (core_sol + float_sol) / SOL_SCALE * px + cash_usd / 1_000_000
         elif executor is None:
             vetoes += 1
 
     last_px = _price_atoms(closes[-1])
+    accounting[-1]["usd"] = (core_sol + float_sol) / SOL_SCALE * closes[-1] + cash_usd / 1_000_000
     equity_sol = core_sol + float_sol + (
         cash_usd * SOL_SCALE // last_px if last_px else 0
     )
@@ -381,22 +428,26 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         last_close=closes[-1],
         start_sol=start_sol,
     )
-    return {
+    report = {
         "schema": SCHEMA,
         "book": "optimal",
+        "accounting": accounting,
         "mode": "PAPER_ONLY",
         "mainnet": MAINNET,
         "note": (
             "GG degen buy ≤38, vol-sized clips, Front Man only on spike/no-tape/cap, "
-            "thin tape smaller not skip, hybrid barriers, CORE_KEEP. Calculated risk."
+            "thin tape smaller not skip, hybrid barriers, fee-band hold, CORE_KEEP."
         ),
         "ingredients": [
             "crypto_trader.bands",
             "crypto_vol.size_scale",
             "crypto_desk.front_man",
             "crypto_hybrid.PaperPositionExecutor",
+            "fee_hold",
             "CORE_KEEP",
         ],
+        "fee_hold_bps": FEE_HOLD_BPS,
+        "fee_holds": fee_holds,
         "parallel_agent_brain": "FORBIDDEN",
         "model_agents": False,
         "vetoes": vetoes,
@@ -407,3 +458,14 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "win_rate": stats.get("win_rate"),
         "equity_sol": stats.get("equity_sol") or equity_sol / SOL_SCALE,
     }
+
+    crypto_backtest.checkpoint(report, "optimal", {"config": cfg.as_dict(),
+        "executor": crypto_backtest.executor_state(executor),
+        "cooldown_until_ts": times[0] + cooldown_until_i * bar_sec,
+        "core_sol": core_sol,
+        "float_sol": float_sol,
+        "float_cost_usd": float_cost_usd,
+        "cash_usd": cash_usd,
+        "fills_today": fills_today,
+        "current_day": current_day}, lots, core_sol + float_sol, cash_usd)
+    return report

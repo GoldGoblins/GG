@@ -21,9 +21,7 @@ SCHEMA = "gg.ai-desktop.chat-sessions.v1"
 MEMORY = "GoldGoblins"
 
 # Long GoldGoblins work chat (Konsole) — same memory, openable from CHATS.
-PROJECT_SESSIONS = (
-    ("01a01c8b-5b86-7150-bd01-be262a34eb0d", "GROK_TUI"),
-)
+PROJECT_SESSIONS = ()
 
 ENGINE_LABEL = {
     "GROK_TUI": "GROK TUI",

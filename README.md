@@ -4,6 +4,39 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
+
+## Patch notes · 2026-10-12 · GG AI Desktop updates since 2026-09-24
+
+**Chat and desktop.** Shared GROK TUI, GPTUI and FLOW TUI sessions now have
+updated history handling, context compilation and input behavior. The desktop
+also includes settings, workspace controls and task-scoped operator updates.
+The startup launcher paints the desktop before loading the Python backend.
+
+**RESEARCH.** Research, the QIP/WASM lab and GAMES share one workspace with
+supervised jobs and retained working state. The tools add asset discovery,
+dependency tracking, bounded collection batches, source context, candidate
+verification, route editing, rig trials and scene profiling. GPT, Grok,
+command-line tools and Blender use the same workflows.
+
+**OSINT.** The globe adds optional terrain and buildings, progressive feed
+loading and Swedish news. Navigation adds own-position accuracy, FOLLOW and
+route guidance. Optional nearby-radio information uses existing local
+NetworkManager/BlueZ caches with visible freshness information.
+
+**GAME ENGINE.** The engine workspace updates its shared renderer, camera,
+input and traversal handling, bounded asset import and dependency validation.
+Native world and presentation adapters, Lua/UI integration and inspection tools
+extend the engine's existing simulation and rendering interfaces.
+
+**CRYPTO.** The crypto workspace adds portfolio views, paper-bot improvements,
+strategy and indicator updates, and stronger handling of unreliable inputs.
+
+**EXT and tools.** Blender integration and shared authoring/analysis helpers
+are updated. Live visual observation is available through the desktop tools.
+
+Update with `git pull` and restart GG AI Desktop to load the new backend.
+
+
 ## Patch notes · 2026-09-24 · settings, OSINT scale and GAME ENGINE world systems
 
 This release collects the desktop work since the 2026-09-10 patch, through session 62.

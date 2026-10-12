@@ -165,3 +165,5 @@ button[aria-pressed="true"], button:hover {
   padding: 6px 8px;
 }
 .navrow { display: flex; gap: 5px; flex-wrap: wrap; }
+
+#map-credits { position:absolute; left:8px; bottom:4px; max-width:calc(100% - 325px); padding:2px 5px; font:9px monospace; color:#aab2ba; background:#05070cbb; z-index:2; pointer-events:none; }

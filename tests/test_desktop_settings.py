@@ -17,7 +17,6 @@ def main() -> int:
     saved_path = desktop_settings.SETTINGS_PATH
     scratch = Path(tempfile.mkdtemp(prefix="gg-desktop-settings-"))
     desktop_settings.SETTINGS_PATH = scratch / "settings-v1.json"
-    workspace_root = str(Path.home() / "GoldGoblins")
     try:
         loaded = desktop_settings.load_settings()
         if loaded["engineTarget"] != "GROK_TUI":
@@ -37,8 +36,8 @@ def main() -> int:
                 "showProductSourceTabs": 1,
                 "desktopShell": 1,
                 "workspaceFolders": [
-                    workspace_root,
-                    workspace_root + "/",
+                    "/home/GG/GoldGoblins",
+                    "/home/GG/GoldGoblins/",
                     "relative-folder",
                     "/",
                 ],
@@ -72,7 +71,7 @@ def main() -> int:
             raise AssertionError("bool product tabs mismatch")
         if again["desktopShell"] is not True:
             raise AssertionError("desktop shell did not persist")
-        if again["workspaceFolders"] != [workspace_root, "/"]:
+        if again["workspaceFolders"] != ["/home/GG/GoldGoblins", "/"]:
             raise AssertionError("workspace roots were not normalized")
         if again["workspaceTrusted"] is not False:
             raise AssertionError("workspace trust did not persist")
@@ -96,7 +95,7 @@ def main() -> int:
             raise AssertionError("apply_to_root missed accent")
         if root.props.get("desktopShell") is not True:
             raise AssertionError("apply_to_root missed desktop shell")
-        if root.props.get("workspaceFolders") != [workspace_root, "/"]:
+        if root.props.get("workspaceFolders") != ["/home/GG/GoldGoblins", "/"]:
             raise AssertionError("apply_to_root missed workspace roots")
         if root.props.get("workspaceTrusted") is not False:
             raise AssertionError("apply_to_root missed workspace trust")

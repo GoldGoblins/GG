@@ -9,6 +9,13 @@ from backend.crypto_keys import b58decode, b58encode, load_test_pubkey, sign_mes
 SYSTEM_PROGRAM = b"\x00" * 32
 
 
+class ConfirmationError(RuntimeError):
+    def __init__(self, txid: str, status: str):
+        super().__init__("CRYPTO_TX_" + status.upper())
+        self.txid = txid
+        self.status = status
+
+
 def compact_u16(value: int) -> bytes:
     n = int(value)
     if n < 0 or n > 0xFFFF:
@@ -79,7 +86,7 @@ def confirm_signature(rpc_call, sig: str, timeout_s: float = 8.0) -> bool:
         if isinstance(value, list) and value and isinstance(value[0], dict):
             row = value[0]
             if row.get("err"):
-                return False
+                raise ConfirmationError(token, "failed")
             status = str(row.get("confirmationStatus") or "")
             if status in ("confirmed", "finalized"):
                 return True
@@ -96,6 +103,8 @@ def _pad32(raw: bytes) -> bytes:
 
 
 def send_self_transfer(rpc_call, lamports: int) -> dict[str, Any]:
+    if isinstance(lamports, bool) or not isinstance(lamports, int) or not 0 < lamports < 2**64:
+        raise ValueError("CRYPTO_SIGNAL_SIZE")
     pubkey = load_test_pubkey()
     if not pubkey:
         raise RuntimeError("CRYPTO_NO_SIGNER")
@@ -104,7 +113,7 @@ def send_self_transfer(rpc_call, lamports: int) -> dict[str, Any]:
     for attempt in range(6):
         payload = rpc_call(
             "getLatestBlockhash",
-            [{"commitment": "processed"}],
+            [{"commitment": "confirmed"}],
         )
         if not isinstance(payload, dict):
             last_fault = "CRYPTO_RPC"
@@ -130,16 +139,15 @@ def send_self_transfer(rpc_call, lamports: int) -> dict[str, Any]:
                 encoded,
                 {
                     "encoding": "base64",
-                    "skipPreflight": True,
+                    "skipPreflight": False,
                     "maxRetries": 5,
-                    "preflightCommitment": "processed",
+                    "preflightCommitment": "confirmed",
                 },
             ],
         )
         if not isinstance(sent, dict):
-            last_fault = "CRYPTO_RPC"
-            time.sleep(0.2)
-            continue
+            # The server may have accepted it. Never re-sign an ambiguous send.
+            raise ConfirmationError(b58encode(tx[1:65]), "unconfirmed")
         if sent.get("error"):
             fault = sent["error"]
             msg = str(fault.get("message") if isinstance(fault, dict) else fault)
@@ -149,10 +157,19 @@ def send_self_transfer(rpc_call, lamports: int) -> dict[str, Any]:
             raise RuntimeError(msg)
         sig = str(sent.get("result") or "")
         if not sig:
-            last_fault = "CRYPTO_RPC"
-            continue
-        confirm_signature(rpc_call, sig)
+            raise ConfirmationError(b58encode(tx[1:65]), "unconfirmed")
+        if not confirm_signature(rpc_call, sig):
+            checked = rpc_call("getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
+            values = ((checked or {}).get("result") or {}).get("value") or []
+            state = "failed" if values and isinstance(values[0], dict) and values[0].get("err") else "unconfirmed"
+            last_height = (value or {}).get("lastValidBlockHeight")
+            if state == "unconfirmed" and last_height is not None:
+                height = rpc_call("getBlockHeight", [{"commitment": "confirmed"}])
+                if isinstance((height or {}).get("result"), int) and height["result"] > int(last_height):
+                    state = "expired"
+            raise ConfirmationError(sig, state)
         return {
+            "status": "confirmed",
             "txid": sig,
             "wallet": pubkey,
             "blockhash": blockhash,

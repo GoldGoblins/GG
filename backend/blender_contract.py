@@ -19,7 +19,7 @@ SCHEMA = "gg.ai-desktop.blender-status.v1"
 SIDECAR_HOST = "127.0.0.1"
 SIDECAR_PORT = 19876
 SIDECAR_TIMEOUT_S = 2.0
-_SLOW_CMDS = {"inspect": 30.0, "turnaround": 90.0, "deform_rig": 30.0, "clean": 60.0, "exec": 30.0}
+_SLOW_CMDS = {"inspect": 30.0, "turnaround": 90.0, "deform_rig": 30.0, "clean": 60.0, "exec": 240.0}
 SCREENSHOT_PATH = Path("/tmp/gg-blender-view.png")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_SCRIPT = PROJECT_ROOT / "tools" / "blender" / "gg_blender_sidecar.py"
@@ -32,7 +32,7 @@ SCENE_BLEND = CONFIG_DIR / "gg-village-kit.blend"
 WAYLAND_BLOCK = "gg-no-wayland"
 
 CANDIDATE_BINS = (
-    Path.home() / "blender-5.2.2-linux-x64" / "blender",
+    Path("/home/GG/blender-5.2.2-linux-x64/blender"),
     Path(os.environ.get("GG_BLENDER") or ""),
     Path("/usr/bin/blender"),
     Path("/usr/local/bin/blender"),

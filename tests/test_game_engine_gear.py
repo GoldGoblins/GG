@@ -16,14 +16,33 @@ def main() -> int:
 
     tables = gear.tables_from_content(content.starter_content())
     summary = gear.table_summary(tables)
-    assert summary["slots"] == 15
+    assert summary["slots"] == 19
     assert summary["runes"] == 6
     assert summary["gems"] == 6
     assert summary["runewords"] == 3
-    assert summary["enchantments"] == 6
+    assert summary["enchantments"] == len(gear.starter_enchantments())
+    assert "enchant.chromatic.triad_flame" in tables["enchantments"]
+    assert "enchant.gear.vitality" in tables["enchantments"]
     assert summary["materials"] == 10
     assert summary["workstations"] == 5
-    assert summary["recipes"] == 7
+    original_recipes = {'recipe.fiber_rope','recipe.iron_ingot','recipe.field_ration_survival',
+        'recipe.iron_saber','recipe.tideguard_jacket','recipe.gem_polish','recipe.runic_oil'}
+    assert original_recipes <= tables['recipes'].keys()
+    from backend.game_engine_nature_catalog import PRODUCE
+    from backend.game_engine_asset_variations import WEAPON_FAMILIES
+    for fruit in PRODUCE:
+        recipe=tables['recipes']['recipe.cook_'+fruit]
+        assert recipe['inputs']['item.nature.'+fruit] == 3
+        assert recipe['output'] == {'item.field_ration':1}
+        assert recipe['station_id'] == 'station.campfire'
+    for family in WEAPON_FAMILIES:
+        recipe=tables['recipes']['recipe.weapon_'+family]
+        assert recipe['output'] == {'item.weapon_'+family:1}
+        assert recipe['station_id'] == 'station.workbench'
+    from backend.game_engine_firearms import AMMO
+    for ammo in AMMO:
+        assert tables['recipes']['recipe.ammo_'+ammo]['output']
+    assert summary['recipes'] == len(original_recipes)+len(PRODUCE)+len(WEAPON_FAMILIES)+len(AMMO)
     assert len(tables["insertables"]) == 12
     asset_rows = gear.asset_table_for_definitions(
         tables["gear_specs"],

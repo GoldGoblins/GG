@@ -1,0 +1,85 @@
+---
+name: gg-live-eyes
+description: Visually observe GG AI DESKTOP, Blender EXT or a video URL while working, using a bounded 25 fps RAM capture and timestamped frame sequences. Use for visual feedback or motion/video inspection, not as a substitute for measurement or a claim of complete understanding from sparse samples.
+---
+
+# GG live eyes
+
+The screen is captured at **up to 25 fps**. Model interpretation is tool-driven;
+capture speed is not reasoning speed. Motion previews occupy a ring of up to
+six seconds, limited to 32 MiB of image data; detailed screens can shorten that
+window. A single latest RGB detail frame uses at most another 32 MiB; native
+detail images are encoded only on request. Status reports both allocations.
+Pipeline working buffers and encoding need additional temporary RAM.
+No video archive or persistent bitmap cache is
+created. The capture expires after 15 minutes without observation requests or
+four hours per session. KDE can reconnect on the next authorized observation;
+use start if an older client needs it. Capture does not itself grant a new task.
+MCP image delivery also starts the existing Codex bitmap-history guard for its
+own home. That removes selected image payloads from durable rollouts after
+delivery; do not describe this as a guarantee that Codex never writes them.
+
+## Screen observation
+
+Use the `gg-eyes` MCP tools when connected. The same tools are callable here:
+
+```text
+python3 -B projects/gg-ai-desktop/gg-eyes start
+python3 -B projects/gg-ai-desktop/gg-eyes status
+python3 -B projects/gg-ai-desktop/gg-eyes frame
+python3 -B projects/gg-ai-desktop/gg-eyes clip --seconds 2 --fps 25
+python3 -B projects/gg-ai-desktop/gg-eyes stop
+```
+
+On this authorized KDE workstation, GG's dedicated native capture executable
+connects directly to the same bound screen. Reuse it during the approved task;
+do not ask the user to reapprove ordinary observations. Status reports
+`provider: kde-native` and `requires_selection: false`. The capture service
+survives an app restart and retains its bounded RAM buffers and expiry limits.
+Other environments can use the visible portal selector. Report actual provider
+state; an installed helper or a start request alone does not prove a live image.
+The CLI returns image paths on **tmpfs**; open them with the image tool. MCP
+returns images directly. Do not print base64 into chat or copy RAM images into
+the repository, ordinary temporary directories or research archives.
+
+Fetch a frame before work and after meaningful mouse/key or modeling steps.
+Actually inspect it before continuing. For motion fetch a clip: every selected
+frame appears in chronological contact sheets, labelled with frame times and
+IDs. Native KDE uses capture-completion timestamps and has no compositor PTS;
+PipeWire/video can supply presentation timestamps. Check actual fps, coverage,
+frame age and gaps. Expand critical
+frames with `frame --age SECONDS` or crop the latest image with
+`frame --crop X Y WIDTH HEIGHT` while the frame remains in the ring.
+Stale images fail rather than silently masquerading as current views.
+
+The default latest frame uses native resolution, capped at 4096×2160. Motion
+frames, including `frame --age SECONDS`, are smaller previews. Crop coordinates
+refer to the requested frame's pixels, not to the preview's pixels by default.
+For pixel details crop the latest native frame rather than enlarging a preview.
+Use the returned `image_to_monitor` mapping when available; convert source size
+and monitor position and subtract the app window origin before driving the
+approved visible `gg-desk` mouse/keyboard. An image does not prove
+mesh integrity, correct weights, UVs, or animation data; inspect those directly
+as needed. End capture when the visual task ends.
+
+## Video inspection
+
+```text
+python3 -B projects/gg-ai-desktop/gg-eyes video URL_OR_FILE --start 120 --seconds 2 --fps 25
+python3 -B projects/gg-ai-desktop/gg-eyes video URL_OR_FILE --start 120.5 --seconds 0.08 --detail
+```
+
+The video tool resolves public media links and decodes only the requested
+interval through FFmpeg pipes. It returns decoder timestamps, not fabricated
+playback times, and retains no full video file. It supplies visual evidence;
+**it does not transcribe audio**. Separate observed visuals, spoken explanations,
+on-screen text and assumptions. Captions containing music/lyrics are not
+technical narration. Never claim the entire video was watched from one clip.
+
+For a long tutorial, establish sections from its available metadata, inspect
+representative visual passages, then examine relevant demonstrations densely
+and track what intervals were actually observed. For animation examine the
+whole short action at 25 fps; expand details where sheets are too small. Say
+which portions and audio were not examined. A native video API can supplement
+this only when that provider is connected and its use is authorized; do not
+silently obtain keys, install model weights or create large downloads.

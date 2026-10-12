@@ -110,13 +110,15 @@ def main() -> int:
         for _ in range(50):
             app.processEvents()
 
+        before_render = host.render_input_calls
+        before_full = host.full_input_calls
         root.setProperty("throttle", 1.0)
         root.sendInput()
         for _ in range(20):
             app.processEvents()
 
-        assert host.render_input_calls == 1
-        assert host.full_input_calls == 0
+        assert host.render_input_calls == before_render + 1
+        assert host.full_input_calls == before_full
         assert root.property("statusJson") == baseline_json
         render_status = json.loads(root.property("renderStatusJson"))
         assert render_status["schema"] == "gg.game-engine.render-snapshot.v1"

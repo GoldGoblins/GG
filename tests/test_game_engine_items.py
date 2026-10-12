@@ -65,7 +65,8 @@ def main() -> int:
     runtime = GameEngineRuntime()
     try:
         initial = runtime.snapshot()
-        assert initial["items"]["catalog"]["loot_tables"] == 2
+        from backend.game_engine_nature_catalog import loot_tables
+        assert initial["items"]["catalog"]["loot_tables"] == 2 + len(loot_tables())
         assert initial["items"]["counts"]["by_location"]["GROUND"] == 4
         # NPC equipment is now materialized as canonical instances too; the
         # two player equipment rows remain visible in the player equipment

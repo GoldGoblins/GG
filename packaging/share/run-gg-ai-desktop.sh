@@ -40,6 +40,7 @@ if [[ ! -f "$PROJECT/main.py" && -f /home/GG/GoldGoblins/projects/gg-ai-desktop/
   PROJECT=/home/GG/GoldGoblins/projects/gg-ai-desktop
 fi
 MAIN="$PROJECT/main.py"
+STARTUP="$PROJECT/startup.py"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -48,18 +49,8 @@ fi
 if [[ ! -f "$MAIN" ]]; then
   fail "app/main.py missing — unpack the zip first"
 fi
-
-if ! "$PYTHON" - <<'PY'
-import sys
-try:
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtQml import QQmlApplicationEngine
-except Exception:
-    sys.exit(2)
-sys.exit(0)
-PY
-then
-  fail "PySide6/Qt missing. Fedora: dnf install python3-pyside6 qt6-qtwebengine"
+if [[ ! -f "$STARTUP" ]]; then
+  fail "app/startup.py missing — unpack the zip first"
 fi
 
 find_grok() {
@@ -67,12 +58,9 @@ find_grok() {
     printf '%s\n' "$GG_GROK_BIN"
     return 0
   fi
-  if command -v grok >/dev/null 2>&1; then
-    command -v grok
-    return 0
-  fi
   local candidate
   for candidate in \
+    "$HOME/.grok/bin/grok" \
     "$HOME/.local/bin/grok" \
     "$HOME/.local/share/goldgoblins/tools/grok-build/1.0.5/grok"
   do
@@ -81,6 +69,10 @@ find_grok() {
       return 0
     fi
   done
+  if command -v grok >/dev/null 2>&1; then
+    command -v grok
+    return 0
+  fi
   return 1
 }
 
@@ -111,4 +103,4 @@ printf 'MOTOR=GROK_TUI\n'
 printf 'GG_GROK_BIN=%s\n' "$GG_GROK_BIN"
 printf 'GG_WORKSPACE=%s\n' "$GG_WORKSPACE"
 cd "$PROJECT"
-exec "$PYTHON" -B "$MAIN"
+exec "$PYTHON" -B "$STARTUP"

@@ -1,0 +1,8 @@
+{
+  "schema": "gg.benilla-ui-build.v1",
+  "abi": 1,
+  "source_sha256": "2078281da7dc058538f01c8693abb5d92504f04518b1d207dd8af72bd09fd00d",
+  "binary_sha256": "a08a5e4f3329db837e6313b0ec7bf8dd37f44ba629bac0f799fb3be85a4a85a5",
+  "binary_bytes": 7085096,
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+}

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend import crypto_backtest
+
 from backend.crypto_indicators import bb_percent, cci_osc, mfi, rsi, stoch_kd, williams_osc
 from backend.crypto_trader import (
     FEE_BPS,
@@ -109,7 +111,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     closes = list(src["closes"])
     times = [int(x) for x in (src.get("times") or [])]
     n = min(len(highs), len(lows), len(closes), len(times) or len(closes))
-    if n < 80:
+    if n < 96:
         raise RuntimeError("CRYPTO_HISTORY")
     highs, lows, closes = highs[:n], lows[:n], closes[:n]
     times = times[:n] if len(times) >= n else list(range(n))
@@ -122,20 +124,22 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     for k_len, k_sm, d_sm, _vol in STOCH_STACK:
         sk, _sd = stoch_kd(highs, lows, closes, k_len, k_sm, d_sm)
         stacks.append(sk)
-    extra = {
+    indicator_extra = {
         "mfi": mfi(highs, lows, closes, vols, 14),
         "cci": cci_osc(highs, lows, closes, 20),
         "bb": bb_percent(closes, 14, 2.0),
         "williams": williams_osc(highs, lows, closes, 14),
     }
-    first_px = _price_atoms(closes[0])
+    begin = crypto_backtest.start_index(src)
+    resume = crypto_backtest.restored("dca")
+    first_px = _price_atoms(closes[begin])
     start_sol = START_USD * SOL_SCALE // first_px if first_px else START_SOL
     state = default_state()
     state["armed"] = True
     state["seeded"] = True
     state["seed_style"] = "long"
     state["book"] = "dca"
-    state["sol"] = start_sol
+    state["sol"] = _apply_fee(start_sol)
     state["usd"] = 0
     state["float_usd"] = 0
     state["start_sol"] = start_sol
@@ -153,7 +157,19 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     cycle_px = 0
     peak_px = 0
     sold_sol = 0
-    start = 80
+    if resume:
+        state = resume["state"]
+        start_sol = int(state["start_sol"])
+        sell_armed = resume["sell_armed"]
+        buy_armed = resume["buy_armed"]
+        cycle_px = resume["cycle_px"]
+        peak_px = resume["peak_px"]
+        sold_sol = resume["sold_sol"]
+        prev_day = resume["prev_day"]
+        prev_count = resume["prev_count"]
+        lots = list(resume.get("recent_lots") or [])
+    event_start = len(lots)
+    start = n - 1 if resume else begin
     for i in range(start, n):
         ts = int(times[i])
         day_now = _utc_day(ts)
@@ -166,8 +182,8 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         if px <= 0:
             continue
         _advance_tape(tape, ts, state, closes[i])
-        osc = _osc_at(i, rsi_s, stacks, extra)
-        prev = _osc_at(i - 1, rsi_s, stacks, extra)
+        osc = _osc_at(i, rsi_s, stacks, indicator_extra)
+        prev = _osc_at(i - 1, rsi_s, stacks, indicator_extra)
         rsi_now = osc.get("rsi")
         if rsi_now is not None and float(rsi_now) < 50.0:
             sell_armed = False
@@ -310,5 +326,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         ),
     }
     report.update(stats)
+    report["accounting"] = tape.get("accounting", [])
+    crypto_backtest.checkpoint(report, "dca", {"state": state, "sell_armed": sell_armed, "buy_armed": buy_armed, "cycle_px": cycle_px, "peak_px": peak_px, "sold_sol": sold_sol, "prev_day": prev_day, "prev_count": prev_count, "recent_lots": lots[-8:]}, lots[event_start:], banked + held, usd)
     save_backtest(report)
     return report

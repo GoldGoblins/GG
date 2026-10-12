@@ -40,14 +40,15 @@ def main() -> int:
     assert selected["mode"] == "AUTHORED_SKINNED"
     assert selected["format"] == "GLTF2"
     assert selected["skinned"] is True
+    assert selected["id"] == "gg-codex-original"
     assert selected["skeleton"] == {
         "skins": 1,
-        "joints": 18,
-        "skinned_primitives": 32,
+        "joints": 90,
+        "skinned_primitives": 14,
     }
-    assert selected["meshes"] == 32
-    assert selected["primitives"] == 32
-    assert selected["vertices"] == 990
+    assert selected["meshes"] == 1
+    assert selected["primitives"] == 14
+    assert selected["vertices"] == 4742
     assert selected["animations"] == 4
     assert {clip["name"] for clip in selected["clips"]} == {
         "Idle",
@@ -204,15 +205,15 @@ def main() -> int:
         1,
         asset_role="CROWD",
     )
-    assert crowd["mode"] == assets.PROCEDURAL_CHARACTER_MODE
-    assert crowd["animation_mode"] == "FIXED_STEP_POSE_BUCKETS"
+    assert crowd["mode"] == "AUTHORED_SKINNED"
+    assert crowd["id"] == catalog["crowd_variants"][1]["id"]
+    assert crowd["animation_mode"] == "GLTF_SKINNED"
     assert crowd["clip"] == "Walk"
-    assert crowd["runtime_clip"] == ""
-    assert crowd["clip_status"] == "PROCEDURAL_POSE"
-    assert crowd["style_id"] == assets.PROCEDURAL_CHARACTER_STYLE_ID
+    assert crowd["runtime_clip"] == "Walk"
+    assert crowd["clip_status"] == "READY"
     assert catalog["character_style"]["surface"] == "MATTE_FACETED_CLAY"
     assert catalog["crowd_visual"]["reference_policy"] == (
-        "INSPIRATION_ONLY_NO_SOURCE_COPY"
+        "ORIGINAL_GG_BLENDER_MODELS_ONLY"
     )
     procedural = assets.procedural_character_asset()
     assert procedural["vertices"] == assets.PROCEDURAL_CHARACTER_VERTEX_RECORDS

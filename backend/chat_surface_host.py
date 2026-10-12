@@ -8,6 +8,7 @@ import pty
 import re
 import signal
 import shutil
+import sqlite3
 import struct
 import subprocess
 import termios
@@ -37,8 +38,10 @@ from backend import node_flow
 from backend import libretro_host
 from backend import marketplace_host
 from backend import media_host
+from backend import live_vision
 from backend import osint_host
 from backend import research_desk
+from backend import research_lab
 from backend import qip_lab
 from backend import tmog_contract
 from backend.grok_wallet import latest_session_dir, snapshot as grok_wallet_snapshot
@@ -53,6 +56,10 @@ from backend.codex_wallet import (
     session_path as codex_session_path,
     session_id_from_file,
     snapshot as codex_wallet_snapshot,
+)
+from backend.codex_image_storage import (
+    prepare_resume as prepare_codex_resume,
+    start_guard as start_codex_image_guard,
 )
 from backend.grok_worker_contract import (
     DEV_GROK_HOME,
@@ -74,6 +81,9 @@ _PTY_BACKUP_MS = 500
 _PTY_WRITE_CHUNK = 16 * 1024
 _GPT_CAPTURE_WINDOW_S = 30.0
 _GPTUI_DEVELOPER_INSTRUCTIONS_MAX_CHARS = 14_000
+_FLOW_STAGE_TIMEOUT_S = 300.0
+_FLOW_SEND_DELAY_MS = 520
+_FLOW_READ_CHUNK_BYTES = 1_048_576
 _GAME_KEYS = {
     0x01000012: 6,
     0x01000014: 7,
@@ -169,9 +179,11 @@ class ChatSurfaceHost(QObject):
     siteImportProgress = Signal(str, int, int, str)
     mediaFrameSeqChanged = Signal()
     mediaStateChanged = Signal()
+    liveVisionStatusChanged = Signal()
     mediaSeekChanged = Signal(float)
     terminalScrollChanged = Signal(str, int, int, int)
     osintUpdated = Signal(str)
+    osintNearbyUpdated = Signal(str)
     osintFlightLookedUp = Signal(str)
     # Shared visual commands are emitted as a small JSON envelope.  QML owns
     # the presentation action; GPTUI, GrokTUI and the normal composer all use
@@ -196,9 +208,18 @@ class ChatSurfaceHost(QObject):
         self._flow_offsets: dict[str, int] = {}
         self._flow_acc = {"GROK TUI": "", "GPTUI": ""}
         self._flow_deadline = 0.0
+        self._flow_task_active = False
+        self._flow_current_role = ""
+        self._flow_current_stage = ""
+        self._flow_turn_id = 0
+        self._flow_stage_id = 0
+        self._flow_last_lookup_at: dict[str, float] = {}
+        self._flow_gpt_session_id_at_stage = ""
+        self._flow_stage_had_grok_log = False
+        self._flow_stage_started_wall = 0.0
         self._flow_last_raw = ""
         self._flow_poll = QTimer(self)
-        self._flow_poll.setInterval(1000)
+        self._flow_poll.setInterval(500)
         self._flow_poll.timeout.connect(self._flow_tui_poll)
         self._tmog_embed: object | None = None
         self._media_embed: object | None = None
@@ -207,6 +228,7 @@ class ChatSurfaceHost(QObject):
         self._external_embed: object | None = None
         self._osint = osint_host.OsintHost(self)
         self._osint.updated.connect(self.osintUpdated)
+        self._osint.nearbyUpdated.connect(self.osintNearbyUpdated)
         self._osint.flightLookedUp.connect(self.osintFlightLookedUp)
         self._pending_tui_size: tuple[int, int] | None = None
         self._fs: QFileSystemWatcher | None = None
@@ -240,6 +262,8 @@ class ChatSurfaceHost(QObject):
         self._gpt_capture_timer.timeout.connect(self._capture_gpt_session)
         self._gpt_codex_home = CODEX_SESSIONS.parent
         self._gpt_sessions_root = CODEX_SESSIONS
+        self._gpt_storage_guard: subprocess.Popen | None = None
+        self._gpt_storage_guard_root: Path | None = None
         self._gpt_input_line = ""
         self._gpt_pending_local_commands: list[str] = []
         self._gpt_output_tail = ""
@@ -256,6 +280,11 @@ class ChatSurfaceHost(QObject):
         self._wallet_timer.setInterval(15000)
         self._wallet_timer.timeout.connect(self._emit_wallet)
         self._wallet_timer.start()
+        self._live_vision_json = '{"state":"off"}'
+        self._live_vision_timer = QTimer(self)
+        self._live_vision_timer.setInterval(1000)
+        self._live_vision_timer.timeout.connect(self._refresh_live_vision_status)
+        self._live_vision_timer.start()
         self._qml_watch: QFileSystemWatcher | None = None
         self._web_op_watch: QFileSystemWatcher | None = None
         self._desk_op_watch: QFileSystemWatcher | None = None
@@ -297,6 +326,11 @@ class ChatSurfaceHost(QObject):
         self._game_engine_character_geometry_roles: dict[str, Any] = {}
         self._game_engine_low_poly_sphere_geometry = None
         self._game_engine_asset_geometry_cache = None
+        self._game_engine_flora_cache = None
+        self._game_engine_water_geometry = None
+        self._game_engine_planet_water_geometry = None
+        self._game_engine_particle_geometry = None
+        self._game_engine_runtime_clip_driver = None
         self._winch = QTimer(self)
         self._winch.setSingleShot(True)
         self._winch.setInterval(80)
@@ -440,6 +474,21 @@ class ChatSurfaceHost(QObject):
             except OSError:
                 pass
 
+    @Property(str, notify=liveVisionStatusChanged)
+    def liveVisionStatus(self) -> str:
+        return self._live_vision_json
+
+    def _refresh_live_vision_status(self) -> None:
+        value = live_vision.ui_status()
+        if value != self._live_vision_json:
+            self._live_vision_json = value
+            self.liveVisionStatusChanged.emit()
+
+    @Slot()
+    def liveVisionStop(self) -> None:
+        live_vision.stop_if_running()
+        self._refresh_live_vision_status()
+
     @staticmethod
     def _ensure_gpt_codex_home() -> bool:
         """Prepare an isolated Codex home for GPTUI-created sessions.
@@ -552,7 +601,11 @@ class ChatSurfaceHost(QObject):
         if "ws.tui.gpt" in self._sessions:
             return True
         grid = getattr(self, "_gpt_grid", None)
-        binary = shutil.which("codex")
+        # GPTUI owns its installation; the terminal's `codex` entrypoint can
+        # independently use the user's other current Codex package.
+        desktop_binary = DESKTOP_CODEX_HOME / "packages/standalone/current/bin/codex"
+        binary = (str(desktop_binary) if os.access(desktop_binary, os.X_OK)
+                  else shutil.which("codex"))
         if not binary:
             if grid is not None:
                 grid.feed_bytes(b"\r\nCodex CLI saknas. Installera Codex och starta om GG AI Desktop.\r\n")
@@ -581,6 +634,47 @@ class ChatSurfaceHost(QObject):
             else:
                 self._gpt_codex_home = CODEX_SESSIONS.parent
                 self._gpt_sessions_root = CODEX_SESSIONS
+        # Validate the selected history before spawning Codex. Its paginated
+        # cache uses byte offsets, so old live image cleanup can otherwise hide
+        # saved final answers and make completed turns appear interrupted.
+        if resume_id:
+            try:
+                resume_path = codex_session_path(
+                    resume_id, sessions_root=self._gpt_sessions_root)
+                prepared = (prepare_codex_resume(resume_path)
+                            if resume_path is not None else {"status": "missing"})
+                history_ready = prepared["status"] in {"cleaned", "unchanged"}
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                history_ready = False
+            if not history_ready:
+                os.close(master)
+                os.close(slave)
+                if grid is not None:
+                    grid.feed_bytes(
+                        "\r\nChatten är upptagen eller kunde inte öppnas säkert. "
+                        "Försök igen.\r\n".encode())
+                return False
+        # Codex persists inline images and compaction copies. A separate worker
+        # archives small references only after their session writer has closed.
+        guard = getattr(self, "_gpt_storage_guard", None)
+        if (guard is not None and guard.poll() is None
+                and getattr(self, "_gpt_storage_guard_root", None)
+                != self._gpt_sessions_root):
+            guard.terminate()
+            guard = None
+        if guard is None or guard.poll() is not None:
+            try:
+                self._gpt_storage_guard = start_codex_image_guard(
+                    self._gpt_sessions_root, os.getpid())
+                self._gpt_storage_guard_root = self._gpt_sessions_root
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                if grid is not None:
+                    grid.feed_bytes(b"\r\nBildlagringsvakten kunde inte starta.\r\n")
+                # A pending recovery must finish before Codex reads the log.
+                if any(self._gpt_sessions_root.rglob(".*.jsonl.image-commit")):
+                    os.close(master)
+                    os.close(slave)
+                    return False
         # Keep watching after startup too: a rollout may be created lazily,
         # after the PTY has rendered its first prompt. The baseline prevents
         # the current/resumed rollout from being mistaken for that new
@@ -592,13 +686,12 @@ class ChatSurfaceHost(QObject):
         self._gpt_capture_before = set()
         for root in self._gpt_capture_roots:
             self._gpt_capture_before.update(self._session_files(root))
-        # Keep GPTUI on the model's paid priority/"Fast" tier while
-        # preserving the configured reasoning effort (currently Max for
-        # gpt-5.6-luna).
+        # Use standard processing. The selected model and reasoning effort
+        # come from GPTUI's Codex configuration.
         argv = [
             binary,
             "-c",
-            'service_tier="priority"',
+            'service_tier="default"',
             "-c",
             "developer_instructions="
             + json.dumps(
@@ -1215,6 +1308,10 @@ class ChatSurfaceHost(QObject):
     def osintViewportSnapshot(self, view_json: str = "{}") -> str:
         return self._osint.viewportSnapshot(str(view_json or "{}"))
 
+    @Slot(str, str, result=str)
+    def osintRecordEvidence(self, kind: str, event_id: str) -> str:
+        return self._osint.recordEvidence(str(kind or ""), str(event_id or ""))
+
     @Slot(str, result=str)
     def researchCommand(self, raw_json: str = "{}") -> str:
         """Dispatch the finite local Research Desk command set."""
@@ -1229,6 +1326,40 @@ class ChatSurfaceHost(QObject):
         try:
             if op == "snapshot":
                 result = research_desk.snapshot()
+            elif op == "lab_tools":
+                result = research_lab.tool_inventory()
+            elif op == "lab_inspect":
+                result = research_lab.inspect_file(str(payload.get("path") or ""))
+            elif op == "lab_import":
+                result = research_lab.import_report(str(payload.get("path") or ""), str(payload.get("engine") or ""))
+            elif op == "lab_save":
+                result = research_lab.save_finding(str(payload.get("report_id") or ""), str(payload.get("title") or ""),
+                    str(payload.get("claim") or ""), str(payload.get("lesson") or ""))
+            elif op == "lab_references":
+                result = research_lab.seed_references()
+            elif op in {"game_tools", "game_start", "game_status", "game_cancel"}:
+                from backend import game_workflows, game_workflow_jobs
+                if op == "game_tools":
+                    result = game_workflows.capabilities()
+                elif op == "game_start":
+                    result = game_workflow_jobs.start(str(payload.get("operation") or ""),
+                        payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {})
+                elif op == "game_status":
+                    result = game_workflow_jobs.status(str(payload.get("job_id") or ""))
+                else:
+                    result = game_workflow_jobs.cancel(str(payload.get("job_id") or ""))
+            elif op in {"lab_start", "lab_status", "lab_cancel", "lab_history", "lab_verify"}:
+                from backend import research_jobs, research_learning
+                if op == "lab_start":
+                    result = research_jobs.start(str(payload.get("path") or ""), str(payload.get("operation") or "analyze"), str(payload.get("query") or ""))
+                elif op == "lab_status":
+                    result = research_jobs.status(str(payload.get("job_id") or ""))
+                elif op == "lab_cancel":
+                    result = research_jobs.cancel(str(payload.get("job_id") or ""))
+                elif op == "lab_verify":
+                    result = research_learning.verify_method(str(payload.get("method_id") or ""))
+                else:
+                    result = research_jobs.history()
             elif op == "create_project":
                 result = research_desk.create_project(str(payload.get("title") or ""))
             elif op == "add_task":
@@ -1283,6 +1414,14 @@ class ChatSurfaceHost(QObject):
     @Slot(str, result=bool)
     def osintRefresh(self, page: str = "OVERVIEW") -> bool:
         return bool(self._osint.refresh(str(page or "OVERVIEW")))
+
+    @Slot(bool)
+    def osintSetNearbyActive(self, enabled: bool) -> None:
+        self._osint.setNearbyActive(enabled)
+
+    @Slot(result=str)
+    def osintNearbySnapshot(self) -> str:
+        return self._osint.nearbySnapshot()
 
     @Slot(str, result=str)
     def osintPlanRoute(self, spec_json: str = "{}") -> str:
@@ -1796,10 +1935,68 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def cryptoRefreshChart(self) -> str:
         try:
-            crypto_host.cached_sol_chart()
+            crypto_host.request_chart_refresh("SOL")
             return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def cryptoSetChartInterval(self, interval: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.set_chart_interval(interval),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
+    def cryptoRefreshKasChart(self) -> str:
+        try:
+            crypto_host.request_chart_refresh("KAS")
+            return json.dumps(crypto_host.status_payload(), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
+    def cryptoExtendSolChart(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.extend_sol_chart(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(result=str)
+    def cryptoExtendKasChart(self) -> str:
+        try:
+            return json.dumps(
+                crypto_host.extend_kas_chart(),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def cryptoSetKasChartInterval(self, interval: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.set_kas_chart_interval(interval),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__})
+
+    @Slot(str, result=str)
+    def cryptoSetPortfolioAsset(self, asset: str) -> str:
+        try:
+            return json.dumps(
+                crypto_host.set_portfolio_asset(asset),
+                separators=(",", ":"),
+            )
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
     @Slot(str, result=str)
     def cryptoConnectWatch(self, pubkey: str) -> str:
@@ -1936,6 +2133,13 @@ class ChatSurfaceHost(QObject):
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
+    @Slot(bool, result=str)
+    def cryptoPaperAll(self, enabled: bool) -> str:
+        try:
+            return json.dumps(crypto_host.set_paper_all(bool(enabled)), separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
+
     def _crypto_idle_tick(self) -> None:
         threading.Thread(
             target=self._crypto_idle_work,
@@ -1964,20 +2168,20 @@ class ChatSurfaceHost(QObject):
 
     def _crypto_idle_work(self) -> None:
         try:
-            from backend import crypto_trader
+            from backend import crypto_paper
 
-            if crypto_trader.load_state().get("armed"):
-                crypto_host.tick_trader()
+            if crypto_paper.active_pairs():
+                crypto_host.start_paper_tick("trader")
             bot = crypto_host.load_bot()
             if bot.get("armed"):
-                crypto_host.tick_bot()
+                crypto_host.start_paper_tick("bot")
         except Exception:
             return
 
     @Slot(result=str)
     def cryptoTickTrader(self) -> str:
         try:
-            return json.dumps(crypto_host.tick_trader(), separators=(",", ":"))
+            return json.dumps(crypto_host.start_paper_tick("trader"), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
@@ -2097,7 +2301,7 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def cryptoTickBot(self) -> str:
         try:
-            return json.dumps(crypto_host.tick_bot(), separators=(",", ":"))
+            return json.dumps(crypto_host.start_paper_tick("bot"), separators=(",", ":"))
         except Exception as exc:
             return json.dumps({"error": type(exc).__name__ + ":" + str(exc)})
 
@@ -2181,8 +2385,19 @@ class ChatSurfaceHost(QObject):
                 cache.update_cells(remembered)
 
     def _game_engine_json(self, value: object) -> str:
+        editor = getattr(self, "_game_asset_editor", None)
+        if editor is not None:
+            value = editor.decorate(value)
+        self._publish_game_scene(value)
+        if isinstance(value, dict) and '_qt_nature' in value:
+            value = {key: row for key,row in value.items() if key != '_qt_nature'}
         self._remember_game_engine_terrain(value)
         try:
+            if hasattr(self, '_scene_driver'):
+                if not hasattr(self, '_render_transport'):
+                    from backend.game_engine_render_transport import RenderTransport
+                    self._render_transport = RenderTransport()
+                value = self._render_transport.prepare(value)
             return json.dumps(value, separators=(",", ":"))
         except Exception as exc:
             return json.dumps({
@@ -2222,10 +2437,145 @@ class ChatSurfaceHost(QObject):
     def gameEngineStatus(self) -> str:
         return self._game_engine_json(game_engine_host.status_payload())
 
+    @Slot(str, result=str)
+    def gameEngineCharacterCreate(self, raw: str) -> str:
+        # Creator metadata is not a scene snapshot. Publishing it through
+        # the world transport would release the live terrain/instance tables.
+        return json.dumps(game_engine_host.character_create(raw),separators=(",", ":"))
+
+    @Slot(QObject, QObject, str, result=str)
+    def gameEngineAssetEditor(self, context: QObject, loader: QObject, raw: str) -> str:
+        from backend.game_engine_asset_editor import dispatch
+        return dispatch(self, context, loader, raw)
+
+    @Slot(result=QObject)
+    def gameEnginePresentation(self):
+        from backend.game_engine_presentation import presentation_for
+        return presentation_for(self)
+
+    @Slot(result=QObject)
+    def gameEngineBenillaWorld(self):
+        from backend.game_engine_benilla_streaming import world_for
+        return self._keep_game_engine_geometry(world_for(self))
+
+    @Slot(result=QObject)
+    def gameEngineBenillaWaveTexture(self):
+        from backend.game_engine_benilla_ffx import wave_for
+        return self._keep_game_engine_geometry(wave_for(self))
+
+    @Slot(str,result=str)
+    def gameEngineLoadBenillaWorld(self,manifest):
+        from backend.game_engine_benilla_streaming import load_world
+        return json.dumps(load_world(self,manifest),separators=(',',':'))
+
+    @Slot('QVariantMap',result=bool)
+    def gameEngineBenillaWeather(self,value):
+        stream=getattr(self,'_benilla_world_stream',None)
+        return bool(stream and stream.setWeather(value))
+    @Slot('QByteArray',result=bool)
+    def gameEngineBenillaWeatherPacket(self,payload):
+        stream=getattr(self,'_benilla_world_stream',None)
+        return bool(stream and stream.weatherPacket(payload))
+    @Slot('QByteArray',result=bool)
+    def gameEngineBenillaMusicPacket(self,payload):
+        presentation=getattr(self,'_game_presentation',None)
+        return bool(presentation and presentation.world_music_packet(payload))
+
+    @Slot(result=str)
+    def gameEngineBenillaWorldStatus(self):
+        from backend.game_engine_benilla_streaming import world_for
+        return json.dumps(world_for(self).status(),separators=(',',':'))
+
+    @Slot(QObject,str,result=bool)
+    def gameEngineRegisterEntityNode(self, node: QObject, identity: str) -> bool:
+        if not hasattr(self,'_scene_driver'):
+            from backend.game_engine_scene_driver import SceneDriver
+            self._scene_driver=SceneDriver()
+        return self._scene_driver.register(node,identity)
+
+    @Slot(str,result=bool)
+    def gameEngineSetView(self,raw):
+        if not hasattr(self,'_scene_driver'):
+            from backend.game_engine_scene_driver import SceneDriver
+            self._scene_driver=SceneDriver()
+        accepted=self._scene_driver.set_view(raw)
+        if getattr(game_engine_host._RUNTIME,'_benilla_world',None) is not None:return accepted
+        if accepted:
+            from backend.game_engine_world_trees import update_world_trees
+            update_world_trees(self,self._scene_driver.view)
+            from backend.game_engine_world_places_render import update_world_places
+            update_world_places(self,self._scene_driver.view)
+            from backend.game_engine_ground_cover import update_ground_cover
+            update_ground_cover(self,self._scene_driver.view)
+            from backend.game_engine_landscape_render import update_landscape
+            update_landscape(self,self._scene_driver.view)
+        return accepted
+
+    @Slot(result=QObject)
+    def gameEngineWorldTrees(self):
+        if not hasattr(self,'_world_tree_model'):
+            from backend.game_engine_world_trees import WorldTreeModel
+            self._world_tree_model=WorldTreeModel(self)
+        return self._keep_game_engine_geometry(self._world_tree_model)
+
+    @Slot(result=QObject)
+    def gameEngineGroundCover(self) -> QObject | None:
+        if not hasattr(self, '_ground_cover_model'):
+            from backend.game_engine_ground_cover import GroundCoverModel
+            self._ground_cover_model = GroundCoverModel(self)
+        return self._keep_game_engine_geometry(self._ground_cover_model)
+
+    @Slot(result=QObject)
+    def gameEngineWorldPlaces(self):
+        if not hasattr(self,'_world_places_model'):
+            from backend.game_engine_world_places_render import WorldPlacesModel
+            self._world_places_model=WorldPlacesModel(self)
+        return self._keep_game_engine_geometry(self._world_places_model)
+
+    @Slot(result=QObject)
+    def gameEngineLandscape(self):
+        if not hasattr(self,'_landscape_model'):
+            from backend.game_engine_landscape_render import LandscapeModel
+            self._landscape_model=LandscapeModel(self)
+        return self._keep_game_engine_geometry(self._landscape_model)
+
+    @Slot(result=str)
+    def gameEngineWorldTreeMeasurements(self):
+        model=getattr(self,'_world_tree_model',None)
+        return json.dumps(model.measurements() if model is not None else {})
+
+    @Slot(QObject,str,result=bool)
+    def gameEngineRegisterRig(self,loader,identity):
+        if not hasattr(self,'_scene_driver'):
+            from backend.game_engine_scene_driver import SceneDriver
+            self._scene_driver=SceneDriver()
+        if self._game_engine_runtime_clip_driver is None:
+            from backend.game_engine_runtime import RuntimeClipDriver
+            self._game_engine_runtime_clip_driver=RuntimeClipDriver()
+        return self._scene_driver.register_rig(loader,identity,self._game_engine_runtime_clip_driver)
+
+    def _publish_game_scene(self,value):
+        from backend.game_engine_benilla_streaming import update_world
+        update_world(self)
+        presentation=getattr(self,'_game_presentation',None)
+        if presentation is not None:presentation.update(value)
+        if not isinstance(value,dict) or not value.get('render',{}).get('entities'):return
+        if hasattr(self,'_scene_driver'):self._scene_driver.update(value)
+        cache=getattr(self,'_game_engine_nature_cache',None)
+        if cache is not None:
+            r=game_engine_host._RUNTIME
+            published=value.get('_qt_nature')
+            if published is not None and r._running:
+                groups,revision=published
+            else:
+                with r._lock:
+                    groups=r._nature.groups;revision=r._nature.revision
+            for key,table in tuple(cache.tables.items()):table.replace(groups.get(key,[]),revision)
+
     @Slot(result=str)
     def gameEngineRenderStatus(self) -> str:
         """Return the compact transform/pose stream used by the 3D surface."""
-        return self._game_engine_json(game_engine_host.render_status_payload())
+        return self._game_engine_json(game_engine_host.presentation_payload())
 
     @Slot(result=str)
     def gameEngineUiStatus(self) -> str:
@@ -2249,6 +2599,253 @@ class ChatSurfaceHost(QObject):
         return self._keep_game_engine_geometry(
             self._game_engine_geometry_cache.geometry_for_cell(cell)
         )
+
+    def _flora_render_cache(self):
+        if self._game_engine_flora_cache is None:
+            from backend.game_engine_ecology_render import FloraRenderCache
+            self._game_engine_flora_cache = FloraRenderCache(self)
+        return self._game_engine_flora_cache
+
+    @Slot(str, result=QObject)
+    def gameEngineFloraGeometry(self, key: str) -> QObject | None:
+        return self._keep_game_engine_geometry(self._flora_render_cache().geometry(key))
+
+    @Slot(str, result=QObject)
+    def gameEngineFloraInstances(self, key: str) -> QObject | None:
+        rows, revision = game_engine_host._RUNTIME.ecology_batch(key)
+        editor = getattr(self, "_game_asset_editor", None)
+        if editor is not None:
+            rows, revision = editor.batch(rows, revision)
+        return self._keep_game_engine_geometry(self._flora_render_cache().table(key, rows, revision))
+
+    def _nature_render_cache(self):
+        if not hasattr(self,"_game_engine_nature_cache"):
+            from pathlib import Path
+            from backend.game_engine_ecology_render import FloraRenderCache
+            from backend.game_engine_nature import GROUP_KEYS
+            self._game_engine_nature_cache=FloraRenderCache(self,assets=Path(__file__).resolve().parents[1]/"qml/assets/authored/nature",keys=GROUP_KEYS)
+        return self._game_engine_nature_cache
+
+    @Slot(str,result=QObject)
+    def gameEngineNatureGeometry(self,key: str) -> QObject | None:
+        return self._keep_game_engine_geometry(self._nature_render_cache().geometry(key))
+
+    @Slot(str,result=QObject)
+    def gameEngineNatureInstances(self,key: str) -> QObject | None:
+        rows,revision=game_engine_host._RUNTIME.nature_batch(key)
+        editor = getattr(self, "_game_asset_editor", None)
+        if editor is not None:
+            rows, revision = editor.batch(rows, revision)
+        return self._keep_game_engine_geometry(self._nature_render_cache().table(key,rows,revision))
+
+    @Slot(QObject, str, result=int)
+    def gameEngineEnablePicking(self, loader: QObject, entity_id: str) -> int:
+        if not isinstance(loader,QObject):return 0
+        identity=entity_id
+        if entity_id.startswith('e-'):
+            identity=self.gameEngineEntityIdentity(entity_id)
+        count=0
+        from backend.game_engine_runtime import scene_models
+        for node in scene_models(loader):
+            if node.inherits('QQuick3DModel'):
+                node.setProperty('pickable',True)
+                node.setObjectName('ggPick:'+identity)
+                count+=1
+        return count
+
+    @Slot(str, result=str)
+    def gameEngineWorldHover(self, identity: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.world_hover(identity))
+
+    @Slot(str, result=str)
+    def gameEngineWorldSelect(self, identity: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.world_select(identity))
+
+    @Slot(str, result=str)
+    def gameEngineWorldContext(self, identity: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.world_context(identity))
+
+    @Slot(str, bool, result=str)
+    def gameEngineWorldTargetCycle(self, camera: str, reverse: bool) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.world_target_cycle(camera,reverse))
+
+    @Slot(str, result=str)
+    def gameEngineActionBarEdit(self, raw: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.action_bar_edit(raw))
+
+    @Slot(int, result=str)
+    def gameEngineActionUse(self, index: int) -> str:
+        from backend.game_engine_presentation import use_action_for
+        return self._game_engine_json(use_action_for(self,game_engine_host._RUNTIME,index))
+
+    @Slot(str,result=str)
+    def gameEngineMacroState(self,raw: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.set_client_macros(raw))
+
+    @Slot(str, result=str)
+    def gameEngineActionCommand(self, command: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.action_command(command))
+
+    @Slot(str, result=str)
+    def gameEngineActionUseItem(self, definition: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.action_use_item(definition))
+
+    @Slot(str, str, result=str)
+    def gameEngineContainerUseItem(self, definition: str, instance_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.action_use_item(definition,instance_id))
+
+    @Slot(str, int, bool, result=str)
+    def gameEngineInstanceIdentity(self, key: str, index: int, animal: bool) -> str:
+        cache=self._nature_render_cache() if animal else self._flora_render_cache()
+        table=cache.tables.get(key)
+        identities=getattr(table,'identities',())
+        return identities[index] if 0<=index<len(identities) else ''
+
+    @Slot(str, result=str)
+    def gameEngineEntityIdentity(self, entity_id: str) -> str:
+        r=game_engine_host._RUNTIME
+        with r._lock:
+            if entity_id.startswith('e-'):
+                try:index=int(entity_id[2:])
+                except ValueError:return ''
+                return str(r._npc_ids[index] or '') if 0<=index<len(r._npc_ids) else ''
+            if entity_id.startswith('item-'):
+                identity=entity_id[5:]
+                return identity if identity in r._item_instances else ''
+            return entity_id if any(row['id']==entity_id for row in r._world_interaction_rows_locked()) else ''
+
+    @Slot(str,str,result=str)
+    def gameEngineNatureAction(self,target_id: str,action: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.nature_action(target_id,action))
+
+    @Slot(result=QObject)
+    def gameEngineWaterGeometry(self) -> QObject | None:
+        if self._game_engine_water_geometry is None:
+            from backend.game_engine_geometry import WaterWaveGeometry
+
+            self._game_engine_water_geometry = WaterWaveGeometry()
+        return self._keep_game_engine_geometry(
+            self._game_engine_water_geometry.geometry
+        )
+
+    @Slot(result=QObject)
+    def gameEnginePlanetWaterGeometry(self) -> QObject | None:
+        if self._game_engine_planet_water_geometry is None:
+            from backend.game_engine_geometry import PlanetWaterGeometry
+
+            self._game_engine_planet_water_geometry = PlanetWaterGeometry()
+        return self._keep_game_engine_geometry(
+            self._game_engine_planet_water_geometry.geometry
+        )
+
+    @Slot(float, result=bool)
+    def gameEnginePrepareWaterGpu(self, span_m: float) -> bool:
+        self.gameEngineWaterGeometry()
+        self.gameEnginePlanetWaterGeometry()
+        self._game_engine_water_geometry.prepare_gpu(span_m)
+        self._game_engine_planet_water_geometry.prepare_gpu(span_m * .5)
+        return True
+
+    @Slot(result=QObject)
+    def gameEngineSeaBedField(self) -> QObject | None:
+        """Baked island heights for the sea shader. Built once with the disk."""
+        self.gameEngineWaterGeometry()
+        field = getattr(self._game_engine_water_geometry, "seabed", None)
+        return self._keep_game_engine_geometry(field)
+
+    @Slot(float, float, float, result=bool)
+    @Slot(float, float, float, int, result=bool)
+    def gameEngineWaterUpdate(
+        self,
+        center_x: float,
+        center_z: float,
+        span_m: float,
+        grid_size: int = 49,
+    ) -> bool:
+        if self._game_engine_water_geometry is None:
+            self.gameEngineWaterGeometry()
+        if self._game_engine_water_geometry is None:
+            return False
+        clock = game_engine_host.mobility_water_clock()
+        self._game_engine_water_geometry.update(
+            center_x,
+            center_z,
+            clock["time_s"],
+            clock["sea_level_m"],
+            span_m,
+            grid_size,
+        )
+        if self._game_engine_planet_water_geometry is not None:
+            self._game_engine_planet_water_geometry.update(
+                center_x,
+                center_z,
+                clock["time_s"],
+                clock["sea_level_m"],
+                span_m * 0.5,
+            )
+        return True
+
+    @Slot(result=QObject)
+    def gameEngineParticleGeometry(self) -> QObject | None:
+        if self._game_engine_particle_geometry is None:
+            from backend.game_engine_geometry import ParticleBatchGeometry
+
+            self._game_engine_particle_geometry = ParticleBatchGeometry()
+        return self._keep_game_engine_geometry(
+            self._game_engine_particle_geometry.geometry
+        )
+
+    @Slot("QVariantList", result=int)
+    def gameEngineParticleUpdate(self, rows: list[Any]) -> int:
+        if self._game_engine_particle_geometry is None:
+            self.gameEngineParticleGeometry()
+        if self._game_engine_particle_geometry is None:
+            return 0
+        return self._game_engine_particle_geometry.update(rows)
+
+    @Slot(result=QObject)
+    def gameEngineAdditiveParticleGeometry(self) -> QObject | None:
+        if getattr(self, '_additive_particle_batch_geometry', None) is None:
+            from backend.game_engine_geometry import ParticleBatchGeometry
+            self._additive_particle_batch_geometry = ParticleBatchGeometry()
+        return self._keep_game_engine_geometry(self._additive_particle_batch_geometry.geometry)
+
+    @Slot("QVariantList", result=int)
+    def gameEngineAdditiveParticleUpdate(self, rows: list[Any]) -> int:
+        self.gameEngineAdditiveParticleGeometry()
+        return self._additive_particle_batch_geometry.update(rows)
+
+    @Slot(float, float, result="QVariantList")
+    def gameEngineWorldFxAnchors(self, x: float, z: float) -> list[dict]:
+        from backend import game_engine_host
+        from backend.game_engine_world_effects import lamp_anchors
+        runtime = game_engine_host._RUNTIME
+        with runtime._lock:
+            return lamp_anchors(x, z, runtime._terrain_height_locked)
+
+    @Slot(float, float, result="QVariantList")
+    def gameEngineEnvironmentFxAnchors(self, x: float, z: float) -> list[dict]:
+        from backend import game_engine_host
+        from backend.game_engine_world_effects import environment_anchors
+        runtime = game_engine_host._RUNTIME
+        with runtime._lock:
+            return environment_anchors(x, z, runtime._terrain_height_locked)
+
+    @Slot(float, result="QVariantList")
+    def gameEngineLightBeacons(self, range_m: float) -> list[dict]:
+        from backend import game_engine_host
+        from backend.game_engine_world_effects import lamp_beacons
+        from backend.game_engine_render import PROFILES
+        runtime=game_engine_host._RUNTIME
+        view=getattr(getattr(self,'_scene_driver',None),'view',None)
+        if view is None:return []
+        with runtime._lock:
+            policy=PROFILES[runtime._render_profile]
+            revision=(id(runtime._terrain_overrides),runtime._terrain_overrides.get('revision',0))
+            if getattr(self,'_beacon_terrain_revision',None)!=revision:
+                self._beacon_heights={};self._beacon_terrain_revision=revision
+            return lamp_beacons(view,min(float(range_m),policy['world_view_distance_m']*1.18),
+                runtime._terrain_height_locked,policy['max_light_beacons'],self._beacon_heights)
 
     @Slot(result=QObject)
     def gameEngineCharacterGeometry(self) -> QObject | None:
@@ -2291,6 +2888,11 @@ class ChatSurfaceHost(QObject):
             )
         return self._game_engine_low_poly_sphere_geometry
 
+    @Slot(str,str,QObject,result=QObject)
+    def gameEnginePreviewItemGeometry(self,asset_id,item_kind,owner):
+        from backend.game_engine_geometry import preview_item_geometry
+        return preview_item_geometry(self,asset_id,item_kind,owner)
+
     @Slot(str, str, result=QObject)
     def gameEngineItemGeometry(
         self,
@@ -2327,89 +2929,34 @@ class ChatSurfaceHost(QObject):
 
     @Slot(QObject, str, result=QObject)
     def gameEngineFindNamedNode(self, loader: QObject, name: str) -> QObject | None:
-        """Find one imported glTF node by object name or Node.name.
+        from backend.game_engine_runtime import imported_named_node
+        return imported_named_node(loader, name)
 
-        Used to parent equipped items onto the clay-hero SOCKET_* empties
-        when Qt actually publishes those nodes.  Current RuntimeLoader
-        imports expose clip names, not socket empties, so QML keeps the
-        snapshot rest pose until a named node exists.
-        """
-        if not isinstance(loader, QObject):
-            return None
-        wanted = str(name or "").strip()
-        if not wanted:
-            return None
-        wanted_fold = wanted.casefold()
-        try:
-            candidates = [loader, *loader.findChildren(QObject)]
-        except (AttributeError, RuntimeError, TypeError):
-            return None
-        for candidate in candidates:
-            try:
-                object_name = str(candidate.objectName() or "")
-                node_name = str(candidate.property("name") or "")
-            except (AttributeError, RuntimeError, TypeError):
-                continue
-            if object_name == wanted or node_name == wanted:
-                return candidate
-            if object_name.casefold() == wanted_fold or node_name.casefold() == wanted_fold:
-                return candidate
-        return None
+    @Slot(str, QObject, result=QObject)
+    def gameEngineEmblemTexture(self, uri: str, owner: QObject) -> QObject | None:
+        from backend.game_engine_benilla_materials import emblem_texture_data
+        return emblem_texture_data(self,uri,owner)
 
-    @Slot(QObject, str, result=bool)
-    def gameEngineRuntimeClip(self, loader: QObject, clip: str) -> bool:
-        """Select one imported glTF timeline without touching simulation state.
+    @Slot('QQuaternion','QQuaternion','QVector3D',result='QVariantMap')
+    def gameEngineAlignedAttachment(self, socket_rotation, actor_rotation, offset):
+        from backend.game_engine_benilla_materials import aligned_attachment
+        return aligned_attachment(socket_rotation,actor_rotation,offset)
 
-        Some low-poly packs animate separate node transforms instead of using
-        a skin.  Qt imports those clips as ``QQuickTimelineAnimation``
-        children of a ``RuntimeLoader``.  The backend only switches the
-        already-loaded presentation objects; the fixed-step animation state
-        and clip vocabulary still come from the game snapshot.
-        """
-        if not isinstance(loader, QObject):
-            return False
-        wanted = str(clip or "").strip().casefold()
-        try:
-            candidates = [loader, *loader.findChildren(QObject)]
-        except (AttributeError, RuntimeError, TypeError):
-            return False
-        animations: list[QObject] = []
-        for candidate in candidates:
-            try:
-                class_name = candidate.metaObject().className()
-            except (AttributeError, RuntimeError):
-                continue
-            if class_name == "QQuickTimelineAnimation":
-                animations.append(candidate)
+    @Slot(QObject, str, float, result=bool)
+    @Slot(QObject, str, float, str, result=bool)
+    def gameEngineRuntimeClip(
+        self, loader: QObject, clip: str, cadence_hz: float = 0.0, trigger_id: str = ""
+    ) -> bool:
+        if self._game_engine_runtime_clip_driver is None:
+            from backend.game_engine_runtime import RuntimeClipDriver
 
-        # A skinned glTF may expose no QML timeline object.  It remains a
-        # valid RuntimeLoader asset; this adapter is simply not applicable.
-        if not animations:
-            return False
-        target: QObject | None = None
-        for animation in animations:
-            try:
-                animation.setProperty("running", False)
-                parent = animation.parent()
-                if isinstance(parent, QObject):
-                    parent.setProperty("enabled", False)
-                name = animation.objectName().strip().casefold()
-                if wanted and name == wanted:
-                    target = animation
-            except (AttributeError, RuntimeError, TypeError):
-                continue
-        if not wanted:
-            return True
-        if target is None:
-            return False
-        try:
-            parent = target.parent()
-            if isinstance(parent, QObject):
-                parent.setProperty("enabled", True)
-            target.setProperty("running", True)
-        except (AttributeError, RuntimeError, TypeError):
-            return False
-        return True
+            self._game_engine_runtime_clip_driver = RuntimeClipDriver()
+        return self._game_engine_runtime_clip_driver.apply(loader, clip, cadence_hz, trigger_id)
+
+    @Slot(QObject, result=bool)
+    def gameEngineReleaseRuntimeClip(self, loader: QObject) -> bool:
+        driver=self._game_engine_runtime_clip_driver
+        return bool(driver and driver.release(loader))
 
     @Slot(str, float, result=QObject)
     def gameEngineCharacterGeometryForPose(
@@ -2459,16 +3006,35 @@ class ChatSurfaceHost(QObject):
         )
 
     @Slot(str, result=str)
+    def gameEngineMobilityAction(self, action: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.mobility_action(str(action or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineExploreRegion(self, region_id: str) -> str:
+        return self._game_engine_json(game_engine_host.explore_region(str(region_id or "")))
+
+    @Slot(str, result=str)
     def gameEngineAbility(self, ability_id: str) -> str:
         return self._game_engine_json(
             game_engine_host.activate_ability(str(ability_id or "ability.surge"))
         )
 
     @Slot(str, result=str)
-    def gameEngineAttack(self, target_id: str) -> str:
+    @Slot(str,str, result=str)
+    def gameEngineAttack(self, target_id: str, action_id: str = 'basic_attack') -> str:
         return self._game_engine_json(
-            game_engine_host.attack(str(target_id or ""))
+            game_engine_host.attack(str(target_id or ""),str(action_id or 'basic_attack'))
         )
+
+    @Slot(bool, result=str)
+    def gameEngineTargetNext(self, reverse: bool) -> str:
+        return self._game_engine_json(game_engine_host.cycle_target(reverse))
+
+    @Slot(result=str)
+    def gameEngineTargetClear(self) -> str:
+        return self._game_engine_json(game_engine_host.clear_target())
 
     @Slot(str, result=str)
     def gameEngineQuestAccept(self, quest_id: str) -> str:
@@ -2482,6 +3048,22 @@ class ChatSurfaceHost(QObject):
             game_engine_host.claim_quest(str(quest_id or ""))
         )
 
+    @Slot(str,str,result=str)
+    def gameEngineQuestDialogSelect(self,npc_id,quest_id):
+        return self._game_engine_json(game_engine_host._RUNTIME.quest_dialog_select(str(npc_id),str(quest_id)))
+
+    @Slot(str,str,str,str,int,result=str)
+    def gameEngineQuestDialogAction(self,npc_id,quest_id,panel,action,choice):
+        return self._game_engine_json(game_engine_host._RUNTIME.quest_dialog_action(str(npc_id),str(quest_id),str(panel),str(action),choice))
+
+    @Slot(str,result=str)
+    def gameEngineQuestAbandon(self,quest_id):
+        return self._game_engine_json(game_engine_host._RUNTIME.abandon_quest(str(quest_id)))
+
+    @Slot(result=str)
+    def gameEngineGossipClose(self):
+        return self._game_engine_json(game_engine_host._RUNTIME.gossip_close())
+
     @Slot(result=str)
     def gameEngineLoot(self) -> str:
         return self._game_engine_json(game_engine_host.claim_loot())
@@ -2491,6 +3073,30 @@ class ChatSurfaceHost(QObject):
         return self._game_engine_json(
             game_engine_host.craft_recipe(str(recipe_id or "recipe.field_ration"))
         )
+
+    @Slot(str, str, result=str)
+    def gameEngineCraftingOpen(self, book: str, station_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.open_crafting(book, station_id))
+
+    @Slot(int, result=str)
+    def gameEngineCraftingClose(self, session: int) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.close_crafting(session))
+
+    @Slot(result=str)
+    def gameEngineCraftingStop(self) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.stop_crafting())
+
+    @Slot(int, str, int, result=str)
+    def gameEngineCraftBookRecipe(self, session: int, recipe_id: str, count: int) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.craft_book_recipe(session, recipe_id, count))
+
+    @Slot(int, str, str, result=str)
+    def gameEngineLootSlot(self, session: int, source: str, instance_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.loot_slot(session, source, instance_id))
+
+    @Slot(int, result=str)
+    def gameEngineLootClose(self, session: int) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.close_loot(session))
 
     @Slot(str, str, result=str)
     def gameEngineGearCraft(self, recipe_id: str, station_id: str) -> str:
@@ -2548,10 +3154,93 @@ class ChatSurfaceHost(QObject):
         )
 
     @Slot(str, result=str)
-    def gameEngineItemEquip(self, instance_id: str) -> str:
+    @Slot(str, str, result=str)
+    def gameEngineItemEquip(self, instance_id: str, slot: str = "") -> str:
         return self._game_engine_json(
-            game_engine_host.equip_item(str(instance_id or ""))
+            game_engine_host.equip_item(str(instance_id or ""),str(slot or ""))
         )
+
+    @Slot(result=str)
+    def gameEngineFirearmReload(self) -> str:
+        return self._game_engine_json(game_engine_host.reload_firearms())
+
+    @Slot(str, result=str)
+    def gameEngineItemUnequip(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.unequip_item(str(instance_id or ""))
+        )
+
+    @Slot(str, int, result=str)
+    def gameEngineInventoryMove(self, instance_id: str, slot_index: int) -> str:
+        return self._game_engine_json(
+            game_engine_host.move_inventory_slot(str(instance_id or ""), slot_index)
+        )
+
+    @Slot(str, int, int, result=str)
+    def gameEngineInventoryStack(self, instance_id: str, slot_index: int, count: int) -> str:
+        return self._game_engine_json(game_engine_host.transfer_inventory_stack(str(instance_id or ""),slot_index,count))
+
+    @Slot(str, int, result=str)
+    def gameEngineEquipmentMove(self, instance_id: str, slot_index: int) -> str:
+        return self._game_engine_json(game_engine_host.move_equipment_to_inventory(str(instance_id or ""),slot_index))
+
+    @Slot(str, result=str)
+    def gameEngineBankDeposit(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.deposit_to_stash(str(instance_id or ""))
+        )
+
+    @Slot(str, result=str)
+    def gameEngineBankWithdraw(self, instance_id: str) -> str:
+        return self._game_engine_json(
+            game_engine_host.withdraw_from_stash(str(instance_id or ""))
+        )
+
+    @Slot(str, int, result=str)
+    def gameEngineBankDepositAt(self, instance_id: str, slot_index: int) -> str:
+        return self._game_engine_json(
+            game_engine_host.deposit_to_stash(str(instance_id or ""), slot_index)
+        )
+
+    @Slot(str, int, result=str)
+    def gameEngineBankWithdrawAt(self, instance_id: str, slot_index: int) -> str:
+        return self._game_engine_json(
+            game_engine_host.withdraw_from_stash(str(instance_id or ""), slot_index)
+        )
+
+    @Slot(str, int, result=str)
+    def gameEngineBankMove(self, instance_id: str, slot_index: int) -> str:
+        return self._game_engine_json(
+            game_engine_host.move_stash_slot(str(instance_id or ""), slot_index)
+        )
+
+    @Slot(result=str)
+    def gameEngineBankClose(self) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.close_bank())
+
+    @Slot(str, result=str)
+    def gameEngineMerchantOpen(self, vendor_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.open_merchant(str(vendor_id or "")))
+
+    @Slot(result=str)
+    def gameEngineMerchantClose(self) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.close_merchant())
+
+    @Slot(str, str, result=str)
+    def gameEngineMerchantBuy(self, vendor_id: str, instance_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.merchant_buy(vendor_id, instance_id))
+
+    @Slot(str, str, result=str)
+    def gameEngineMerchantSell(self, vendor_id: str, instance_id: str) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.merchant_sell(vendor_id, instance_id))
+
+    @Slot(str, str, int, result=str)
+    def gameEngineMerchantSellCount(self, vendor_id, instance_id, quantity):
+        return self._game_engine_json(game_engine_host._RUNTIME.merchant_sell(vendor_id, instance_id, quantity))
+
+    @Slot(str,str,result=str)
+    def gameEngineMerchantBuyBundles(self,vendor_id,requests):
+        return self._game_engine_json(game_engine_host._RUNTIME.merchant_buy_bundles(vendor_id,requests))
 
     @Slot(str, result=str)
     def gameEngineItemDrop(self, instance_id: str) -> str:
@@ -2594,6 +3283,10 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def gameEngineNpcInteract(self) -> str:
         return self._game_engine_json(game_engine_host.npc_interact())
+
+    @Slot(result=str)
+    def gameEngineNpcDialogueClose(self) -> str:
+        return self._game_engine_json(game_engine_host._RUNTIME.close_dialogue())
 
     @Slot(str, str, result=str)
     def gameEngineNpcTalk(self, npc_id: str, choice_id: str) -> str:
@@ -2736,6 +3429,14 @@ class ChatSurfaceHost(QObject):
         return self._game_engine_json(game_engine_host.set_input(str(raw or "{}")))
 
     @Slot(str, result=str)
+    def gameEngineClientControl(self, raw: str) -> str:
+        return self._game_engine_json(game_engine_host.client_control(str(raw or "{}")))
+
+    @Slot(str, result=str)
+    def gameEngineClientControls(self, raw: str) -> str:
+        return self._game_engine_json(game_engine_host.client_controls_batch(str(raw or "[]")))
+
+    @Slot(str, result=str)
     def gameEngineInputRender(self, raw: str) -> str:
         """Apply movement input and return only the bounded render stream."""
         return self._game_engine_json(
@@ -2874,12 +3575,12 @@ class ChatSurfaceHost(QObject):
 
     @Slot(result=str)
     def flowTuiReset(self) -> str:
+        if self._flow_task_active:
+            return self._flow_tui_emit(flow_tui.snapshot())
+        self._flow_turn_id += 1
         self._flow_tui_stop()
         board = flow_tui.reset()
         return self._flow_tui_emit(board)
-
-    def _flow_role(self, terminal_id: str) -> str:
-        return "GPTUI" if str(terminal_id) == "ws.tui.gpt" else "GROK TUI"
 
     def _flow_tui_emit(self, board: object) -> str:
         raw = self._flow_tui_json(board)
@@ -2894,53 +3595,110 @@ class ChatSurfaceHost(QObject):
         self._flow_deadline = 0.0
         self._flow_poll.stop()
 
-    def _flow_tui_send(self, terminal_id: str, ask: str) -> None:
-        line = str(ask or "").strip()
+    def _flow_tui_fail(self, note: str, *, status: str = "BLOCKED") -> None:
+        role = self._flow_current_role
+        stage = self._flow_current_stage
+        body = str(self._flow_acc.get(role) or "").strip()
+        detail = str(note or "FLOW stage failed.").strip()
+        shown = (body + "\n\n" if body else "") + "FLOW: " + detail
+        if role and stage:
+            label = stage.replace("GROK_", "").replace("GPT_", "").replace("_", " ")
+            flow_tui.set_motor_stream(role, shown, done=True, stage=label)
+        self._flow_tui_stop()
+        self._flow_task_active = False
+        self._flow_current_role = ""
+        self._flow_current_stage = ""
+        board = flow_tui.set_task_result(status, detail)
+        self._flow_tui_emit(board)
+
+    def _flow_tui_send(
+        self,
+        terminal_id: str,
+        prompt: str,
+        turn_id: int,
+        stage_id: int,
+    ) -> None:
+        if (
+            not self._flow_task_active
+            or turn_id != self._flow_turn_id
+            or stage_id != self._flow_stage_id
+        ):
+            return
+        line = str(prompt or "").strip()
         if not line:
+            self._flow_tui_fail("FLOW generated an empty stage prompt.")
             return
         try:
-            self.writeChatTerminal(terminal_id, line + "\n")
+            paste = "\x1b[200~" + line + "\x1b[201~\n"
+            sent = bool(self.writeChatTerminal(terminal_id, paste))
         except Exception:
-            role = self._flow_role(terminal_id)
-            self._flow_tui_emit(
-                flow_tui.set_motor_stream(role, role + " did not take the ask.", done=True)
-            )
+            sent = False
+        if not sent:
+            self._flow_tui_fail(self._flow_current_role + " did not accept its FLOW stage.")
+            return
+        flow_tui.mark_dispatched(self._flow_current_role)
+        self._flow_tui_emit(flow_tui.snapshot())
 
-    def _flow_log_paths(self) -> dict[str, Path]:
-        paths: dict[str, Path] = {}
-        try:
-            session = self._sessions.get(GROK_TUI_TERMINAL_ID) or {}
-            proc = session.get("proc")
-            pid = None
-            if proc is not None and proc.poll() is None:
-                pid = int(proc.pid)
-            folder = latest_session_dir(tui_pid=pid)
-            if folder is not None:
-                path = folder / "updates.jsonl"
-                if path.is_file():
-                    paths["GROK TUI"] = path
-        except Exception:
-            pass
+    def _flow_log_path(self, role: str) -> Path | None:
+        if role == "GROK TUI":
+            try:
+                session = self._sessions.get(GROK_TUI_TERMINAL_ID) or {}
+                proc = session.get("proc")
+                pid = int(proc.pid) if proc is not None and proc.poll() is None else None
+                folder = latest_session_dir(home=DEV_GROK_HOME, tui_pid=pid)
+                path = folder / "updates.jsonl" if folder is not None else None
+                return path if path is not None and path.is_file() else None
+            except Exception:
+                return None
+        if role != "GPTUI":
+            return None
         try:
             sid = str(getattr(self, "_gpt_session_id", "") or "")
             root = getattr(self, "_gpt_sessions_root", None)
             if sid and root is not None:
                 path = codex_session_path(sid, root)
                 if path is not None and path.is_file():
-                    paths["GPTUI"] = path
+                    return path
         except Exception:
-            pass
-        return paths
+            return None
+        return None
 
-    def _flow_bind_logs(self) -> None:
-        for role, path in self._flow_log_paths().items():
-            key = str(path)
-            if key not in self._flow_offsets:
-                try:
-                    self._flow_offsets[key] = path.stat().st_size
-                except OSError:
-                    self._flow_offsets[key] = 0
-            self._flow_paths[role] = path
+    def _flow_bind_log(self, role: str, *, initial: bool = False) -> None:
+        if role in self._flow_paths:
+            return
+        now = time.monotonic()
+        previous_lookup = self._flow_last_lookup_at.get(role, 0.0)
+        if not initial and now - previous_lookup < 2.0:
+            return
+        self._flow_last_lookup_at[role] = now
+        path = self._flow_log_path(role)
+        if path is None:
+            return
+        if initial and role == "GROK TUI":
+            self._flow_stage_had_grok_log = True
+        key = str(path)
+        if key not in self._flow_offsets:
+            try:
+                size = path.stat().st_size
+                modified = path.stat().st_mtime
+            except OSError:
+                size = 0
+                modified = 0.0
+            offset = size
+            if (
+                role == "GROK TUI"
+                and not self._flow_stage_had_grok_log
+                and modified >= self._flow_stage_started_wall - 2.0
+            ):
+                offset = 0
+            elif (
+                role == "GPTUI"
+                and not self._flow_gpt_session_id_at_stage
+                and modified >= self._flow_stage_started_wall - 2.0
+            ):
+                offset = 0
+            self._flow_offsets[key] = offset
+        self._flow_paths[role] = path
 
     def _flow_tail(self, path: Path) -> str:
         key = str(path)
@@ -2955,74 +3713,226 @@ class ChatSurfaceHost(QObject):
         if size <= offset:
             return ""
         start = offset
-        if size - offset > 65536:
-            start = size - 65536
+        count = min(size - start, _FLOW_READ_CHUNK_BYTES)
         try:
             with path.open("rb") as stream:
                 stream.seek(start)
-                data = stream.read(65536)
+                data = stream.read(count)
         except OSError:
             return ""
-        self._flow_offsets[key] = size
-        text = data.decode("utf-8", errors="replace")
-        if text and not text.startswith("{") and "\n" in text:
-            text = text.split("\n", 1)[1]
-        return text
+        complete = data.rfind(b"\n") + 1
+        if complete <= 0:
+            return ""
+        self._flow_offsets[key] = start + complete
+        return data[:complete].decode("utf-8", errors="replace")
 
     def _flow_tui_poll(self) -> None:
-        if not self._flow_listen:
+        if not self._flow_listen or not self._flow_task_active:
             self._flow_poll.stop()
             return
         if time.monotonic() >= self._flow_deadline:
-            for role in ("GROK TUI", "GPTUI"):
-                if not str(self._flow_acc.get(role) or "").strip():
-                    flow_tui.set_motor_stream(role, "no reply yet", done=True)
-            self._flow_tui_stop()
-            self._flow_tui_emit(flow_tui.snapshot())
+            self._flow_tui_fail(
+                self._flow_current_role + " did not finish "
+                + self._flow_current_stage.replace("_", " ")
+                + " before the stage timeout.",
+                status="INCOMPLETE",
+            )
             return
-        if len(self._flow_paths) < 2:
-            self._flow_bind_logs()
-        changed = False
-        for role, path in list(self._flow_paths.items()):
-            blob = self._flow_tail(path)
-            if not blob:
-                continue
-            piece = flow_tui.extract_assistant_jsonl(blob, role=role)
-            if not piece:
-                continue
-            if role == "GROK TUI":
-                self._flow_acc[role] = (self._flow_acc.get(role) or "") + piece
-            else:
-                self._flow_acc[role] = piece
-            body = str(self._flow_acc.get(role) or "")
-            if not body or flow_tui.is_chrome_reply(body):
-                continue
-            flow_tui.set_motor_stream(role, body, done=False)
-            changed = True
-        if changed:
+        role = self._flow_current_role
+        self._flow_bind_log(role)
+        path = self._flow_paths.get(role)
+        if path is None:
+            return
+        blob = self._flow_tail(path)
+        if not blob:
+            return
+        piece, done = flow_tui.extract_assistant_events(blob, role=role)
+        if piece:
+            self._flow_acc[role] = flow_tui.append_assistant_text(
+                str(self._flow_acc.get(role) or ""),
+                piece,
+                role=role,
+            )
+        body = str(self._flow_acc.get(role) or "").strip()
+        label = self._flow_current_stage.replace("GROK_", "").replace("GPT_", "").replace("_", " ")
+        if len(body) >= flow_tui.MAX_REPLY_CHARS:
+            self._flow_tui_fail(
+                role + " reached FLOW's response limit during " + label
+                + "; the task remains incomplete because the handoff may be truncated.",
+                status="INCOMPLETE",
+            )
+            return
+        if body:
+            flow_tui.set_motor_stream(role, body, done=done, stage=label)
             self._flow_tui_emit(flow_tui.snapshot())
-        done = all(str(self._flow_acc.get(role) or "").strip() for role in ("GROK TUI", "GPTUI"))
         if done:
-            for role, body in self._flow_acc.items():
-                if body:
-                    flow_tui.set_motor_stream(role, body, done=True)
-            self._flow_tui_stop()
-            self._flow_tui_emit(flow_tui.snapshot())
+            if not body:
+                self._flow_tui_fail(
+                    role + " finished " + label + " without a readable response.",
+                    status="INCOMPLETE",
+                )
+                return
+            self._flow_stage_completed(role, self._flow_current_stage, body)
 
-    def _flow_tui_start(self) -> None:
+    def _flow_begin_stage(self, role: str, stage: str, prompt: str) -> bool:
+        self._flow_stage_id += 1
+        stage_id = self._flow_stage_id
+        self._flow_current_role = role
+        self._flow_current_stage = stage
         self._flow_paths = {}
         self._flow_offsets = {}
+        self._flow_last_lookup_at = {}
         self._flow_acc = {"GROK TUI": "", "GPTUI": ""}
-        self._flow_bind_logs()
+        self._flow_gpt_session_id_at_stage = ""
+        self._flow_stage_had_grok_log = False
+        label = stage.replace("GROK_", "").replace("GPT_", "").replace("_", " ")
+        flow_tui.set_phase(stage, role)
+        if role == "GROK TUI":
+            try:
+                started = bool(self.startGrokTui(GROK_TUI_TERMINAL_ID))
+            except Exception:
+                started = False
+            terminal_id = GROK_TUI_TERMINAL_ID
+        else:
+            try:
+                start = getattr(self, "startGptTui", None)
+                started = bool(start()) if callable(start) else False
+            except Exception:
+                started = False
+            terminal_id = "ws.tui.gpt"
+            self._flow_gpt_session_id_at_stage = str(
+                getattr(self, "_gpt_session_id", "") or ""
+            )
+        if not started:
+            self._flow_tui_fail(role + " could not start for " + label + ".")
+            return False
+        self._flow_task_active = True
         self._flow_listen = True
-        self._flow_deadline = time.monotonic() + 45.0
+        self._flow_stage_started_wall = time.time()
+        self._flow_deadline = time.monotonic() + _FLOW_STAGE_TIMEOUT_S
+        self._flow_bind_log(role, initial=True)
         self._flow_poll.start()
+        turn_id = self._flow_turn_id
+        QTimer.singleShot(
+            _FLOW_SEND_DELAY_MS,
+            lambda tid=turn_id, sid=stage_id, target=terminal_id, body=prompt:
+                self._flow_tui_send(target, body, tid, sid),
+        )
+        self._flow_tui_emit(flow_tui.snapshot())
+        return True
+
+    def _flow_stage_completed(self, role: str, stage: str, body: str) -> None:
+        self._flow_tui_stop()
+        label = stage.replace("GROK_", "").replace("GPT_", "").replace("_", " ")
+        flow_tui.set_motor_stream(role, body, done=True, stage=label)
+        if stage == "GROK_PLAN":
+            flow_tui.record_stage_output("grok_handoff", body)
+            if not flow_tui.handoff_has_gpt_assignment(body):
+                self._flow_finish(
+                    "INCOMPLETE",
+                    "GROK TUI did not provide a concrete GPTUI_TASK handoff; no build work was started.",
+                    open_items=["GROK TUI must state a distinct GPTUI_TASK."],
+                )
+                return
+            flow_tui.set_phase("GPT_BUILD", "GPTUI")
+            self._flow_begin_stage("GPTUI", "GPT_BUILD", flow_tui.gpt_build_prompt(body))
+            return
+        if stage == "GPT_BUILD":
+            flow_tui.record_stage_output("gpt_work", body)
+            flow_tui.set_phase("GROK_REVIEW", "GROK TUI")
+            self._flow_begin_stage(
+                "GROK TUI",
+                "GROK_REVIEW",
+                flow_tui.grok_review_prompt(
+                    str((flow_tui.snapshot().get("shared_memory") or {}).get("work", {}).get("grok_handoff") or ""),
+                    body,
+                ),
+            )
+            return
+        if stage == "GROK_REVIEW":
+            flow_tui.record_stage_output("grok_review", body)
+            if flow_tui.review_is_complete(body):
+                self._flow_finish("COMPLETE", "GROK TUI review verified the shared task.")
+                return
+            work = (flow_tui.snapshot().get("shared_memory") or {}).get("work") or {}
+            flow_tui.set_phase("GPT_REPAIR", "GPTUI")
+            self._flow_begin_stage(
+                "GPTUI",
+                "GPT_REPAIR",
+                flow_tui.gpt_repair_prompt(
+                    str(work.get("grok_handoff") or ""),
+                    str(work.get("gpt_work") or ""),
+                    body,
+                ),
+            )
+            return
+        if stage == "GPT_REPAIR":
+            flow_tui.record_stage_output("gpt_repair", body)
+            work = (flow_tui.snapshot().get("shared_memory") or {}).get("work") or {}
+            combined = str(work.get("gpt_work") or "") + "\n\nGPTUI repair pass:\n" + body
+            flow_tui.set_phase("GROK_FINAL_REVIEW", "GROK TUI")
+            self._flow_begin_stage(
+                "GROK TUI",
+                "GROK_FINAL_REVIEW",
+                flow_tui.grok_review_prompt(
+                    str(work.get("grok_handoff") or ""),
+                    combined,
+                    final_after_repair=True,
+                ),
+            )
+            return
+        if stage == "GROK_FINAL_REVIEW":
+            flow_tui.record_stage_output("grok_final_review", body)
+            if flow_tui.review_is_complete(body):
+                self._flow_finish("COMPLETE", "GROK TUI final review verified the repair.")
+            else:
+                state = flow_tui.snapshot()
+                work = (state.get("shared_memory") or {}).get("work") or {}
+                self._flow_finish(
+                    "NEEDS_REVIEW",
+                    "GROK TUI still found an open item after the single repair pass.",
+                    open_items=list(work.get("open") or []),
+                )
+
+    def _flow_finish(
+        self,
+        status: str,
+        note: str,
+        *,
+        open_items: list[str] | None = None,
+    ) -> None:
+        self._flow_tui_stop()
+        self._flow_task_active = False
+        self._flow_current_role = ""
+        self._flow_current_stage = ""
+        board = flow_tui.set_task_result(status, note, open_items=open_items)
+        self._flow_tui_emit(board)
 
     @Slot(str, result=str)
     def flowTuiSubmit(self, text: str) -> str:
-        self._flow_tui_stop()
+        if self._flow_task_active:
+            return self._flow_tui_emit(flow_tui.snapshot())
         try:
             board = flow_tui.submit(text)
+        except ValueError as exc:
+            if str(exc) == "FLOW_REQUEST_TOO_LARGE":
+                board = flow_tui.empty()
+                board["merge"] = {
+                    "status": "INCOMPLETE",
+                    "note": "FLOW request is over its 64,000-character limit; no motor was started.",
+                    "ready": False,
+                    "light": "HOLD",
+                }
+                board["transcript"] = [{
+                    "role": "FLOW",
+                    "kind": "ERROR",
+                    "text": "FLOW request exceeds 64,000 characters. Shorten it and resubmit.",
+                }]
+                return self._flow_tui_emit(board)
+            return self._flow_tui_json({
+                "schema": flow_tui.SCHEMA,
+                "error": type(exc).__name__ + ":" + str(exc),
+            })
         except Exception as exc:
             return self._flow_tui_json({
                 "schema": flow_tui.SCHEMA,
@@ -3031,38 +3941,11 @@ class ChatSurfaceHost(QObject):
         ask = " ".join(str(text or "").split())
         if not ask:
             return self._flow_tui_emit(board)
-        grok_ok = False
-        try:
-            grok_ok = bool(self.startGrokTui(GROK_TUI_TERMINAL_ID))
-        except Exception:
-            grok_ok = False
-        gpt_ok = False
-        try:
-            start = getattr(self, "startGptTui", None)
-            gpt_ok = bool(start()) if callable(start) else False
-        except Exception:
-            gpt_ok = False
-        if not grok_ok:
-            board = flow_tui.set_motor_stream(
-                "GROK TUI", "GROK TUI did not start.", done=True
-            )
-        if not gpt_ok:
-            board = flow_tui.set_motor_stream(
-                "GPTUI", "GPTUI did not start.", done=True
-            )
-        if grok_ok:
-            QTimer.singleShot(
-                520,
-                lambda line=ask: self._flow_tui_send(GROK_TUI_TERMINAL_ID, line),
-            )
-        if gpt_ok:
-            QTimer.singleShot(
-                720,
-                lambda line=ask: self._flow_tui_send("ws.tui.gpt", line),
-            )
-        if grok_ok or gpt_ok:
-            self._flow_tui_start()
-        return self._flow_tui_emit(board)
+        self._flow_turn_id += 1
+        self._flow_task_active = True
+        return self._flow_tui_emit(board) if not self._flow_begin_stage(
+            "GROK TUI", "GROK_PLAN", flow_tui.grok_plan_prompt()
+        ) else self._flow_tui_json(flow_tui.snapshot())
 
     @Slot(str, str, float, result=str)
     def nodeFlowSetParam(self, node_id: str, key: str, value: float) -> str:
@@ -5120,7 +6003,7 @@ class ChatSurfaceHost(QObject):
         qt_button = mapping.get(button, Qt.MouseButton.LeftButton)
         point = QPointF(float(x), float(y))
         modifiers = Qt.KeyboardModifier.NoModifier
-        for event_type, event_button in (
+        for event_type, pressed_buttons in (
             (QEvent.Type.MouseButtonPress, qt_button),
             (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
         ):
@@ -5130,8 +6013,8 @@ class ChatSurfaceHost(QObject):
                     event_type,
                     point,
                     point,
-                    event_button,
                     qt_button,
+                    pressed_buttons,
                     modifiers,
                 ),
             )
@@ -5274,6 +6157,13 @@ class ChatSurfaceHost(QObject):
             self.chatSessionsChanged.emit(listing)
 
     def shutdown(self) -> None:
+        self._live_vision_timer.stop()
+        # The independent bounded screen service survives an app restart during
+        # the same task. Explicit stop remains available in the visible UI.
+        guard = getattr(self, "_gpt_storage_guard", None)
+        if guard is not None and guard.poll() is None:
+            guard.terminate()
+        self._gpt_storage_guard = None
         self._idle_learn_timer.stop()
         self._crypto_timer.stop()
         self._tui_focus_timer.stop()

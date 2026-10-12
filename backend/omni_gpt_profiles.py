@@ -21,9 +21,9 @@ SCHEMA = "gg.ai-desktop.omni-gpt-profiles.v1"
 DEFAULT_ROOT = Path(
     os.environ.get(
         "GG_GPT_KNOWLEDGE_ROOT",
-        str(Path.home() / "GG-KNOWLEDGE" / "web-gpts"),
+        "/home/GG/GG-KNOWLEDGE/web-gpts",
     )
-).expanduser()
+)
 PROJECT_INDEX = Path(__file__).resolve().parents[1] / "OMNI-GPT-PROFILES.md"
 MAX_SOURCE_BYTES = 1_048_576
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ-]{3,}", re.UNICODE)
@@ -349,11 +349,14 @@ def build_context(
     )
     closer = "[/GG OMNIGPT PROFILE LAYER]"
     try:
-        from backend.thought_desk import sit as sit_thought_desk
+        from backend.thought_desk import sit as sit_thought_desk, render_research_context
 
         board = sit_thought_desk(user_text, compact=not include_registry)
         desk_text = str(board.get("text") or "")
+        research_text = render_research_context((board.get("seats") or {}).get("research") or {},
+                                               budget=1200 if include_registry else 500)
     except Exception:
+        research_text = ""
         desk_text = (
             "[SAME_TASK_DESK]\nparallel_agent_brain=FORBIDDEN\n"
             "parallel_execution=BOUNDED_ADAPTIVE_DAG\n"
@@ -370,7 +373,7 @@ def build_context(
     if len(desk_text) > desk_cap:
         desk_text = desk_text[: desk_cap - 18].rstrip() + "\n[/SAME_TASK_DESK]"
     memory_block = ("\n" + mem_text) if mem_text else ""
-    tail = apply_line + "\n" + desk_text + memory_block + "\n" + closer
+    tail = apply_line + "\n" + research_text + "\n" + desk_text + memory_block + "\n" + closer
     remaining = int(max_chars) - sum(len(chunk) + 1 for chunk in chunks) - len(tail) - 1
     remaining = max(0, remaining)
     for record in selected:
@@ -410,6 +413,8 @@ def build_context(
 
     def _join(desk: str, memory: str) -> str:
         parts = list(chunks) + [apply_line, desk]
+        if research_text:
+            parts.append(research_text)
         if memory:
             parts.append(memory)
         parts.append(closer)

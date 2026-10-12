@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -53,11 +54,13 @@ def parse_signal(raw: str | dict[str, Any]) -> dict[str, Any]:
     side = str(payload.get("side") or "").strip().lower()
     if side not in _SIDES:
         raise ValueError("CRYPTO_SIGNAL_SIDE")
+    if isinstance(payload.get("size_sol"), bool):
+        raise ValueError("CRYPTO_SIGNAL_SIZE")
     try:
         size = float(payload.get("size_sol"))
     except (TypeError, ValueError) as exc:
         raise ValueError("CRYPTO_SIGNAL_SIZE") from exc
-    if size <= 0 or size > 1000:
+    if not math.isfinite(size) or size <= 0 or size > 1000:
         raise ValueError("CRYPTO_SIGNAL_SIZE")
     symbol = str(payload.get("symbol") or "SOL").strip()[:24] or "SOL"
     source = str(payload.get("source") or "manual").strip()[:40] or "manual"
@@ -295,6 +298,9 @@ def read_ledger(limit: int = 20) -> list[dict[str, Any]]:
 
 
 ERROR_HINTS = {
+    "CRYPTO_TX_UNCONFIRMED": "Transaction submitted; confirmation timed out. It is not a fill.",
+    "CRYPTO_TX_FAILED": "The chain reported a failed transaction.",
+    "CRYPTO_TX_EXPIRED": "The transaction blockhash expired before confirmation.",
     "LAB_OFF": "Start LAB first. Local validator is off.",
     "LAB_STARTING": "Lab is still starting. Wait for LAB ON.",
     "RPC_UNREACHABLE": "Lab RPC is down. Turn LAB ON.",
@@ -303,6 +309,7 @@ ERROR_HINTS = {
     "MAINNET_NOT_ARMED": "Mainnet is observe-only. Sends stay on testnet/lab.",
     "MAINNET_OBSERVE_ONLY": "Mainnet is observe-only. Sends stay on testnet/lab.",
     "NO_PROFIT": "Arb reverted. Pools unchanged.",
+    "TIP_EATS_EDGE": "Gross edge is smaller than the Jito tip. Bundle dropped.",
     "NO_MARKET_DATA": "Market feed quiet. EVAL needs a SOL chart.",
     "AIRDROP_FAIL": "Lab airdrop failed. Retry after LAB ON.",
     "CRYPTO_BLOCKHASH": "Lab did not give a blockhash. Retry.",
@@ -372,11 +379,15 @@ def decorate_ledger_row(row: dict[str, Any]) -> dict[str, Any]:
             out["hint"] = human_error(str(err))
     elif not out.get("hint"):
         tx = str(out.get("txid") or "")
-        if tx not in _DEAD_TX:
-            out["hint"] = "Signed on lab. " + tx[:8] + "…" + tx[-6:]
+        if out.get("status") == "confirmed":
+            out["hint"] = "Confirmed localnet diagnostic self-transfer."
+        elif tx not in _DEAD_TX:
+            out["hint"] = "Submitted transaction; confirmation not recorded."
+        else:
+            out["hint"] = "Simulated portfolio operation."
     hint = str(out.get("hint") or "")
     if "Swap path next" in hint:
-        out["hint"] = "Signed lab fill."
+        out["hint"] = "Localnet self-transfer diagnostic; no token swap."
     if "Balance not yet visible" in hint:
         out["hint"] = "Lab airdrop submitted."
     return out

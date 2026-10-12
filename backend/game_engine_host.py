@@ -12,12 +12,16 @@ from __future__ import annotations
 import json
 import math
 import copy
+import bisect
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 from backend import game_engine_cinematic as cinematic
 from backend import game_engine_combat as combat_contract
+from backend import game_engine_enchants as enchant_contract
+from backend import game_engine_firearms as firearms_contract
 from backend import game_engine_content as content_catalog
 from backend import game_engine_controller as controller
 from backend import game_engine_dialogue as dialogue_contract
@@ -26,6 +30,7 @@ from backend import game_engine_economy as economy_contract
 from backend import game_engine_animation as animation_contract
 from backend import game_engine_addons as addons_contract
 from backend import game_engine_assets as assets_contract
+from backend import game_engine_character_creation as character_creation
 from backend import game_engine_editor as editor_contract
 from backend import game_engine_events as events_contract
 from backend import game_engine_factions as factions_contract
@@ -33,7 +38,13 @@ from backend import game_engine_fallback as fallback_contract
 from backend import game_engine_gear as gear_contract
 from backend import game_engine_input as input_contract
 from backend import game_engine_items as item_state
+from backend import game_engine_fauna as fauna_contract
+from backend import game_engine_ecology as ecology_contract
+from backend import game_engine_nature as nature_contract
+from backend import game_engine_nature_catalog as nature_catalog
+from backend import game_engine_actions as actions_contract
 from backend import game_engine_life as life_contract
+from backend import game_engine_mobility as mobility_contract
 from backend import game_engine_mmo as mmo
 from backend import game_engine_nav as nav_contract
 from backend import game_engine_npc as npc_contract
@@ -45,10 +56,18 @@ from backend import game_engine_quests as quests_contract
 from backend import game_engine_render as render_contract
 from backend import game_engine_schedules as schedules_contract
 from backend import game_engine_social as social_contract
+from backend import game_engine_settlement as settlement_contract
 from backend import game_engine_terrain as terrain_contract
+from backend import game_engine_planet as planet_contract
 from backend import game_engine_trade as trade_contract
 from backend import game_engine_world as world
 from backend import game_engine_world_events as world_events_contract
+from backend.game_engine_world_population import WorldPopulation
+from backend import game_engine_world_places as world_places_contract
+from backend.game_engine_benilla_spells import SpellsMixin
+from backend.game_engine_benilla_rides import RidesMixin
+from backend.game_engine_benilla_survival import SurvivalMixin
+from backend.game_engine_local_custody_services import SharedLocalServicesMixin
 
 
 SCHEMA = "gg.game-engine.runtime.v1"
@@ -58,8 +77,14 @@ FIXED_DT = 1.0 / FIXED_HZ
 # snapshot at a lower cadence so Python/QML marshalling cannot compete with
 # the desktop shell's frame budget.  Stress mode deliberately gives the UI a
 # little more headroom while leaving the simulation cadence unchanged.
-RENDER_UPDATE_HZ = 30
-STRESS_RENDER_UPDATE_HZ = 20
+RENDER_UPDATE_HZ = 60
+STRESS_RENDER_UPDATE_HZ = 60
+# A DOS column frame costs about 10 ms.  Rebuilding it on every 60 Hz render
+# tick would hold the simulation lock for most of the frame.  Ten hertz is
+# enough for the picture to follow walking and turning, and it keeps the
+# fixed step responsive.  The last frame stays on the stream between builds
+# so the canvas never falls back to a stale full-status snapshot.
+DOS_FRAME_INTERVAL_S = 0.10
 MAX_CATCH_UP_STEPS = 4
 MAX_ENTITIES = 2048
 MAX_PARTICLES = 4096
@@ -69,6 +94,8 @@ MAX_CHUNKS = 64
 MAX_RENDER_CHUNKS = terrain_contract.MAX_TERRAIN_CELLS
 RENDER_ENTITY_LIMIT = 96
 RENDER_PARTICLE_LIMIT = 128
+STATIC_HEIGHT_CACHE_LIMIT = 2048
+MOVING_HEIGHT_CACHE_LIMIT = 2048
 MAX_REPLAY_INPUTS = 1800
 NPC_WORLD_ACTION_RADIUS_M = 2.25
 NPC_WORLD_ACTION_COOLDOWN_S = 4.0
@@ -113,7 +140,17 @@ def _round(value: float, places: int = 3) -> float:
     return round(float(value), places)
 
 
-class GameEngineRuntime:
+from backend.game_engine_gameplay import GameplayMixin
+
+
+from backend.game_engine_benilla_local_actions import LocalActionsMixin
+from backend.game_engine_benilla_controls import ClientControlsMixin
+
+
+from backend.game_engine_benilla_local_client import LocalClientMixin
+from backend.game_engine_benilla_services import ServicesMixin
+
+class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, SpellsMixin, ClientControlsMixin, LocalClientMixin, ServicesMixin, LocalActionsMixin, GameplayMixin):
     """Threaded local simulation with bounded, inspectable state."""
 
     def __init__(self) -> None:
@@ -133,16 +170,28 @@ class GameEngineRuntime:
         self._keybindings = input_contract.new_bindings()
         self._addons = addons_contract.new_state()
         self._movement_mode = "GROUND"
+        self._vehicle_kind = "NONE"
+        self._boat_entity_index: int | None = None
+        self._locomotion_distance_m = 0.0
         self._camera_yaw = 0.0
-        self._camera_pitch = -27.0
+        self._camera_pitch = -8.0
         self._camera_distance = world.DEFAULT_CAMERA_DISTANCE_M
         self._jump_held = False
+        self._jump_count = 0
+        self._double_jump_pose_remaining_s = 0.0
+        self._coyote_time_remaining_s = 0.0
+        self._jump_buffer_remaining_s = 0.0
+        self._jump_hold_time_s = 0.0
+        self._grapple_held = False
+        self._grapple_anchor: tuple[float, float, float] | None = None
+        self._grapple_rope_length = 0.0
+        self._grapple_projectile: dict[str, Any] | None = None
         self._grounded = True
         self._sprinting = False
         self._content = content_catalog.starter_content()
         self._available_content_packs = content_catalog.available_content_packs()
         self._active_content_pack_ids: list[str] = []
-        self._life_spawns = life_contract.spawns_from_content(self._content)
+        self._set_life_spawns_locked(life_contract.spawns_from_content(self._content))
         self._promoted_life_ids: set[str] = set()
         self._last_population_promotion_s = 0.0
         self._item_catalog = item_state.catalog_from_content(self._content)
@@ -158,7 +207,9 @@ class GameEngineRuntime:
         self._individual_state = identity_contract.runtime_state(self._people_catalog)
         self._faction_state = factions_contract.new_state(self._people_catalog.values())
         self._quest_state = quests_contract.new_state()
+        self._quest_visit_presence: set[str] = set()
         self._dialogue_state = dialogue_contract.new_state()
+        self._benilla_quest_panel={};self._benilla_gossip_hidden=False
         self._social_state = social_contract.new_state()
         self._world_event_catalog = world_events_contract.normalized_catalog(
             self._content.get("world_events")
@@ -182,32 +233,63 @@ class GameEngineRuntime:
         self._last_dos_command: dict[str, Any] = {}
         self._progression = progression.starter_state()
         self._combat_state = combat_contract.new_state()
+        self._combat_target_id = ""
         self._last_combat: dict[str, Any] = {}
+        self._character_actions: dict[str, dict[str, Any]] = {}
+        self._character_action_serial = 0
         self._ability_cooldowns: dict[str, float] = {}
         self._ability_held: dict[str, bool] = {}
         self._resource = 100.0
         self._last_ability = ""
         self._last_ability_status = "READY"
+        self._last_ability_time = -10.0
+        self._reset_spells_locked()
+        self._reset_survival_locked()
         self._editor_document = editor_contract.new_document()
         self._editor_entity_indices: dict[str, int] = {}
         self._state_store = mmo.MemoryStateStore()
         self._persistence_key = "local-player"
         self._persistence_revision = 0
+        # Every local character runtime uses the same account stash. Character
+        # saves remain separate from this bounded, durable account inventory.
+        self._account_id = "local-account"
+        self._stash_store = mmo.LocalAccountStashStore()
+        self._stash_state: dict[str, Any] = {"revision": 0, "items": []}
+        self._stash_error = ""
+        self._open_stash_container_id = ""
+        self._open_merchant_id = ""
+        try:
+            self._stash_state = self._stash_store.load(self._account_id)
+        except (OSError, ValueError) as exc:
+            self._stash_error = type(exc).__name__ + ":" + str(exc)
         self._terrain_overrides = terrain_contract.new_overrides()
         # Asset admission is intentionally done once at runtime start.  The
         # fixed-step simulation only receives a compact binding view; it never
         # opens or decodes mesh data during a tick or a snapshot.
         self._asset_catalog = assets_contract.default_catalog()
+        self._character_creation = character_creation.load_selection()
         self._navigation_cache_key: tuple[Any, ...] | None = None
         self._navigation_tiles: list[dict[str, Any]] = []
+        self._navigation_cache_cells: set[tuple[int, int]] = set()
+        self._navigation_cache_override_revision: int | None = None
+        self._navigation_cache_mode: str | None = None
+        self._navigation_interest_center: tuple[int, int] | None = None
+        self._navigation_interest_cells: list[dict[str, Any]] = []
         self._terrain_cell_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
-        # Full UI snapshots are intentionally richer than the 30 Hz render
+        # Full UI snapshots are intentionally richer than the 60 Hz render
         # stream.  The render cache keeps static bindings/geometry metadata
         # stable while the lightweight path refreshes only transforms, poses,
         # item bobbing and particles between full UI snapshots.
         self._render_snapshot_cache: dict[str, Any] | None = None
         self._render_snapshot_signature: tuple[Any, ...] | None = None
-        self._render_profile = "BALANCED"
+        self._dos_live_frame: dict[str, Any] | None = None
+        self._dos_live_motion: tuple[Any, ...] | None = None
+        self._dos_live_frame_at: float = 0.0
+        # The creation preview targets a PS2-like budget by default. The
+        # richer profiles remain available in the PERF inspector and game UI.
+        self._render_profile = "PS2_CLASSIC"
+        self._flora = ecology_contract.FloraStreamer(terrain_contract.DEFAULT_WORLD_SEED)
+        self._nature = nature_contract.NatureWorld(terrain_contract.DEFAULT_WORLD_SEED)
         self._presentation_mode = render_contract.RICH_3D
         self._presentation_reason = ""
         self._cinematic_preset = "FIRST_ISLAND_DIORAMA"
@@ -218,11 +300,14 @@ class GameEngineRuntime:
         self._network_seq = 0
         self._collision_cooldown = 0.0
         self._particle_cursor = 0
+        self._last_xp_visual = None
         self._events: list[dict[str, Any]] = []
         self._event_journal = events_contract.new_journal()
         self._entity_count = 0
         self._particle_count = 0
         self._alive: list[bool] = []
+        self._active_entity_indices: list[int] = []
+        self._static_entity_indices: list[int] = []
         self._kind: list[str] = []
         self._color: list[str] = []
         self._x: list[float] = []
@@ -238,6 +323,7 @@ class GameEngineRuntime:
         self._radius: list[float] = []
         self._static: list[bool] = []
         self._npc_indices: list[int] = []
+        self._active_particle_indices: list[int] = []
         self._npc_ids: list[str] = []
         self._npc_archetype: list[str] = []
         self._npc_state: list[str] = []
@@ -283,9 +369,12 @@ class GameEngineRuntime:
             "strafe": 0.0,
             "vertical": 0.0,
             "jump": False,
+            "grapple": False,
             "movement_mode": "GROUND",
+            "mouse_look": False,
+            "facing_yaw": 0.0,
             "camera_yaw": 0.0,
-            "camera_pitch": -27.0,
+            "camera_pitch": -8.0,
             "camera_distance": world.DEFAULT_CAMERA_DISTANCE_M,
             "ability_1": False,
             "ability_2": False,
@@ -294,6 +383,8 @@ class GameEngineRuntime:
 
     def _reset_arrays_locked(self) -> None:
         self._alive = [False] * MAX_ENTITIES
+        self._active_entity_indices = []
+        self._static_entity_indices = []
         self._kind = [""] * MAX_ENTITIES
         self._color = ["#8db89a"] * MAX_ENTITIES
         self._x = [0.0] * MAX_ENTITIES
@@ -303,6 +394,8 @@ class GameEngineRuntime:
         self._vy = [0.0] * MAX_ENTITIES
         self._vz = [0.0] * MAX_ENTITIES
         self._yaw = [0.0] * MAX_ENTITIES
+        self._pitch = [0.0] * MAX_ENTITIES
+        self._roll = [0.0] * MAX_ENTITIES
         self._sx = [1.0] * MAX_ENTITIES
         self._sy = [1.0] * MAX_ENTITIES
         self._sz = [1.0] * MAX_ENTITIES
@@ -330,7 +423,11 @@ class GameEngineRuntime:
         self._npc_path = [[] for _ in range(MAX_ENTITIES)]
         self._npc_path_index = [0] * MAX_ENTITIES
         self._npc_path_status = ["NOT_REQUESTED"] * MAX_ENTITIES
+        self._npc_path_goal_tile: list[tuple[int, int] | None] = [None] * MAX_ENTITIES
+        self._npc_path_navigation_key: list[tuple[Any, ...] | None] = [None] * MAX_ENTITIES
+        self._npc_path_attempt_tick = [-60] * MAX_ENTITIES
         self._plife = [0.0] * MAX_PARTICLES
+        self._active_particle_indices = []
         self._px = [0.0] * MAX_PARTICLES
         self._py = [0.0] * MAX_PARTICLES
         self._pz = [0.0] * MAX_PARTICLES
@@ -338,6 +435,7 @@ class GameEngineRuntime:
         self._pvy = [0.0] * MAX_PARTICLES
         self._pvz = [0.0] * MAX_PARTICLES
         self._pcolor = ["#c8a97e"] * MAX_PARTICLES
+        self._reset_ride_particles_locked()
 
     def _free_entity_locked(self) -> int | None:
         for index in range(1, MAX_ENTITIES):
@@ -349,6 +447,9 @@ class GameEngineRuntime:
         if index <= 0 or index >= MAX_ENTITIES or not self._alive[index]:
             return False
         self._alive[index] = False
+        self._active_entity_indices.remove(index)
+        if self._static[index]:
+            self._static_entity_indices.remove(index)
         if index in self._npc_indices:
             self._npc_indices.remove(index)
         self._npc_ids[index] = ""
@@ -363,17 +464,120 @@ class GameEngineRuntime:
         self._npc_path[index] = []
         self._npc_path_index[index] = 0
         self._npc_path_status[index] = "NOT_REQUESTED"
+        self._npc_path_goal_tile[index] = None
+        self._npc_path_navigation_key[index] = None
+        self._npc_path_attempt_tick[index] = -60
         self._kind[index] = ""
         self._entity_count = max(0, self._entity_count - 1)
         return True
 
-    def _terrain_height_locked(self, x: float, z: float) -> float:
-        return terrain_contract.height_at(
+    def _terrain_height_locked(self, x: float, z: float, *, static: bool = False) -> float:
+        """Cache exact samples; movers never evict fixed flora/animal anchors."""
+        imported=getattr(self,'_benilla_world',None)
+        if imported is not None:return imported.ground(x,self._y[0],z)
+        revision = int(self._terrain_overrides.get("revision", 0))
+        if (revision != getattr(self, "_height_cache_revision", None)
+                or self._terrain_overrides is not getattr(self, "_height_cache_document", None)):
+            self._height_cache_revision = revision
+            self._height_cache_document = self._terrain_overrides
+            self._height_samples = OrderedDict()
+            self._static_height_samples = OrderedDict()
+            self._height_brush_stamps = terrain_contract._normalized_brush_stamps(self._terrain_overrides)
+            self._height_brush_index = terrain_contract._build_brush_index(self._height_brush_stamps)
+        key = (x, z)
+        cache = self._static_height_samples if static else self._height_samples
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        value = terrain_contract.height_at(
+            x, z, WORLD_SEED, overrides=self._terrain_overrides,
+            brush_stamps=self._height_brush_stamps, brush_index=self._height_brush_index,
+        )
+        cache[key] = value
+        limit = STATIC_HEIGHT_CACHE_LIMIT if static else MOVING_HEIGHT_CACHE_LIMIT
+        if len(cache) > limit:
+            cache.popitem(last=False)
+        return value
+
+    def _static_terrain_height_locked(self, x: float, z: float) -> float:
+        return self._terrain_height_locked(x, z, static=True)
+
+    def _water_sample_locked(self, x: float, z: float) -> dict[str, Any]:
+        if getattr(self,'_benilla_world',None) is not None:
+            return self._benilla_world.water_sample(x,self._y[0],z)
+        from backend.game_engine_landscape import water_at
+        inland=water_at(x,z)
+        if inland is not None:
+            slope=inland['slope'];length=math.sqrt(1+slope['x']**2+slope['z']**2)
+            return {'height_m':inland['level_m'],'slope':slope,
+                    'current_mps':inland['current_mps'],'vertical_velocity_mps':0.,
+                    'normal':{'x':-slope['x']/length,'y':1/length,'z':-slope['z']/length},'wave_height_m':0.,
+                    'surface_model':'AUTHORED_INLAND_WATER','body_id':inland['id'],'body_kind':inland['kind']}
+        return mobility_contract.surface_sample(
             x,
             z,
-            WORLD_SEED,
-            overrides=self._terrain_overrides,
+            self._sim_time,
+            sea_level_m=terrain_contract.SEA_LEVEL,
         )
+
+    def _water_depth_locked(self, x: float, z: float) -> float:
+        return max(
+            0.0,
+            float(self._water_sample_locked(x, z)["height_m"])
+            - self._terrain_height_locked(x, z),
+        )
+
+    def _player_surface_locked(self) -> dict[str, Any]:
+        """Fresh controller/provider facts, shared by render, UI and Lua/audio."""
+        x,z=self._x[0],self._z[0];height=self._terrain_height_locked(x,z);water=self._water_sample_locked(x,z)
+        depth=max(0.,water['height_m']-height)
+        if self._vehicle_kind=='BOAT' or self._movement_mode=='SWIM':medium='WATER'
+        elif self._movement_mode=='FLY':medium='AIR'
+        elif depth>mobility_contract.MIN_SWIMMABLE_DEPTH_M and self._y[0]<=water['height_m']+1.5:medium='WATER'
+        else:medium='LAND'
+        return {'height_m':height,'medium':medium,'water_depth_m':depth,'water_height_m':water['height_m'],
+                'biome':'WORLD' if getattr(self,'_benilla_world',None) is not None else planet_contract.biome_at(x,z,WORLD_SEED),
+                'liquid_kind':water.get('body_kind','WATER' if depth>0 else 'NONE')}
+
+    def _ground_contact_height_locked(
+        self,
+        x: float,
+        z: float,
+        *,
+        vehicle_kind: str = "NONE",
+    ) -> float:
+        terrain_y = self._terrain_height_locked(x, z)
+        if getattr(self,'_benilla_world',None) is not None:return terrain_y+mobility_contract.PLAYER_ROOT_HEIGHT_M
+        floor_y = terrain_y + mobility_contract.PLAYER_ROOT_HEIGHT_M
+        from backend.game_engine_landscape import contact_height
+        landscape_floor=contact_height(x,z,self._y[0],self._static_terrain_height_locked)
+        if landscape_floor is not None:floor_y=landscape_floor
+        if vehicle_kind == "HOVERBOARD":
+            if self._water_depth_locked(x, z) > mobility_contract.MIN_SWIMMABLE_DEPTH_M:
+                # Same sample the mesh draws. The seabed only stops the
+                # board falling through the beach, it is not a second sea.
+                return max(
+                    floor_y + mobility_contract.HOVER_RIDE_HEIGHT_M,
+                    float(self._water_sample_locked(x, z)["height_m"])
+                    + mobility_contract.HOVER_WATER_CLEARANCE_M,
+                )
+            return floor_y + mobility_contract.HOVER_RIDE_HEIGHT_M
+        if vehicle_kind == "NONE":
+            from backend.game_engine_canopy import contact_height as canopy_contact
+            canopy_floor=canopy_contact(x,z,self._y[0],self._static_terrain_height_locked)
+            if canopy_floor is not None:floor_y=max(floor_y,canopy_floor)
+            if landscape_floor is not None:return max(floor_y,landscape_floor)
+            place_floor=world_places_contract.building_floor(x,z,self._y[0],self._static_terrain_height_locked)
+            if place_floor is not None:return max(floor_y,place_floor)
+            roof_y = self._house_roof_height_locked(x, z)
+            # Only claim the roof once the body is already up there, so a
+            # jump can pass the walls instead of snapping onto the thatch.
+            if roof_y is not None and self._y[0] >= roof_y - 0.12:
+                return max(floor_y,roof_y)
+            deck_y = self._house_deck_height_locked(x, z)
+            if deck_y is not None:
+                return max(floor_y,deck_y)
+        return floor_y
 
     def _spawn_entity_locked(
         self,
@@ -394,6 +598,7 @@ class GameEngineRuntime:
         if self._alive[slot]:
             return None
         self._alive[slot] = True
+        bisect.insort(self._active_entity_indices, slot)
         self._kind[slot] = str(kind)
         self._color[slot] = str(color)
         self._x[slot] = float(x)
@@ -403,9 +608,13 @@ class GameEngineRuntime:
         self._vy[slot] = 0.0
         self._vz[slot] = 0.0
         self._yaw[slot] = 0.0
+        self._pitch[slot] = 0.0
+        self._roll[slot] = 0.0
         self._sx[slot], self._sy[slot], self._sz[slot] = scale
         self._radius[slot] = float(radius)
         self._static[slot] = bool(static)
+        if self._static[slot]:
+            bisect.insort(self._static_entity_indices, slot)
         self._entity_count += 1
         return slot
 
@@ -421,8 +630,8 @@ class GameEngineRuntime:
         deck_hz = assets_contract.HUT_DECK_HZ
         door_half = assets_contract.HUT_DOOR_HALF
         ladder_z = assets_contract.HUT_LADDER_Z
-        for index in range(1, MAX_ENTITIES):
-            if not self._alive[index] or self._kind[index] != "HOUSE":
+        for index in self._static_entity_indices:
+            if self._kind[index] != "HOUSE":
                 continue
             lx, lz = self._house_local_locked(index, px, pz)
             sy = max(0.15, abs(float(self._sy[index])))
@@ -436,8 +645,33 @@ class GameEngineRuntime:
                 return terrain + (deck_world - terrain) * t
         return None
 
+    def _house_roof_height_locked(self, px: float, pz: float) -> float | None:
+        """Player-root height of a hut roof. Feet sit on the visual crown."""
+        for index in self._static_entity_indices:
+            if self._kind[index] != "HOUSE":
+                continue
+            lx, lz = self._house_local_locked(index, px, pz)
+            if abs(lx) > assets_contract.HUT_DECK_HX * 1.12:
+                continue
+            if abs(lz) > assets_contract.HUT_DECK_HZ * 1.12:
+                continue
+            sy = max(0.15, abs(float(self._sy[index])))
+            return (
+                self._y[index]
+                + sy
+                + mobility_contract.PLAYER_ROOT_HEIGHT_M
+            )
+        return None
+
     def _tick_house_walls_locked(self) -> None:
         """Solid walls with a door hole — the hut is a room, not a blob."""
+        imported=getattr(self,'_benilla_world',None)
+        if imported is not None:
+            self._x[0],self._z[0]=imported.collide(self._x[0],self._y[0],self._z[0]);return
+        from backend.game_engine_landscape import cave_collision
+        self._x[0],self._z[0],self._y[0]=cave_collision(self._x[0],self._z[0],self._y[0])
+        self._x[0],self._z[0]=world_places_contract.building_walls(
+            self._x[0],self._z[0],self._y[0],self._static_terrain_height_locked)
         wall_hx = assets_contract.HUT_WALL_HX
         wall_hz = assets_contract.HUT_WALL_HZ
         wall_t = assets_contract.HUT_WALL_T
@@ -452,11 +686,18 @@ class GameEngineRuntime:
             (door_half + wing, -wall_hz, wing + wall_t, wall_t),
         )
         px, pz = self._x[0], self._z[0]
-        for index in range(1, MAX_ENTITIES):
-            if not self._alive[index] or self._kind[index] != "HOUSE":
+        for index in self._static_entity_indices:
+            if self._kind[index] != "HOUSE":
                 continue
             sx = max(0.15, abs(float(self._sx[index])))
             sz = max(0.15, abs(float(self._sz[index])))
+            roof_y = (
+                self._y[index]
+                + max(0.15, abs(float(self._sy[index])))
+                + mobility_contract.PLAYER_ROOT_HEIGHT_M
+            )
+            if self._y[0] >= roof_y - 0.12:
+                continue
             lx, lz = self._house_local_locked(index, px, pz)
             if abs(lx) > assets_contract.HUT_DECK_HX + 0.4:
                 continue
@@ -546,6 +787,9 @@ class GameEngineRuntime:
         self._npc_path[slot] = []
         self._npc_path_index[slot] = 0
         self._npc_path_status[slot] = "NOT_REQUESTED"
+        self._npc_path_goal_tile[slot] = None
+        self._npc_path_navigation_key[slot] = None
+        self._npc_path_attempt_tick[slot] = -60
         identity_contract.ensure_individual(
             self._individual_state,
             npc_id,
@@ -555,9 +799,173 @@ class GameEngineRuntime:
         )
         return slot
 
+    def _set_life_spawns_locked(self, rows: list[dict[str, Any]]) -> None:
+        """Place authored villagers on the expanded island once."""
+        feel = world.ISLAND_LAYOUT_SCALE
+        expanded: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("world_feel_applied"):
+                expanded.append(row)
+                continue
+            placed = dict(row)
+            placed["x"] = float(placed.get("x", 0.0)) * feel
+            placed["z"] = float(placed.get("z", 0.0)) * feel
+            if "radius" in placed:
+                placed["radius"] = float(placed["radius"]) * feel
+            if "sense_radius" in placed:
+                placed["sense_radius"] = min(16.0, float(placed["sense_radius"]) * feel)
+            if placed.get("waypoints"):
+                placed["waypoints"]=[{**point,"x":point["x"]*feel,"z":point["z"]*feel}
+                                     for point in placed["waypoints"]]
+                life_contract.prepare_routine(placed)
+            placed["world_feel_applied"] = True
+            expanded.append(placed)
+        self._life_spawns = expanded
+        if hasattr(self,"_individual_state"):
+            self._ensure_life_individuals_locked()
+
+    def _ensure_life_individuals_locked(self) -> None:
+        """Every authored resident owns a durable identity at the saved home."""
+        for spawn in self._life_spawns:
+            home={"x":spawn["x"],"y":0.,"z":spawn["z"]}
+            identity=str(spawn["id"])
+            existed=identity in self._individual_state.get("individuals",{})
+            person=identity_contract.ensure_individual(self._individual_state,identity,
+                role=spawn.get("role","VILLAGER"),home=home)
+            if person.get("id")!=identity:continue
+            person["home"]=home
+            if not existed:
+                person["occupation"]=spawn.get("role","VILLAGER")
+                if spawn.get("name"):person["name"]=spawn["name"]
+
+    def _ecology_view_locked(self) -> dict[str, Any]:
+        view = dict(self._flora.update(
+            self._x[0], self._z[0], profile=self._render_profile,
+            terrain_revision=int(self._terrain_overrides.get("revision", 0)),
+            height_at=self._static_terrain_height_locked,
+        ))
+        self._refresh_nature_locked()
+        signature=(self._flora._revision,tuple((key,state.get("hidden_until",0)>self._sim_time)
+            for key,state in self._nature.states.items() if state.get("hidden_until")))
+        if signature != getattr(self,"_flora_visibility_signature",None):
+            self._flora_visibility_signature=signature
+            self._flora_visible_revision=getattr(self,"_flora_visible_revision",0)+1
+            self._flora_visible_counts={key:sum(self._nature.visible(r["id"],self._sim_time) for r in rows)
+                for key,rows in self._flora.groups.items()}
+        view["revision"]=self._flora_visible_revision
+        view["groups"]=self._flora_visible_counts
+        view["land_fauna"] = "SHARED_NEARBY_NATURE_SIMULATION"
+        view["collision"] = "FLORA_DECORATIVE_WITH_AUTHORITATIVE_HARVEST_TARGETS"
+        return view
+
+    def _refresh_nature_locked(self) -> None:
+        if getattr(self,"_nature_flora_revision",None)!=self._flora._revision:
+            self._nature_flora_revision=self._flora._revision
+            self._nature_plant_rows=[r for rows in self._flora.groups.values() for r in rows if r["species"] in nature_catalog.PLANTS]
+        self._nature.update(self._x[0], self._z[0], self._sim_time,
+                            self._terrain_height_locked, self._nature_plant_rows,
+                            int(self._terrain_overrides.get("revision", 0)),
+                            static_height_at=self._static_terrain_height_locked)
+        self._publish_companions_locked()
+
+    def _nature_view_locked(self) -> dict[str, Any]:
+        self._refresh_nature_locked()
+        return {"schema": nature_contract.SCHEMA, "revision": self._nature.revision,
+                "groups": {k:len(v) for k,v in self._nature.groups.items() if v},
+                "target": self._nature.target(self._x[0],self._y[0],self._z[0],self._sim_time,self._inventory),
+                "last_result": self._nature.last_result, "species_count": len(nature_catalog.SPECIES),
+                "animal_cap": nature_contract.MAX_ANIMALS, "resident_cells": len(self._nature.cells)}
+
+    def nature_batch(self, key: str) -> tuple[list[dict], int]:
+        with self._lock:
+            return list(self._nature.groups.get(key, ())), self._nature.revision
+
+    def nature_action(self, target_id: str = "", action: str = "") -> dict[str, Any]:
+        with self._lock:
+            self._ecology_view_locked()
+            target = self._nature.target(self._x[0],self._y[0],self._z[0],self._sim_time,self._inventory,str(target_id or ""))
+            wanted = str(action or "").upper()
+            if not wanted:
+                wanted = next((a["id"] for a in target.get("actions",[]) if a["ready"] and a["id"] not in {"ATTACK","PET"}), "PET")
+            prepared = self._nature.prepare(str(target_id or target.get("id", "")),wanted,
+                            self._x[0],self._y[0],self._z[0],self._sim_time,self._inventory)
+            if "error" in prepared:
+                self._nature.last_result=prepared
+                snapshot=self.snapshot_locked();snapshot["error"]=prepared["error"];return snapshot
+            # Plan the item transfer before consuming a plant/animal cooldown.
+            reward=None;stack=None
+            if prepared["table_id"]:
+                roll=item_state.roll_loot(self._item_catalog,prepared["seed"],prepared["table_id"])
+                definition_id=roll.get("item_id", "")
+                if not definition_id or item_state.definition(self._item_catalog,definition_id) is None:
+                    snapshot=self.snapshot_locked();snapshot["error"]="NATURE_LOOT_DEFINITION_MISSING";return snapshot
+                quantity=int(roll.get("quantity",1));definition=item_state.definition(self._item_catalog,definition_id)
+                stack=next((r for r in self._item_instances.values() if r.get("definition_id")==definition_id
+                            and r.get("location")=="INVENTORY" and r.get("owner_id")=="player"
+                            and r.get("quantity",1)+quantity<=definition.get("stack_limit",1)),None)
+                slots=sum(r.get("location")=="INVENTORY" and r.get("owner_id")=="player" for r in self._item_instances.values())
+                if stack is None and (slots>=item_state.MAX_INVENTORY_SLOTS or len(self._item_instances)>=item_state.MAX_WORLD_INSTANCES):
+                    error="ITEM_INVENTORY_FULL" if slots>=item_state.MAX_INVENTORY_SLOTS else "ITEM_INSTANCE_CAPACITY"
+                    self._nature.last_result={"error":error}
+                    snapshot=self.snapshot_locked();snapshot["error"]=error;return snapshot
+                reward={"definition_id":definition_id,"quantity":quantity,"name":definition["name"]}
+            if reward:
+                if stack:stack["quantity"]+=reward["quantity"]
+                else:
+                    instance_id=self._next_item_instance_id_locked("nature")
+                    instance=item_state.make_instance(self._item_catalog,instance_id,reward["definition_id"],
+                                                      quantity=reward["quantity"],location="INVENTORY")
+                    instance.update(origin="NATURE",roll_table_id=prepared["table_id"])
+                    self._item_instances[instance_id]=instance
+                self._inventory=item_state.inventory_counts(self._item_instances.values())
+                self._ensure_inventory_slots_locked()
+            self._nature.commit(prepared)
+            self._nature.last_result["loot"]=reward or {}
+            self._append_event_locked("NATURE_INTERACTION",prepared["name"]+" · "+nature_catalog.LABELS[wanted],
+                                      actor_id="player",subject_id=prepared["id"],payload=self._nature.last_result)
+            return self.snapshot_locked()
+
+    def ecology_batch(self, key: str) -> tuple[list[dict], int]:
+        """Read cached data for Qt; never build a snapshot per plant delegate."""
+        with self._lock:
+            return [r for r in self._flora.groups.get(key, ()) if self._nature.visible(r["id"],self._sim_time)], getattr(self,"_flora_visible_revision",0)
+
+    def _fauna_view_locked(self) -> dict[str, Any]:
+        stamp=(int(self._sim_time*2),int(self._x[0]/32),int(self._z[0]/32))
+        if getattr(self,"_fauna_stamp",None)==stamp:return self._fauna_cached
+        value = fauna_contract.build_groups(
+            self._x[0],
+            self._z[0],
+            self._sim_time,
+            sea_level=terrain_contract.SEA_LEVEL,
+            island_radius=world.island_half_extent_m(),
+            height_at=self._terrain_height_locked,
+            water_at=lambda x, z: mobility_contract.surface_sample(
+                x, z, self._sim_time,
+                sea_level_m=terrain_contract.SEA_LEVEL,
+            )["height_m"],
+        )
+        self._fauna_stamp=stamp;self._fauna_cached=value
+        return value
+
     def _reset_world_locked(self) -> None:
+        self._published_frame = None
+        self._published_nature = None
+        self._nature = nature_contract.NatureWorld(terrain_contract.DEFAULT_WORLD_SEED)
+        if not hasattr(self,'_actions'):self._actions=actions_contract.ActionBars()
+        self._actions.auto_attack=False;self._actions.history=[]
+        self._height_cache_revision=None
+        self._action_item_cooldowns={}
+        self._flora_visibility_signature=None
+        self._fauna_stamp=None
+        self._ui_snapshot_base=None
+        self._nature_flora_revision=None
         self._reset_arrays_locked()
-        self._life_spawns = life_contract.spawns_from_content(self._content)
+        self._world_population = WorldPopulation()
+        self._world_actor_assets = {}
+        self._set_life_spawns_locked(life_contract.spawns_from_content(self._content))
         self._world_event_catalog = world_events_contract.normalized_catalog(
             self._content.get("world_events")
         )
@@ -566,6 +974,7 @@ class GameEngineRuntime:
         self._entity_count = 0
         self._particle_count = 0
         self._particle_cursor = 0
+        self._last_xp_visual = None
         self._collision_cooldown = 0.0
         self._tick = 0
         self._sim_time = 0.0
@@ -574,10 +983,27 @@ class GameEngineRuntime:
         self._event_journal = events_contract.new_journal()
         self._input = self._default_input()
         self._movement_mode = "GROUND"
+        self._vehicle_kind = "NONE"
+        self._boat_entity_index = None
+        self._locomotion_distance_m = 0.0
         self._camera_yaw = 0.0
-        self._camera_pitch = -27.0
+        self._camera_pitch = -8.0
         self._camera_distance = world.DEFAULT_CAMERA_DISTANCE_M
+        self._reset_client_controls_locked()
+        self._reset_spells_locked()
+        self._reset_survival_locked()
         self._jump_held = False
+        self._jump_count = 0
+        self._double_jump_pose_remaining_s = 0.0
+        self._coyote_time_remaining_s = 0.0
+        self._jump_buffer_remaining_s = 0.0
+        self._jump_hold_time_s = 0.0
+        self._grapple_held = False
+        self._grapple_anchor = None
+        self._grapple_rope_length = 0.0
+        self._grapple_projectile = None
+        self._firearm_shots=[]
+        self._firearm_last_hand=""
         self._grounded = True
         self._sprinting = False
         self._item_instances = {
@@ -586,10 +1012,17 @@ class GameEngineRuntime:
             if isinstance(row, dict) and row.get("instance_id")
         }
         self._item_counter = 0
+        for tool in nature_catalog.TOOLS:
+            instance_id="nature-tool-"+tool
+            self._item_instances[instance_id]=item_state.make_instance(
+                self._item_catalog,instance_id,"item.nature.tool_"+tool,location="INVENTORY")
         self._individual_state = identity_contract.runtime_state(self._people_catalog)
+        self._ensure_life_individuals_locked()
         self._faction_state = factions_contract.new_state(self._people_catalog.values())
         self._quest_state = quests_contract.new_state()
+        self._quest_visit_presence = set()
         self._dialogue_state = dialogue_contract.new_state()
+        self._benilla_quest_panel={};self._benilla_gossip_hidden=False
         self._social_state = social_contract.new_state()
         self._promoted_life_ids = set()
         self._last_population_promotion_s = 0.0
@@ -603,6 +1036,12 @@ class GameEngineRuntime:
         self._loot_items = []
         self._loot_counter = 0
         self._last_item_interaction = {}
+        self._open_stash_container_id = ""
+        self._open_merchant_id = ""
+        self._benilla_loot = {}
+        self._benilla_craft_book = {}
+        self._benilla_craft_repeat = {}
+        self._benilla_craft_error = ''
         self._last_crafting = {}
         self._last_trade = {}
         self._economy_state = economy_contract.new_state(self._vendor_catalog)
@@ -611,11 +1050,15 @@ class GameEngineRuntime:
         self._progression = progression.starter_state()
         self._combat_state = combat_contract.new_state()
         self._last_combat = {}
+        self._character_actions = {}
+        self._character_action_serial = 0
+        self._combat_target_id = ""
         self._ability_cooldowns = {}
         self._ability_held = {}
         self._resource = 100.0
         self._last_ability = ""
         self._last_ability_status = "READY"
+        self._last_ability_time = -10.0
         self._editor_document = editor_contract.new_document()
         self._editor_entity_indices = {}
         self._npc_last_interaction = {}
@@ -623,8 +1066,16 @@ class GameEngineRuntime:
         self._terrain_cell_cache.clear()
         self._navigation_cache_key = None
         self._navigation_tiles = []
+        self._navigation_cache_cells.clear()
+        self._navigation_cache_override_revision = None
+        self._navigation_cache_mode = None
+        self._navigation_interest_center = None
+        self._navigation_interest_cells = []
         self._render_snapshot_cache = None
         self._render_snapshot_signature = None
+        self._dos_live_frame = None
+        self._dos_live_motion = None
+        self._dos_live_frame_at = 0.0
 
         self._spawn_entity_locked(
             "PLAYER",
@@ -637,63 +1088,143 @@ class GameEngineRuntime:
             static=False,
             index=0,
         )
-        # Sandover-style original fishing village: clustered stilt huts,
-        # shore palms, a dock and a shrine.  32 world props keep the
-        # existing entity budget; the layout is authored, not a random ring.
+        # Original tropical coast village: clustered stilt huts around an
+        # open green, a path down to the sheltered cove, distinct shore plants,
+        # working village details and a windmill on the west headland. Keep the
+        # bounded island cast while giving the village distinct shore and
+        # cove landmarks made in the visible Blender asset pipeline.
         village: tuple[tuple[str, float, float, tuple[float, float, float], str, float], ...] = (
-            ("HOUSE", 6.2, 5.4, (2.15, 2.15, 2.15), "#e8c9a0", 0.4),
-            ("HOUSE", 9.4, 6.8, (1.95, 1.95, 1.95), "#f0d2a8", 0.4),
-            ("HOUSE", 7.0, 9.2, (2.25, 2.25, 2.25), "#e2c094", 0.4),
-            ("HOUSE", -3.8, 7.1, (2.05, 2.05, 2.05), "#edd4b0", 0.4),
-            ("HOUSE", -1.4, -7.6, (2.35, 2.35, 2.35), "#d9b88a", 0.4),
-            ("PALM", 12.4, 1.8, (1.0, 2.30, 1.0), "#4aaa3a", 0.9),
-            ("PALM", 11.2, 5.5, (0.94, 2.18, 0.94), "#3d9a32", 0.85),
-            ("PALM", 13.0, -2.2, (1.06, 2.42, 1.06), "#56b844", 0.95),
-            ("PALM", -11.5, 2.4, (0.98, 2.24, 0.98), "#48a838", 0.88),
-            ("PALM", -10.2, -4.0, (0.92, 2.12, 0.92), "#3f9834", 0.82),
-            ("PALM", 3.2, 12.4, (0.96, 2.20, 0.96), "#52b040", 0.86),
-            ("PALM", -4.5, 12.0, (1.02, 2.28, 1.02), "#46a436", 0.9),
-            ("PALM", 8.8, -8.5, (0.95, 2.16, 0.95), "#4eac3c", 0.84),
-            ("PALM", -8.0, -9.2, (1.04, 2.36, 1.04), "#3c9c30", 0.92),
-            ("PALM", 0.6, -12.5, (0.97, 2.22, 0.97), "#50b03e", 0.86),
-            ("DOCK", 1.2, 13.6, (1.0, 1.0, 1.0), "#c9a06a", 3.0),
-            ("TOTEM", 3.4, 3.1, (1.05, 2.6, 1.05), "#d96b4a", 1.1),
-            ("LIGHT", 4.6, 4.2, (0.7, 2.6, 0.7), "#ffd278", 0.6),
-            ("LIGHT", 8.2, 5.0, (0.7, 2.6, 0.7), "#ffd278", 0.6),
-            ("LIGHT", 0.8, 10.8, (0.7, 2.6, 0.7), "#ffd278", 0.6),
-            ("LIGHT", -2.2, 5.5, (0.7, 2.6, 0.7), "#ffd278", 0.6),
-            ("PROP", 5.4, 12.2, (0.9, 0.9, 0.9), "#c4a070", 0.7),
-            ("PROP", 2.6, 12.5, (0.85, 0.8, 0.85), "#b89060", 0.65),
-            ("PROP", 10.1, 8.4, (1.1, 1.0, 1.0), "#c8b48a", 0.8),
-            ("PROP", -5.2, 8.6, (1.0, 0.95, 1.05), "#bca87a", 0.75),
-            ("PROP", 4.0, 6.6, (0.8, 0.75, 0.8), "#d2c094", 0.6),
-            ("PROP", 8.8, 10.2, (0.95, 0.9, 0.9), "#c0a070", 0.7),
-            ("PROP", -0.8, 8.4, (0.7, 0.7, 0.7), "#b89868", 0.55),
-            ("RAMP", 4.8, 8.0, (1.6, 1.2, 2.4), "#6aa8c8", 1.3),
-            ("RAMP", -2.0, 4.4, (1.5, 1.15, 2.2), "#6aa8c8", 1.2),
-            ("PROP", 12.8, 8.0, (1.2, 1.1, 1.15), "#c4b07a", 0.85),
-            ("PROP", -9.4, 6.2, (1.15, 1.05, 1.1), "#b8a070", 0.8),
+            ("HOUSE", -5.8, 4.0, (1.58, 1.72, 1.58), "#d7824a", 0.8),
+            ("HOUSE", -1.5, 7.6, (1.62, 1.78, 1.62), "#cf7342", 0.8),
+            ("HOUSE", 4.7, 6.4, (1.58, 1.72, 1.58), "#d98a4b", 0.8),
+            ("HOUSE", 7.2, 1.0, (1.62, 1.80, 1.62), "#c96e3f", 0.8),
+            ("HOUSE", 6.3, -5.0, (1.55, 1.70, 1.55), "#dd9250", 0.8),
+            ("HOUSE", 1.2, -8.1, (1.60, 1.78, 1.60), "#c86c3e", 0.8),
+            ("HOUSE", -5.7, -6.6, (1.58, 1.74, 1.58), "#dc8a4b", 0.8),
+            ("PALM", 15.0, 6.0, (0.88, 2.05, 0.88), "#4aaa3a", 0.9),
+            ("PALM", 15.0, -4.0, (0.92, 2.18, 0.92), "#3d9a32", 0.85),
+            ("PALM", 2.0, 15.0, (0.95, 2.16, 0.95), "#56b844", 0.95),
+            ("PALM", -14.0, 2.0, (0.91, 2.12, 0.91), "#48a838", 0.88),
+            ("PALM", -9.0, 10.0, (0.94, 2.22, 0.94), "#4aaa3a", 0.92),
+            ("PALM", 24.0, 4.5, (0.98, 2.32, 0.98), "#56b844", 1.00),
+            ("PALM", -23.0, -4.0, (0.96, 2.30, 0.96), "#48a838", 1.00),
+            ("BARREL", -9.0, -13.0, (0.42, 0.48, 0.42), "#80502d", 0.45),
+            ("MANGROVE", -10.0, -18.0, (0.92, 1.58, 0.92), "#397c43", 0.85),
+            ("MANGROVE", -1.0, -19.0, (0.98, 1.62, 0.98), "#397c43", 0.9),
+            ("MANGROVE", 4.0, -14.0, (0.90, 1.55, 0.90), "#397c43", 0.82),
+            ("ROCK", -18.0, 4.0, (1.45, 0.92, 1.25), "#8d684b", 1.0),
+            ("ROCK", -16.0, -11.0, (1.35, 0.90, 1.18), "#8d684b", 0.95),
+            ("PROP", -2.0, 8.0, (0.72, 0.92, 0.72), "#9a6b45", 0.65),
+            ("DOCK", -2.0, -20.0, (1.10, 1.40, 1.20), "#c9a06a", 3.0),
+            ("WATER_WHEEL", 9.0, -13.0, (2.05, 2.00, 1.12), "#b77a41", 2.2),
+            ("WINDMILL", -11.0, -10.0, (2.10, 3.80, 2.10), "#d96b4a", 1.1),
+            ("MARKET_STALL", -3.0, 4.5, (1.28, 1.10, 0.98), "#d9a14c", 0.9),
+            ("FISH_RACK", -7.0, -14.5, (0.82, 0.82, 0.70), "#c28b53", 0.7),
+            # The skiff begins at the accessible mouth of the cove, close to
+            # the pier but in enough depth to float at every tide phase.
+            ("BOAT", -3.0, -21.5, (0.76, 0.46, 1.45), "#80502d", 1.0),
+            ("BRIDGE", -4.0, -16.2, (0.65, 0.55, 1.50), "#b77a41", 1.0),
+            ("LIGHT", 3.0, -3.0, (0.36, 0.95, 0.36), "#ffd278", 0.6),
+            ("LIGHT", -4.0, 3.0, (0.36, 0.95, 0.36), "#ffd278", 0.6),
+            # House stairs are part of the authored kit. The two detached
+            # legacy ramps no longer serve an entrance in the enlarged layout.
+            ("PATH", 0.0, -4.0, (1.05, 0.35, 1.80), "#c4a070", 0.4),
+            ("PATH", -0.4, -7.2, (1.05, 0.35, 1.80), "#b89060", 0.4),
+            ("PATH", -1.0, -10.4, (1.05, 0.35, 1.80), "#c8b48a", 0.4),
+            ("PATH", -2.0, -13.6, (1.05, 0.35, 1.80), "#bca87a", 0.4),
         )
+        feel = world.WORLD_PROP_SCALE
+        layout = world.ISLAND_LAYOUT_SCALE
         for kind, prop_x, prop_z, scale, color, radius_m in village:
-            self._spawn_entity_locked(
+            sx, sy, sz = (float(scale[0]), float(scale[1]), float(scale[2]))
+            if kind == "HOUSE":
+                # Keep the approved architecture height independent of the
+                # character's jump and the horizontal island layout.
+                sy = world.HOUSE_ROOF_CLEARANCE_M / 2.0
+            prop_x *= layout
+            prop_z *= layout
+            if kind == "BOAT":
+                # Sized to the character, not to the old toy hull.
+                sx, sy, sz = mobility_contract.SKIFF_SCALE
+            else:
+                sx *= feel
+                sy *= feel
+                sz *= feel
+                if kind in {"PATH", "DOCK", "BRIDGE"}:
+                    # Preserve connected village routes as placements spread apart.
+                    sx *= layout / feel
+                    sz *= layout / feel
+            scale = (sx, sy, sz)
+            prop_y = self._terrain_height_locked(prop_x, prop_z) + sy
+            if kind == "DOCK":
+                # The cove pier spans its low beach and the shallow waterline.
+                prop_y = sy * 0.38 + 0.60 * world.WORLD_FEEL_SCALE
+            elif kind == "BOAT":
+                # The hull's inside rim is authored at its local waterline.
+                prop_y = sy * 0.30
+            elif kind == "BRIDGE":
+                # Match the pier deck through the shallow cove approach.
+                prop_y = sy * 0.39 + 0.60 * world.WORLD_FEEL_SCALE
+            elif kind == "MANGROVE" and prop_y < sy:
+                # Rooted mangroves planted at the tide edge start at sea level;
+                # the imported root flare can extend below the water surface.
+                prop_y = sy
+            slot = self._spawn_entity_locked(
                 kind,
                 prop_x,
-                self._terrain_height_locked(prop_x, prop_z) + scale[1],
+                prop_y,
                 prop_z,
                 scale,
                 color,
-                radius_m,
+                3.4 if kind == "BOAT" else radius_m * feel,
             )
+            if kind == "BOAT":
+                self._boat_entity_index = slot
+                if slot is not None:
+                    # The skiff is spawned at the north edge of the southern
+                    # cove; point its default forward input toward the deeper
+                    # channel, away from the dock and the shallow beach.
+                    self._yaw[slot] = math.pi
+                    self._y[slot] = mobility_contract.surface_sample(
+                        prop_x, prop_z, self._sim_time,
+                        sea_level_m=terrain_contract.SEA_LEVEL,
+                    )["height_m"] + mobility_contract.BOAT_HULL_DRAFT_M
+
+        beacon_x, beacon_z = 4.0 * layout, -22.0 * layout
+        self._spawn_entity_locked(
+            "TIDE_BEACON",
+            beacon_x,
+            self._terrain_height_locked(beacon_x, beacon_z) + 1.46 * feel,
+            beacon_z,
+            (0.80 * feel, 1.46 * feel, 0.80 * feel),
+            "#e5bd69",
+            0.72 * feel,
+            static=True,
+        )
+
+        # Connected map routes use one shared mesh each, rather than growing
+        # the physical entity/render pools with a node per paving segment.
+        for kind in ("SETTLEMENT_ROADS", "SETTLEMENT_FENCES"):
+            self._spawn_entity_locked(kind,0,0,0,(1,1,1),"#b69265",0,static=True)
+        for fixture in settlement_contract.catalog()["fixtures"]:
+            x,z=fixture["x"]*layout,fixture["z"]*layout
+            scale=tuple(fixture["scale"])
+            slot=self._spawn_entity_locked(fixture["kind"],x,self._terrain_height_locked(x,z)+scale[1],z,
+                                           scale,"#c99b65",0,static=True)
+            if slot is not None:self._yaw[slot]=math.radians(fixture.get("yaw",0))
 
         npc_spawns = npc_contract.spawns_from_content(self._content)
         for spawn in npc_spawns:
-            self._spawn_npc_locked(dict(spawn))
+            placed = dict(spawn)
+            placed["x"] = float(placed.get("x", 0.0)) * layout
+            placed["z"] = float(placed.get("z", 0.0)) * layout
+            self._spawn_npc_locked(placed)
 
         if self._stress:
             stress_start = 1 + 32 + len(npc_spawns)
             for index in range(stress_start, 480):
                 angle = index * 0.37
-                radius = 12.0 + float(index % 23) * 0.42
+                radius = (12.0 + float(index % 23) * 0.42) * layout
                 scale = (
                     0.18 + (index % 3) * 0.04,
                     0.18 + (index % 4) * 0.03,
@@ -746,11 +1277,25 @@ class GameEngineRuntime:
             }
         )
         self._events = self._events[-24:]
+        from backend.game_engine_benilla_feedback import observe
+        observe(self,event)
+        self._animate_world_event_locked(kind, actor_id, subject_id, target_id, payload)
         return event
 
     def _next_item_instance_id_locked(self, prefix: str = "runtime-item") -> str:
-        self._item_counter += 1
-        return f"{str(prefix or 'runtime-item')[:32]}-{self._item_counter:04d}"
+        if getattr(self,'_local_character_id',''):
+            # The local profile can relinquish an item to another profile or
+            # escrow. A counter reconstructed from only live rows cannot then
+            # prove a new identity across login, consumption, or transfer.
+            from uuid import uuid4
+            while True:
+                self._item_counter += 1
+                key=f"{str(prefix or 'runtime-item')[:31]}-{uuid4().hex}"
+                if key not in self._item_instances:return key
+        while True:
+            self._item_counter += 1
+            key=f"{str(prefix or 'runtime-item')[:32]}-{self._item_counter:04d}"
+            if key not in self._item_instances:return key
 
     def _materialize_npc_item_instances_locked(self) -> None:
         """Reconcile durable NPC item refs with real carried instances."""
@@ -840,8 +1385,8 @@ class GameEngineRuntime:
             definition_id = str(raw.get("definition_id", ""))[:96]
             if item_state.definition(self._item_catalog, definition_id) is None:
                 continue
-            x = _clamp(raw.get("x"), -1000000.0, 1000000.0)
-            z = _clamp(raw.get("z"), -1000000.0, 1000000.0)
+            x = _clamp(raw.get("x"), -1000000.0, 1000000.0) * world.ISLAND_LAYOUT_SCALE
+            z = _clamp(raw.get("z"), -1000000.0, 1000000.0) * world.ISLAND_LAYOUT_SCALE
             instance_id = f"pack-world-{origin_id}"[:64]
             if instance_id in self._item_instances:
                 continue
@@ -867,7 +1412,7 @@ class GameEngineRuntime:
 
     def _rebuild_content_runtime_locked(self) -> None:
         """Rebind data tables after a page merge while preserving runtime rows."""
-        self._life_spawns = life_contract.spawns_from_content(self._content)
+        self._set_life_spawns_locked(life_contract.spawns_from_content(self._content))
         self._item_catalog = item_state.catalog_from_content(self._content)
         self._gear_tables = gear_contract.tables_from_content(self._content)
         self._people_catalog = identity_contract.catalog_from_content(self._content)
@@ -1198,11 +1743,234 @@ class GameEngineRuntime:
         rows.sort(key=lambda row: str(row.get("instance_id", "")))
         return rows[: item_state.MAX_EQUIPPED_ITEMS]
 
+    def _start_character_action_locked(self, actor_id: Any, clip: Any) -> int:
+        identity = str(actor_id or "").strip() or "player"
+        name = str(clip or "").strip()
+        duration = animation_contract.ACTION_CLIP_SECONDS.get(name)
+        if duration is None:
+            return 0
+        if name != "Death" and not self._combat_state.get("actors", {}).get(identity, {}).get("alive", True) and not (identity=='player' and self._is_ghost_locked()):
+            return 0
+        self._character_action_serial = (self._character_action_serial + 1) % 2_000_000_000
+        self._character_actions[identity] = {
+            "clip": name,
+            "until": self._sim_time + duration,
+            "serial": self._character_action_serial,
+        }
+        if identity != "player" and name in animation_contract.WORLD_INTERACTION_CLIPS:
+            index = self._npc_index_for_id_locked(identity)
+            if index is not None:
+                self._vx[index] = self._vz[index] = 0.
+        return self._character_action_serial
+
+    def _gather_animation_clip_locked(self, definition_id: str) -> str:
+        definition = item_state.definition(self._item_catalog, definition_id) or {}
+        tags = {str(tag).upper() for tag in definition.get("tags", [])}
+        name = str(definition_id).lower()
+        # Loose produce, ore and logs are picked up. Harvesting a live
+        # plant uses the distinct, authoritative NATURE_INTERACTION event.
+        if tags.intersection({"HERB", "PLANT", "FIBER", "FLOWER"}) or any(
+                part in name for part in ("herb", "flower", "fiber", "mushroom")):
+            return "Gather"
+        return "Pickup"
+
+    @staticmethod
+    def _craft_animation_clip(profession: Any, station_id: Any = "") -> str:
+        name = (str(profession) + ":" + str(station_id)).upper()
+        if "ENCHANT" in name:
+            return "Enchant"
+        if "COOK" in name or "CAMPFIRE" in name:
+            return "Cook"
+        return "Craft"
+
+    def _animate_world_event_locked(self, kind, actor_id, subject_id, target_id, payload):
+        """Observe committed interactions, including NPCs acting independently.
+
+        Failed attempts never animate. This affects poses only, after the real
+        inventory/dialogue transaction has succeeded.
+        """
+        data = payload if isinstance(payload, dict) else {}
+        identity = str(actor_id)
+        clip = ""
+        tool = ""
+        if kind == "ITEM_PICKUP":
+            clip = self._gather_animation_clip_locked(str(data.get("definition_id", "")))
+        elif kind == "CONTAINER_OPEN":
+            clip = "OpenChest"
+        elif kind == "CONTAINER_LOOT" and int(data.get("count", 0)) > 0:
+            clip = "Pickup"
+        elif kind in {"GEAR_ENCHANT", "ENCHANT"}:
+            clip = "Enchant"
+            if identity == "system":
+                identity = "player"
+        elif kind in {"CRAFT", "GEAR_CRAFT"}:
+            recipe = self._gear_tables.get("recipes", {}).get(str(subject_id), {})
+            clip = self._craft_animation_clip(recipe.get("profession", "COOKING" if kind == "CRAFT" else ""), target_id)
+            if clip == "Craft":
+                tool = "hammer"
+        elif kind in {"DIALOGUE_START", "DIALOGUE_CHOICE"}:
+            clip = "Talk"
+            self._start_character_action_locked(target_id, clip)
+        elif kind == "NPC_SOCIAL" and data.get("outcome") == "CONVERSATION":
+            clip = "Talk"
+            self._start_character_action_locked(target_id, clip)
+        elif kind == "NATURE_INTERACTION":
+            action = str(data.get("action", "")).upper()
+            species = str(data.get("species", ""))
+            clip = {"CLIP": "Gather", "LOOT": "Pickup", "SKIN": "Gather", "BRUSH": "Pet",
+                    "PET": "Pet", "FISH": "FishCast", "CATCH": "NetCatch",
+                    "MILK": "Milk", "SHEAR": "Shear"}.get(action, "")
+            if action == "PICK":
+                clip = "HarvestFruit" if species in {"coconut", "banana", "apple", "grapes", "grape_vine"} else "Gather"
+            elif action == "ATTACK":
+                clip = self._player_attack_animation_clip_locked()
+            tool = {"CLIP": "shears", "SKIN": "knife", "BRUSH": "brush", "FISH": "rod",
+                    "CATCH": "net", "SHEAR": "shears"}.get(action, "")
+        elif kind == "NPC_WORLD_ACTION" and str(data.get("status", "")) not in {"BLOCKED", "FAILED"}:
+            action = str(subject_id).upper()
+            if action in {"GATHER", "HAUL", "INSPECT_LOOT", "SEEK_GEAR"} and str(data.get("status", "")) in {"COMMITTED", "LOOTED", "INSPECTED", "EQUIPPED"}:
+                clip = self._gather_animation_clip_locked(str(data.get("definition_id", "")))
+            elif action == "CRAFT":
+                clip = self._craft_animation_clip(data.get("profession", ""), target_id)
+                if clip == "Craft":
+                    tool = "hammer"
+            elif action == "SEEK_FOOD" and data.get("status") == "CONSUMED":
+                clip = "Eat"
+            elif action == "SEEK_WATER" and data.get("status") == "REFILLED":
+                clip = "Drink"
+        if clip and identity not in {"", "system"}:
+            self._start_character_action_locked(identity, clip)
+            if tool and self._character_actions.get(identity, {}).get("clip") == clip:
+                self._character_actions[identity]["tool"] = tool
+
+    def _character_action_for_locked(self, actor_id: Any) -> dict[str, Any]:
+        identity = str(actor_id or "").strip()
+        entry = self._character_actions.get(identity)
+        if not isinstance(entry, dict):
+            return {}
+        if (entry.get("clip") == "Death"
+                and not self._combat_state.get("actors", {}).get(identity, {}).get("alive", True)
+                and not (identity=='player' and self._is_ghost_locked())):
+            # Keep the terminal pose until the real simulation respawn.
+            return entry
+        if float(entry.get("until", 0.0)) <= self._sim_time:
+            self._character_actions.pop(identity, None)
+            return {}
+        return entry
+
+    def _decorate_character_animation_locked(self, animation: Any, actor_id: Any) -> str:
+        if not isinstance(animation, dict):
+            return ""
+        entry = self._character_action_for_locked(actor_id)
+        clip = str(entry.get("clip", ""))
+        if clip in animation_contract.WORLD_INTERACTION_CLIPS and (
+                float(animation.get("speed_mps", 0.0)) > .8
+                or animation.get("locomotion") in {"AIR", "DOUBLE_JUMP", "FLY", "SWIM", "HOVERBOARD", "HOVERBOARD_AIR", "BOAT", "GRAPPLE"}):
+            # Full-body work has planted feet. Moving or jumping interrupts
+            # that visual action rather than sliding the working pose around.
+            self._character_actions.pop(str(actor_id), None)
+            entry, clip = {}, ""
+        if not self._combat_state.get("actors", {}).get(str(actor_id), {}).get("alive", True) and not (str(actor_id)=='player' and self._is_ghost_locked()):
+            clip = "Death"
+        animation["action"] = clip
+        animation["action_serial"] = int(entry.get("serial", 0)) if clip else 0
+        animation["world_interaction"] = clip in animation_contract.WORLD_INTERACTION_CLIPS
+        animation["interaction_tool"] = str(entry.get("tool", "")) if animation["world_interaction"] else ""
+        if clip:
+            # Combat actions keep their authored one-shot timing instead of
+            # inheriting the current walk cadence.
+            animation["cadence_hz"] = 0.0
+        elif str(actor_id)=='player' and animation.get('locomotion') in {'IDLE','WALK','SPRINT'}:
+            main=next((row for row in self._player_equipped_instances_locked()
+                       if row.get('equipped_slot')=='MAIN_HAND'),None)
+            if main and main.get('definition_id')=='item.weapon_sword' and item_state.equipment_wielding(main)=='2H':
+                return {'IDLE':'TwoHandIdle','WALK':'TwoHandWalk','SPRINT':'TwoHandSprint'}[animation['locomotion']]
+        return clip
+
+    def _player_attack_animation_clip_locked(self, action_id: Any = "") -> str:
+        action = str(action_id or "").strip().lower().replace("-", "_")
+        if "parry" in action or "block" in action:
+            return "Parry"
+        if "dodge_left" in action or "evade_left" in action:
+            return "DodgeLeft"
+        if "dodge" in action or "evade" in action:
+            return "DodgeRight"
+        if "shield_bash" in action:
+            return "ShieldBash"
+        if "reload" in action:
+            return "Reload"
+
+        weapons = [
+            row for row in self._player_equipped_instances_locked()
+            if (str(row.get("definition_id", "")).startswith("item.weapon_")
+                or row.get("definition_id") == "item.iron_saber")
+            and str(row.get("equipped_slot", "")) in {"MAIN_HAND", "OFF_HAND"}
+        ]
+        pistols = [row for row in weapons if row.get("definition_id") == "item.weapon_pistol"]
+        if pistols:
+            if len(pistols) > 1:
+                return "DualPistolFire"
+            spec = firearms_contract.profile(str(pistols[0].get("instance_id", "")))
+            subtype = str(spec.get("weapon_subtype", "pistol"))
+            return "ShotgunFire" if subtype == "shotgun" else (
+                "RifleFire" if subtype in {"rifle", "gatling", "railgun", "launcher", "cannon"}
+                else "PistolFire"
+            )
+
+        main = next((row for row in weapons if row.get("equipped_slot") == "MAIN_HAND"), None)
+        if main is None:
+            return "UnarmedAttack"
+        if main.get("definition_id") == "item.iron_saber":
+            return "OneHandSlash"
+        family = str(main.get("definition_id", "")).removeprefix("item.weapon_")
+        variant = item_state.item_appearance_index(main.get("instance_id", ""))
+        if family == "wand":
+            return "WandCast"
+        if family == "staff":
+            return "StaffCast"
+        if family == "mace":
+            from backend.game_engine_caster_designs import design
+            construction = str(design("mace", variant).get("construction", ""))
+            if construction == "flail":
+                return "FlailSwing"
+            if "scythe" in construction:
+                return "ScytheSweep"
+            return "TwoHandOverhead" if item_state.equipment_wielding(main) == "2H" else "OneHandOverhead"
+        if family == "axe":
+            from backend.game_engine_shield_axe_designs import AXES
+            row = AXES[variant]
+            construction = str(row[2]).lower()
+            if "scythe" in construction:
+                return "ScytheSweep"
+            return "TwoHandOverhead" if str(row[-1]) == "2H" else "OneHandSlash"
+        if family == "sword":
+            from backend.game_engine_sword_designs import SWORDS
+            name = str(SWORDS[variant][0]).lower()
+            if any(token in name for token in ("rapier", "estoc", "stiletto", "stilet", "dirk", "stinger")):
+                return "OneHandThrust"
+            if any(token in name for token in ("zweihander", "nodachi", "claymore", "longsword", "flamberge")):
+                return "TwoHandSlash"
+            return "OneHandSlash"
+        if family == "spear":
+            return "SpearThrust"
+        if family == "bow":
+            return "BowShot"
+        if family == "whip":
+            return "WhipCrack"
+        if family == "boomerang":
+            return "BoomerangThrow"
+        if family == "shield":
+            return "ShieldBash"
+        if item_state.equipment_wielding(main) == "2H":
+            return "TwoHandOverhead"
+        return "OneHandSlash"
+
     def _player_combat_profile_locked(self) -> dict[str, Any]:
         """Derive player combat stats from progression and real equipped gear."""
         temporary = copy.deepcopy(self._progression)
         gear_stats: dict[str, float] = {}
         for item in self._player_equipped_instances_locked():
+            if float(item.get('condition',1.))<=0.:continue
             gear = item.get("gear", {})
             stats = gear.get("stats", {}) if isinstance(gear, dict) else {}
             if isinstance(stats, dict):
@@ -1224,13 +1992,21 @@ class GameEngineRuntime:
                     except (TypeError, ValueError, OverflowError):
                         continue
         temporary["gear_stats"] = gear_stats
+        for key,value in self._item_set_stats_locked(self._player_equipped_instances_locked()).items():
+            gear_stats[key]=gear_stats.get(key,0.)+value
+        gear_stats['armor']=gear_stats.get('armor',0.)+self._spell_armor_bonus_locked()
+        temporary["enchant_effects"] = enchant_contract.equipped_effects(
+            [i for i in self._player_equipped_instances_locked() if float(i.get('condition',1.))>0.], int(temporary.get("level", 1)))
         temporary["derived_stats"] = {}
-        return combat_contract.profile(
+        profile = combat_contract.profile(
             temporary,
             kind="PLAYER",
             actor_id="player",
             role=str(temporary.get("spec", "EXPLORER")),
         )
+        if getattr(self,'_services',{}).get('sickness_until',0.) > time.time():
+            for key in ('max_health','damage','armor'):profile[key] = max(1.,profile[key]*.25)
+        return profile
 
     def _npc_index_for_id_locked(self, identity_id: Any) -> int | None:
         wanted = str(identity_id or "")
@@ -1270,6 +2046,7 @@ class GameEngineRuntime:
             kind="NPC",
             actor_id=identity_id,
             role=str(resolved.get("role", "")),
+            gear_bonus=self._item_set_stats_locked(self._npc_equipped_instances_locked(identity_id),resolved.get('professions',{})),
         )
 
     def _ensure_combat_actors_locked(self) -> None:
@@ -1299,6 +2076,7 @@ class GameEngineRuntime:
                 self._npc_reason[index] = "COMBAT_DEFEATED"
 
     def _record_quest_event_locked(self, event: dict[str, Any]) -> dict[str, Any]:
+        self._party_quest_credit_locked(event)
         result = quests_contract.record_event(
             self._quest_state,
             self._quest_catalog,
@@ -1318,6 +2096,50 @@ class GameEngineRuntime:
                     payload=copy.deepcopy(progress_row),
                 )
         return result
+
+    def _tick_landmark_visits_locked(self) -> None:
+        """Record one visit when an active exploration quest is entered."""
+        active = self._quest_state.get("active", {})
+        if not isinstance(active, dict) or not active:
+            self._quest_visit_presence = set()
+            return
+
+        current_presence: set[str] = set()
+        for quest_id, progress in list(active.items())[: quests_contract.MAX_ACTIVE]:
+            definition = self._quest_catalog.get(str(quest_id))
+            objective = definition.get("objective", {}) if isinstance(definition, dict) else {}
+            location = objective.get("location", {}) if isinstance(objective, dict) else {}
+            if (
+                not isinstance(progress, dict)
+                or str(progress.get("status", "ACTIVE")).upper() == "READY"
+                or not isinstance(objective, dict)
+                or str(objective.get("kind", "")).upper() != "VISIT"
+                or not isinstance(location, dict)
+                or "x" not in location
+                or "z" not in location
+            ):
+                continue
+            required_mode = str(objective.get("required_mode") or "").upper()
+            if required_mode and required_mode != self._movement_mode:
+                continue
+            target_x = _clamp(location.get("x"), -100000.0, 100000.0)
+            target_z = _clamp(location.get("z"), -100000.0, 100000.0)
+            radius = _clamp(objective.get("radius_m"), 1.0, 64.0, 3.0)
+            if math.hypot(self._x[0] - target_x, self._z[0] - target_z) > radius:
+                continue
+
+            wanted = str(quest_id)
+            current_presence.add(wanted)
+            if wanted in self._quest_visit_presence:
+                continue
+            self._record_quest_event_locked({
+                "kind": "VISIT",
+                "target_id": str(objective.get("target_id", "")),
+                "movement_mode": self._movement_mode,
+                "x": round(self._x[0], 3),
+                "z": round(self._z[0], 3),
+            })
+        self._quest_visit_presence = current_presence
 
     def _spawn_combat_loot_locked(
         self,
@@ -1362,6 +2184,8 @@ class GameEngineRuntime:
         instance["roll_table_id"] = "loot.coastal_cache"
         instance["roll"] = max(0, int(rolled.get("roll", 0)))
         instance["origin"] = "COMBAT_DROP"
+        instance['source_actor_id']=identity_id
+        instance['loot_claimed']=False
         instance["affixes"] = copy.deepcopy(affix_payload.get("affixes", [])[:2])
         self._item_instances[instance_id] = instance
         return {
@@ -1390,6 +2214,8 @@ class GameEngineRuntime:
             self._progression,
             35 + max(1, int(self._npc_combat_profile_locked(identity_id).get("level", 1))) * 10,
         )
+        self._last_xp_visual = dict(x=self._x[index],y=self._y[index]+.5,
+            z=self._z[index],time_s=self._sim_time)
         if isinstance(person, dict):
             faction_result = factions_contract.adjust_person(
                 self._faction_state,
@@ -1448,31 +2274,26 @@ class GameEngineRuntime:
         if self._tick % 3 != 0:
             return
         self._ensure_combat_actors_locked()
+        for result in combat_contract.tick_statuses(self._combat_state, self._sim_time):
+            if result.get("defeated"):
+                if result["defender_id"] == "player":
+                    self._vx[0] = self._vy[0] = self._vz[0] = 0.0
+                elif result.get("attacker_id") == "player" or result.get('attacker_id') in self._services['group']['members'] or str(result.get('attacker_id','')).startswith('pet:'):
+                    index = next((i for i in self._npc_indices
+                                  if str(self._npc_ids[i]) == result["defender_id"]), None)
+                    if index is not None:
+                        result["defeat"] = self._handle_npc_defeat_locked(
+                            result["defender_id"], index, result)
+            self._last_combat = copy.deepcopy(result)
         player_profile = self._player_combat_profile_locked()
         player_actor = combat_contract.ensure_actor(
             self._combat_state,
             "player",
             player_profile,
         )
-        player_respawn = combat_contract.respawn_actor(
-            self._combat_state,
-            "player",
-            player_profile,
-            self._sim_time,
-        )
-        if player_respawn is not None:
-            self._x[0] = 0.0
-            self._z[0] = 0.0
-            self._y[0] = self._terrain_height_locked(0.0, 0.0) + 0.65
-            self._vx[0] = self._vy[0] = self._vz[0] = 0.0
-            self._append_event_locked(
-                "COMBAT_RESPAWN",
-                "Player returned to the island after defeat.",
-                actor_id="player",
-            )
-            player_actor = self._combat_state["actors"].get("player", player_actor)
+        self._tick_lifecycle_locked()
         if not player_actor.get("alive"):
-            self._vx[0] = self._vy[0] = self._vz[0] = 0.0
+            if not self._is_ghost_locked():self._vx[0] = self._vy[0] = self._vz[0] = 0.0
             return
         for index in list(self._npc_indices)[: npc_contract.MAX_NPCS]:
             if not self._alive[index] or not self._npc_ids[index]:
@@ -1486,6 +2307,7 @@ class GameEngineRuntime:
                 npc_profile,
             )
             if not actor.get("alive"):
+                if self._instance_encounter_locked(identity_id):continue
                 respawned = combat_contract.respawn_actor(
                     self._combat_state,
                     identity_id,
@@ -1493,6 +2315,7 @@ class GameEngineRuntime:
                     self._sim_time,
                 )
                 if respawned is not None:
+                    self._vx[index] = self._vy[index] = self._vz[index] = 0.0
                     self._x[index] = self._npc_home_x[index]
                     self._z[index] = self._npc_home_z[index]
                     self._y[index] = self._terrain_height_locked(
@@ -1508,6 +2331,9 @@ class GameEngineRuntime:
                     )
                 continue
             if str(actor.get("engaged_target", "")) != "player":
+                continue
+            if identity_id in self._services['group']['members'] and not self._duel_opponent_locked(identity_id):
+                actor['engaged_target']=''
                 continue
             distance = math.hypot(self._x[index] - self._x[0], self._z[index] - self._z[0])
             if distance > min(3.25, float(npc_profile.get("attack_range_m", 2.5))) + 0.35:
@@ -1526,6 +2352,10 @@ class GameEngineRuntime:
             )
             if not result.get("ok"):
                 continue
+            self._start_character_action_locked(identity_id, "UnarmedAttack")
+            self._start_character_action_locked(
+                "player", "Death" if result.get("defeated") else "HitReact"
+            )
             self._last_combat = copy.deepcopy(result)
             self._append_event_locked(
                 "COMBAT_ATTACK",
@@ -1538,7 +2368,7 @@ class GameEngineRuntime:
             if result.get("defeated"):
                 self._append_event_locked(
                     "COMBAT_DEFEAT",
-                    "The player was defeated and will respawn at the home point.",
+                    "The player was defeated. Release spirit or accept resurrection.",
                     actor_id=identity_id,
                     subject_id="DEFEAT",
                     target_id="player",
@@ -1672,6 +2502,22 @@ class GameEngineRuntime:
             and str(location or "").upper() in item_state.PLAYER_OWNED_LOCATIONS
         )
 
+    def _ensure_inventory_slots_locked(self) -> None:
+        used: set[int] = set()
+        pending: list[dict[str, Any]] = []
+        for row in self._item_instances.values():
+            if not isinstance(row, dict) or str(row.get("location")) != "INVENTORY" or str(row.get("owner_id")) != "player":
+                continue
+            index = _safe_int(row.get("slot_index"), -1)
+            if 0 <= index < item_state.MAX_INVENTORY_SLOTS and index not in used:
+                used.add(index)
+                row["slot_index"] = index
+            else:
+                pending.append(row)
+        free = (index for index in range(item_state.MAX_INVENTORY_SLOTS) if index not in used)
+        for row in pending:
+            row["slot_index"] = next(free, -1)
+
     def _move_item_locked(
         self,
         instance: dict[str, Any],
@@ -1682,6 +2528,22 @@ class GameEngineRuntime:
         equipped_slot: str | None = None,
         position: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        if self._item_binding_locked(instance):return False,{'error':'ITEM_PENDING_CONFIRMATION'}
+        if (
+            str(location).upper() == "INVENTORY"
+            and not (
+                str(instance.get("location")) == "INVENTORY"
+                and str(instance.get("owner_id")) == "player"
+            )
+            and sum(
+                1 for row in self._item_instances.values()
+                if isinstance(row, dict)
+                and str(row.get("location")) == "INVENTORY"
+                and str(row.get("owner_id")) == "player"
+            ) >= item_state.MAX_INVENTORY_SLOTS
+        ):
+            return False, {"error": "ITEM_INVENTORY_FULL"}
+        old_location = str(instance.get("location", ""))
         old_owned = self._item_owned_state(
             instance.get("location"), instance.get("owner_id")
         )
@@ -1697,9 +2559,13 @@ class GameEngineRuntime:
         )
         if not ok:
             return ok, result
+        self._instance_item_transition_locked(instance,old_location)
+        if str(location).upper() != "INVENTORY" or old_location != "INVENTORY":
+            instance["slot_index"] = -1
         new_owned = self._item_owned_state(
             instance.get("location"), instance.get("owner_id")
         )
+        if new_owned:self._bind_acquired_item_locked(instance)
         if old_owned != new_owned:
             change = quantity if new_owned else -quantity
             self._inventory[old_definition_id] = max(
@@ -1709,8 +2575,27 @@ class GameEngineRuntime:
                 self._inventory.pop(old_definition_id, None)
         return ok, result
 
+    def _sync_saved_player_items_locked(self) -> None:
+        """Keep an earlier in-memory character save consistent with bank transfers."""
+        # Service transactions publish inventory, social state and coins in
+        # one save. A nested barter must not checkpoint half that transaction.
+        if getattr(self,'_service_atomic_active',False):return
+        saved = self._state_store.load(self._persistence_key)
+        if not isinstance(saved, dict):
+            return
+        saved["item_instances"] = copy.deepcopy(list(self._item_instances.values()))
+        saved["inventory"] = dict(self._inventory)
+        result = self._state_store.save(self._persistence_key, saved)
+        self._persistence_revision = int(result["revision"])
+
     def _reconcile_item_instances_locked(self) -> None:
         """Keep legacy count inventory and instance state losslessly aligned."""
+        # A consumed instance has no live ownership or buyback claim. Reclaim
+        # old tombstones before allocating so repeated crafting cannot exhaust
+        # the bounded world registry. Instance IDs remain monotonic.
+        for key, row in list(self._item_instances.items()):
+            if isinstance(row, dict) and row.get("location") == "DESTROYED":
+                self._item_instances.pop(key)
         actual: dict[str, int] = {}
         for row in self._item_instances.values():
             if not isinstance(row, dict) or not self._item_owned_state(
@@ -1722,26 +2607,11 @@ class GameEngineRuntime:
                 1, int(row.get("quantity", 1))
             )
 
+        # Deduct every ingredient first: its freed bag/world slots belong to
+        # this same transaction, regardless of inventory dictionary order.
         for definition_id, expected_raw in list(self._inventory.items()):
             expected = max(0, int(expected_raw))
             current = actual.get(definition_id, 0)
-            if expected > current:
-                remaining = expected - current
-                definition = item_state.definition(self._item_catalog, definition_id) or {}
-                stack_limit = max(1, int(definition.get("stack_limit", 1)))
-                while remaining > 0 and len(self._item_instances) < item_state.MAX_WORLD_INSTANCES:
-                    instance_id = self._next_item_instance_id_locked("inventory-stack")
-                    quantity = min(stack_limit, remaining)
-                    self._item_instances[instance_id] = item_state.make_instance(
-                        self._item_catalog,
-                        instance_id,
-                        definition_id,
-                        location="INVENTORY",
-                        quantity=quantity,
-                        owner_id="player",
-                    )
-                    remaining -= quantity
-                continue
             if expected >= current:
                 continue
             remaining = current - expected
@@ -1756,9 +2626,38 @@ class GameEngineRuntime:
                 removed = min(quantity, remaining)
                 if removed >= quantity:
                     item_state.transition_instance(row, "DESTROYED", owner_id="")
+                    self._item_instances.pop(str(row["instance_id"]), None)
                 else:
                     row["quantity"] = quantity - removed
                 remaining -= removed
+
+        for definition_id, expected_raw in list(self._inventory.items()):
+            remaining = max(0, int(expected_raw)) - actual.get(definition_id, 0)
+            if remaining <= 0:
+                continue
+            definition = item_state.definition(self._item_catalog, definition_id) or {}
+            stack_limit = max(1, int(definition.get("stack_limit", 1)))
+            while remaining > 0 and len(self._item_instances) < item_state.MAX_WORLD_INSTANCES:
+                instance_id = self._next_item_instance_id_locked("inventory-stack")
+                quantity = min(stack_limit, remaining)
+                self._item_instances[instance_id] = item_state.make_instance(
+                    self._item_catalog,
+                    instance_id,
+                    definition_id,
+                    location="INVENTORY",
+                    quantity=quantity,
+                    owner_id="player",
+                )
+                remaining -= quantity
+
+        for row in self._item_instances.values():
+            if isinstance(row,dict):self._bind_acquired_item_locked(row)
+        # Crafting can spend the last ingredient while retaining a zero count.
+        # Physical inventory has no zero-quantity stacks; preserve the same
+        # canonical count map before the next saved service validates custody.
+        for definition_id, quantity in tuple(self._inventory.items()):
+            if quantity == 0:
+                self._inventory.pop(definition_id)
 
     def _select_player_gear_locked(
         self,
@@ -1796,6 +2695,7 @@ class GameEngineRuntime:
         instance: dict[str, Any],
         quantity: int = 1,
     ) -> bool:
+        if self._item_binding_locked(instance):return False
         if (
             not isinstance(instance, dict)
             or str(instance.get("location")) != "INVENTORY"
@@ -1830,7 +2730,7 @@ class GameEngineRuntime:
         best_distance = float("inf")
         for key in sorted(self._item_instances):
             row = self._item_instances[key]
-            if not isinstance(row, dict) or str(row.get("location")) != "GROUND":
+            if not isinstance(row, dict) or str(row.get("location")) != "GROUND" or not self._instance_item_visible_locked(row):
                 continue
             is_container = str(row.get("kind")) == "CONTAINER"
             if container_only and not is_container:
@@ -1857,14 +2757,20 @@ class GameEngineRuntime:
             best_distance = distance
         return best, best_distance
 
-    def _ambient_life_rows_locked(self) -> list[dict[str, Any]]:
+    def _ambient_life_rows_locked(self, *, include_identity: bool = True) -> list[dict[str, Any]]:
+        if self._instance_private_locked():return []
         """Return schedule/stimulus-aware render-only population proxies."""
+        if self._world_population.active and math.hypot(self._x[0],self._z[0])>384:
+            # Release the starter crowd's rig slots while visiting another
+            # region. Their saved routes/identities keep running logically.
+            return []
         rows = life_contract.proxy_rows(
             self._life_spawns,
             self._sim_time,
             player_x=self._x[0],
             player_z=self._z[0],
             terrain_height=self._terrain_height_locked,
+            render_radius_m=life_contract.RENDER_RADIUS_M,
         )
         for row in rows:
             x = float(row.get("x", 0.0))
@@ -1876,10 +2782,30 @@ class GameEngineRuntime:
             row["lod"] = world.lod_tier_for_screen_error(
                 64.0 / max(1.0, math.hypot(x - self._x[0], z - self._z[0]) ** 2)
             )
-            row["individual"] = identity_contract.view(
-                self._individual_state,
-                row.get("id", ""),
-            )
+            if include_identity:
+                row["individual"] = identity_contract.view(
+                    self._individual_state,
+                    row.get("id", ""),
+                )
+        return rows
+
+    def _world_people_rows_locked(self):
+        if self._instance_private_locked():return []
+        rows=self._world_population.rows(self._sim_time,self._x[0],self._z[0],self._terrain_height_locked)
+        cache=getattr(self,'_world_actor_assets',None)
+        if cache is None:cache=self._world_actor_assets={}
+        for rank,row in enumerate(rows,start=len(self._npc_indices)+1):
+            pose=row.get('animation') or {}
+            action_clip = self._decorate_character_animation_locked(pose, row['id'])
+            state=pose.get('locomotion',pose.get('state','IDLE'));key=(row['id'],state,rank,action_clip)
+            if key not in cache:
+                cache[key]=assets_contract.entity_binding(self._asset_catalog,state,pose.get('phase',0),rank,asset_role='CROWD',clip_override=action_clip,
+                    variant_index=row['individual']['appearance_index']+len(self._asset_catalog.get('crowd_variants',[]))*
+                    (int.from_bytes(__import__('hashlib').blake2s((row['id']+':shape').encode(),digest_size=4).digest(),'little')%36))
+                if len(cache)>48:del cache[next(iter(cache))]
+            row['asset']=cache[key]
+            row['cell_key']=world.cell_key(world.chunk_coord(row['x']),world.chunk_coord(row['z']))
+            row['lod']='NEAR'
         return rows
 
     def _promote_life_actor_locked(
@@ -1912,8 +2838,8 @@ class GameEngineRuntime:
         actor_spawn = {
             "id": identity_id,
             "archetype": archetype,
-            "x": _clamp(proxy.get("x"), -128.0, 128.0),
-            "z": _clamp(proxy.get("z"), -128.0, 128.0),
+            "x": _clamp(proxy.get("x"), -1000000.0, 1000000.0),
+            "z": _clamp(proxy.get("z"), -1000000.0, 1000000.0),
             "scale": proxy_scale,
             "color": str(proxy.get("color", spawn.get("color", "#8db89a"))),
             "phase": _clamp(spawn.get("phase"), -1000.0, 1000.0),
@@ -1921,6 +2847,14 @@ class GameEngineRuntime:
         slot = self._spawn_npc_locked(actor_spawn)
         if slot is None:
             return False
+        # Promotion changes the simulation tier, not the authored spawn point.
+        # The live position above is used for this handoff; the fixed home is
+        # retained for a later death/respawn and bounded walking return.
+        self._npc_home_x[slot] = float(spawn.get('x',self._x[slot]))
+        self._npc_home_z[slot] = float(spawn.get('z',self._z[slot]))
+        self._yaw[slot] = float(proxy.get('yaw',0))
+        self._vx[slot] = float(proxy.get('speed',0))*math.sin(self._yaw[slot])
+        self._vz[slot] = float(proxy.get('speed',0))*math.cos(self._yaw[slot])
         self._promoted_life_ids.add(identity_id)
         self._life_spawns = [
             row
@@ -1947,6 +2881,7 @@ class GameEngineRuntime:
         return True
 
     def _tick_world_events_locked(self) -> None:
+        if self._instance_private_locked():return
         """Apply scheduled event facts to the shared item/faction/NPC state."""
         result = world_events_contract.tick(
             self._world_event_state,
@@ -2050,6 +2985,7 @@ class GameEngineRuntime:
                 )
 
     def _tick_population_locked(self) -> None:
+        if self._instance_private_locked():return
         """Promote one nearby person at a time without growing the render list."""
         if self._stress or len(self._promoted_life_ids) >= MAX_POPULATION_PROMOTIONS:
             return
@@ -2069,6 +3005,10 @@ class GameEngineRuntime:
         for spawn in self._life_spawns:
             if not isinstance(spawn, dict):
                 continue
+            # Main road circuits retain their authored route. Local residents
+            # may enter the bounded full AI at their current live position.
+            if spawn.get("waypoints") and not spawn.get("allow_promotion"):
+                continue
             rows = life_contract.proxy_rows(
                 [spawn],
                 self._sim_time,
@@ -2077,8 +3017,10 @@ class GameEngineRuntime:
                 terrain_height=self._terrain_height_locked,
             )
             row = rows[0] if rows else spawn
-            x = _clamp(row.get("x"), -128.0, 128.0)
-            z = _clamp(row.get("z"), -128.0, 128.0)
+            x = _clamp(row.get("x"), -1000000.0, 1000000.0)
+            z = _clamp(row.get("z"), -1000000.0, 1000000.0)
+            if math.hypot(x-self._x[0],z-self._z[0])>life_contract.RENDER_RADIUS_M:
+                continue
             nearest = min(
                 [math.hypot(x - px, z - pz) for px, pz in physical_positions]
                 or [math.hypot(x - self._x[0], z - self._z[0])]
@@ -2221,6 +3163,10 @@ class GameEngineRuntime:
         )
         if not result.get("ok"):
             return str(result.get("status", "CONFLICT_BLOCKED")), result
+        self._start_character_action_locked(first_id, "UnarmedAttack")
+        self._start_character_action_locked(
+            second_id, "Death" if result.get("defeated") else "HitReact"
+        )
         self._last_combat = copy.deepcopy(result)
         self._append_event_locked(
             "NPC_COMBAT_ATTACK",
@@ -2371,6 +3317,7 @@ class GameEngineRuntime:
         return rows[:32]
 
     def _tick_individuals_locked(self) -> None:
+        if self._instance_private_locked():return
         """Run the social/world-use layer at 2 Hz, below the physics cadence."""
         if self._tick % 30 != 0:
             return
@@ -2470,6 +3417,7 @@ class GameEngineRuntime:
         return sum(breakdown.values())
 
     def _tick_vendor_economy_locked(self) -> None:
+        if self._instance_private_locked():return
         """Let live vendor NPCs replenish physical stock on a fixed cadence."""
         people = self._individual_state.get("individuals", {})
         accounts = self._economy_state.get("vendors", {})
@@ -3044,6 +3992,7 @@ class GameEngineRuntime:
         person: dict[str, Any],
         item: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
+        if not self._instance_item_visible_locked(item):return False,{'error':'NPC_ITEM_NOT_REACHABLE'}
         if str(item.get("location")) not in {"GROUND", "CONTAINER"}:
             return False, {"error": "NPC_ITEM_NOT_REACHABLE"}
         inventory = person.get("inventory")
@@ -3081,6 +4030,7 @@ class GameEngineRuntime:
         self,
         item: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
+        if not self._instance_item_visible_locked(item):return False,{'error':'NPC_ITEM_NOT_REACHABLE'}
         if str(item.get("location")) not in {"GROUND", "CONTAINER"}:
             return False, {"error": "NPC_ITEM_NOT_CONSUMABLE_HERE"}
         self._remove_container_child_ref_locked(item)
@@ -3562,6 +4512,7 @@ class GameEngineRuntime:
         vz: float,
         life: float,
         color: str,
+        owner: str = '',
     ) -> None:
         slot = None
         for offset in range(MAX_PARTICLES):
@@ -3573,6 +4524,7 @@ class GameEngineRuntime:
             slot = self._particle_cursor
         else:
             self._particle_count += 1
+            bisect.insort(self._active_particle_indices, slot)
         self._particle_cursor = (slot + 1) % MAX_PARTICLES
         self._plife[slot] = float(life)
         self._px[slot] = float(x)
@@ -3582,8 +4534,9 @@ class GameEngineRuntime:
         self._pvy[slot] = float(vy)
         self._pvz[slot] = float(vz)
         self._pcolor[slot] = str(color)
+        self._ride_particle_birth_locked(slot,owner)
 
-    def _burst_locked(self, x: float, y: float, z: float, count: int = 32) -> None:
+    def _burst_locked(self, x: float, y: float, z: float, count: int = 32, *, owner: str = '') -> None:
         count = max(1, min(96, int(count)))
         for index in range(count):
             phase = (index / float(count)) * math.tau
@@ -3597,6 +4550,7 @@ class GameEngineRuntime:
                 math.sin(phase) * speed,
                 0.55 + float(index % 4) * 0.11,
                 "#c8a97e" if index % 3 else "#c98989",
+                owner=owner,
             )
         self._append_event_locked("PARTICLE_BURST", f"{count} pooled debris particles emitted.")
 
@@ -3620,14 +4574,17 @@ class GameEngineRuntime:
             "strafe": _clamp(row.get("strafe"), -1.0, 1.0),
             "vertical": _clamp(row.get("vertical"), -1.0, 1.0),
             "jump": bool(row.get("jump")),
+            "grapple": bool(row.get("grapple")),
             "movement_mode": world.normalize_movement_mode(
                 row.get("movement_mode"), self._movement_mode
             ),
+            "mouse_look": bool(row.get("mouse_look")),
+            "facing_yaw": _clamp(row.get("facing_yaw"), -180.0, 180.0),
             "camera_yaw": _clamp(row.get("camera_yaw"), -360.0, 360.0),
-            "camera_pitch": _clamp(row.get("camera_pitch"), -89.0, 20.0),
+            "camera_pitch": _clamp(row.get("camera_pitch"), -75.0, 75.0, -8.0),
             "camera_distance": _clamp(
                 row.get("camera_distance"),
-                4.0,
+                2.0,
                 160.0,
                 world.DEFAULT_CAMERA_DISTANCE_M,
             ),
@@ -3635,16 +4592,203 @@ class GameEngineRuntime:
             "ability_2": bool(row.get("ability_2")),
             "ability_3": bool(row.get("ability_3")),
         }
+        if self._input["mouse_look"]:
+            self._yaw[0] = math.radians(self._input["facing_yaw"])
+        if self._player_defeated_locked():self._input["movement_mode"]='GROUND'
         self._movement_mode = self._input["movement_mode"]
         self._camera_yaw = self._input["camera_yaw"]
         self._camera_pitch = self._input["camera_pitch"]
         self._camera_distance = self._input["camera_distance"]
 
-    def _build_spatial_grid_locked(self) -> dict[tuple[int, int], list[int]]:
-        grid: dict[tuple[int, int], list[int]] = {}
-        for index in range(1, MAX_ENTITIES):
-            if not self._alive[index] or not self._static[index]:
+    def _grapple_detach_locked(self, reason: str = "PLAYER_RELEASE") -> None:
+        if self._grapple_anchor is None:
+            return
+        self._grapple_anchor = None
+        self._grapple_rope_length = 0.0
+        self._append_event_locked(
+            "GRAPPLE_RELEASE",
+            "Grapple rope released.",
+            actor_id="player",
+            subject_id=str(reason)[:48],
+        )
+
+    def _grapple_find_anchor_locked(self) -> tuple[float, float, float] | None:
+        """Find a clear anchor ahead, without changing the player state."""
+        attachable = {
+            "HOUSE", "WINDMILL", "WATER_WHEEL", "TIDE_BEACON",
+            "DOCK", "BRIDGE", "PALM", "ROCK",
+        }
+        forward_x, forward_z = controller.character_basis(self._yaw[0])["forward"]
+        best: tuple[float, tuple[float, float, float], float] | None = None
+        source_x, source_y, source_z = self._x[0], self._y[0] + 0.85, self._z[0]
+        for index in self._static_entity_indices:
+            if not self._alive[index] or self._kind[index] not in attachable:
                 continue
+            dx = self._x[index] - source_x
+            dz = self._z[index] - source_z
+            horizontal = math.hypot(dx, dz)
+            if horizontal < 2.5 or horizontal > 23.0:
+                continue
+            alignment = (dx * forward_x + dz * forward_z) / horizontal
+            if alignment < 0.28:
+                continue
+            anchor = (
+                self._x[index],
+                self._y[index] + max(2.8, abs(self._sy[index]) * 1.8),
+                self._z[index],
+            )
+            distance = math.dist((source_x, source_y, source_z), anchor)
+            if distance > 25.0:
+                continue
+            clear = True
+            for step in range(1, 8):
+                t = step / 8.0
+                test_x = source_x + (anchor[0] - source_x) * t
+                test_y = source_y + (anchor[1] - source_y) * t
+                test_z = source_z + (anchor[2] - source_z) * t
+                if test_y < self._terrain_height_locked(test_x, test_z) + 0.22:
+                    clear = False
+                    break
+                for obstacle in self._static_entity_indices:
+                    if (
+                        obstacle == index
+                        or not self._alive[obstacle]
+                        or self._kind[obstacle] not in attachable
+                    ):
+                        continue
+                    half_x = max(0.35, abs(self._sx[obstacle]) * 0.46)
+                    half_z = max(0.35, abs(self._sz[obstacle]) * 0.46)
+                    obstacle_bottom = self._y[obstacle] - 0.15
+                    obstacle_top = self._y[obstacle] + max(
+                        1.4, abs(self._sy[obstacle]) * 1.85
+                    )
+                    if (
+                        abs(test_x - self._x[obstacle]) <= half_x
+                        and abs(test_z - self._z[obstacle]) <= half_z
+                        and obstacle_bottom <= test_y <= obstacle_top
+                    ):
+                        clear = False
+                        break
+                if not clear:
+                    break
+            if not clear:
+                continue
+            score = distance + (1.0 - alignment) * 7.0
+            if best is None or score < best[0]:
+                best = (score, anchor, distance)
+        if best is None:
+            return None
+        return best[1]
+
+    def _grapple_fire_locked(self) -> None:
+        """Launch a visible hook toward the nearest valid forward anchor."""
+        forward_x, forward_z = controller.character_basis(self._yaw[0])["forward"]
+        start = (self._x[0], self._y[0] + 0.85, self._z[0])
+        anchor = self._grapple_find_anchor_locked()
+        target = anchor or (
+            start[0] + forward_x * 23.0,
+            start[1] + 0.15,
+            start[2] + forward_z * 23.0,
+        )
+        distance = max(0.1, math.dist(start, target))
+        duration = max(0.10, min(0.72, distance / 34.0))
+        self._grapple_projectile = {
+            "start": start,
+            "target": target,
+            "anchor": anchor,
+            "elapsed_s": 0.0,
+            "duration_s": duration,
+        }
+        self._append_event_locked(
+            "GRAPPLE_FIRED",
+            "Grapple hook launched.",
+            actor_id="player",
+            payload={"range_m": round(distance, 3), "targetable": anchor is not None},
+        )
+
+    def _grapple_cancel_projectile_locked(self, reason: str) -> None:
+        if self._grapple_projectile is None:
+            return
+        self._grapple_projectile = None
+        self._append_event_locked(
+            "GRAPPLE_CANCEL",
+            "Grapple hook flight cancelled.",
+            actor_id="player",
+            subject_id=str(reason)[:48],
+        )
+
+    def _grapple_tick_projectile_locked(self, dt: float) -> None:
+        projectile = self._grapple_projectile
+        if projectile is None:
+            return
+        projectile["elapsed_s"] = min(
+            float(projectile["duration_s"]),
+            float(projectile["elapsed_s"]) + max(0.0, dt),
+        )
+        if float(projectile["elapsed_s"]) + 1e-8 < float(projectile["duration_s"]):
+            return
+        self._grapple_projectile = None
+        anchor = projectile.get("anchor")
+        if (
+            isinstance(anchor, tuple)
+            and self._movement_mode == "GROUND"
+            and self._vehicle_kind == "NONE"
+        ):
+            self._grapple_attach_locked(anchor)
+            return
+        self._append_event_locked(
+            "GRAPPLE_MISS",
+            "Grapple hook reached its range without a valid anchor.",
+            actor_id="player",
+        )
+
+    def _grapple_projectile_position_locked(self) -> tuple[float, float, float] | None:
+        projectile = self._grapple_projectile
+        if projectile is None:
+            return None
+        start = projectile["start"]
+        target = projectile["target"]
+        duration = max(1.0e-5, float(projectile["duration_s"]))
+        alpha = max(0.0, min(1.0, float(projectile["elapsed_s"]) / duration))
+        return tuple(
+            float(start[axis]) + (float(target[axis]) - float(start[axis])) * alpha
+            for axis in range(3)
+        )
+
+    def _grapple_attach_locked(self, anchor: tuple[float, float, float]) -> bool:
+        """Latch on hook impact and set rope length from the current player root."""
+        self._grapple_anchor = anchor
+        root_distance = math.dist(
+            (self._x[0], self._y[0], self._z[0]),
+            anchor,
+        )
+        self._grapple_rope_length = max(0.25, min(25.0, root_distance))
+        self._append_event_locked(
+            "GRAPPLE_ATTACH",
+            "Grapple attached on impact.",
+            actor_id="player",
+            payload={"rope_length_m": round(self._grapple_rope_length, 3)},
+        )
+        return True
+
+    def _grapple_view_locked(self) -> dict[str, Any]:
+        projectile_position = self._grapple_projectile_position_locked()
+        return {
+            "attached": self._grapple_anchor is not None,
+            "anchor_x": round(self._grapple_anchor[0], 3) if self._grapple_anchor else 0.0,
+            "anchor_y": round(self._grapple_anchor[1], 3) if self._grapple_anchor else 0.0,
+            "anchor_z": round(self._grapple_anchor[2], 3) if self._grapple_anchor else 0.0,
+            "projectile_active": projectile_position is not None,
+            "projectile_x": round(projectile_position[0], 3) if projectile_position else 0.0,
+            "projectile_y": round(projectile_position[1], 3) if projectile_position else 0.0,
+            "projectile_z": round(projectile_position[2], 3) if projectile_position else 0.0,
+            "rope_length_m": round(self._grapple_rope_length, 3),
+        }
+
+    def _build_spatial_grid_locked(self) -> dict[tuple[int, int], list[int]]:
+        if getattr(self,'_benilla_world',None) is not None:return {}
+        grid: dict[tuple[int, int], list[int]] = {}
+        for index in self._static_entity_indices:
             cell = (
                 math.floor(self._x[index] / 2.0),
                 math.floor(self._z[index] / 2.0),
@@ -3657,6 +4801,15 @@ class GameEngineRuntime:
         if not isinstance(ability, dict):
             self._last_ability_status = "UNKNOWN"
             return False, {"error": "CONTENT_ABILITY_NOT_FOUND", "ability_id": ability_id}
+        if ability.get('kind') in ('SPELL','FORM'):
+            return self._start_spell_locked(str(ability_id))
+        if self._spell_state.get('pending'):
+            self._cancel_spell_locked('MOVEMENT_ABILITY')
+        if not self._combat_state.get("actors", {}).get("player", {}).get("alive", True):
+            self._last_ability_status = "DEFEATED"
+            return False, {"error": "COMBAT_PLAYER_DEFEATED", "ability_id": str(ability_id)}
+        if self._services.get('taxi_flight'):
+            return False, {'error':'TAXI_IN_PROGRESS','ability_id':str(ability_id)}
         cooldown = max(0.0, float(self._ability_cooldowns.get(str(ability_id), 0.0)))
         if cooldown > 0.0:
             self._last_ability_status = "COOLDOWN"
@@ -3689,8 +4842,9 @@ class GameEngineRuntime:
         )
         self._last_ability = str(ability_id)
         self._last_ability_status = "FIRED"
+        self._last_ability_time = self._sim_time
         burst_count = max(1, min(96, int(effect.get("particle_burst", 12))))
-        self._burst_locked(self._x[0], self._y[0], self._z[0], burst_count)
+        self._burst_locked(self._x[0], self._y[0], self._z[0], burst_count,owner='player')
         self._append_event_locked(
             "ABILITY",
             f"{ability.get('name', ability_id)} fired in {self._movement_mode.lower()} mode.",
@@ -3704,17 +4858,23 @@ class GameEngineRuntime:
 
     def _npc_line_of_sight_locked(self, index: int) -> bool:
         """Run a cheap 2D segment-vs-static-circle visibility check."""
-        target_x = self._x[0]
-        target_z = self._z[0]
-        start_x = self._x[index]
-        start_z = self._z[index]
+        return self._line_of_sight_locked((self._x[index],self._y[index]+.5,self._z[index]),
+            (self._x[0],self._y[0]+.5,self._z[0]),ignore_index=index)
+
+    def _line_of_sight_locked(self,start,end,*,ignore_index=None) -> bool:
+        """Observe the current world between the two actual combatants."""
+        imported=getattr(self,'_benilla_world',None)
+        if imported is not None:
+            return imported.line_of_sight(start,end)
+        target_x,target_z=end[0],end[2]
+        start_x,start_z=start[0],start[2]
         segment_x = target_x - start_x
         segment_z = target_z - start_z
         segment_length_sq = segment_x * segment_x + segment_z * segment_z
         if segment_length_sq <= 0.0001:
             return True
-        for other in range(1, MAX_ENTITIES):
-            if other == index or not self._alive[other] or not self._static[other]:
+        for other in self._static_entity_indices:
+            if other == ignore_index:
                 continue
             obstacle_x = self._x[other]
             obstacle_z = self._z[other]
@@ -3731,35 +4891,86 @@ class GameEngineRuntime:
                 return False
         return True
 
-    def _ensure_ground_navigation_locked(self) -> list[dict[str, Any]]:
-        """Ensure the shared ground tiles exist before an NPC path query."""
-        cells = list(
-            world.interest_cells(
-                self._x[0],
-                self._z[0],
-                radius=world.DEFAULT_INTEREST_RADIUS,
-            )[:MAX_CHUNKS]
-        )
+    def _navigation_tiles_for_cells_locked(
+        self,
+        cells: list[dict[str, Any]],
+        movement_mode: str,
+    ) -> list[dict[str, Any]]:
+        """Build nav only for cells that entered the current interest set."""
+        mode = world.normalize_movement_mode(movement_mode)
+        override_revision = int(self._terrain_overrides.get("revision", 0))
+        cell_coordinates = {
+            (int(row.get("x", 0)), int(row.get("z", 0)))
+            for row in cells
+            if isinstance(row, dict)
+        }
         navigation_key = (
-            tuple(
-                sorted(
-                    (int(row.get("x", 0)), int(row.get("z", 0)))
-                    for row in cells
-                    if isinstance(row, dict)
-                )
-            ),
-            "GROUND",
-            int(self._terrain_overrides.get("revision", 0)),
+            tuple(sorted(cell_coordinates)),
+            mode,
+            override_revision,
         )
         if navigation_key != self._navigation_cache_key:
-            self._navigation_tiles = nav_contract.build_nav_tiles(
-                cells,
+            same_terrain = (
+                self._navigation_cache_override_revision == override_revision
+            )
+            if same_terrain:
+                retained_cells = self._navigation_cache_cells & cell_coordinates
+                retained_keys = {
+                    world.cell_key(cell_x, cell_z)
+                    for cell_x, cell_z in retained_cells
+                }
+                retained_tiles = [
+                    tile
+                    for tile in self._navigation_tiles
+                    if str(tile.get("terrain_cell", "")) in retained_keys
+                ]
+                if self._navigation_cache_mode!=mode:
+                    retained_tiles=nav_contract.tiles_for_mode(retained_tiles,mode)
+                new_cells = [
+                    row
+                    for row in cells
+                    if isinstance(row, dict)
+                    and (int(row.get("x", 0)), int(row.get("z", 0)))
+                    not in retained_cells
+                ]
+            else:
+                retained_tiles = []
+                new_cells = cells
+            rebuilt_tiles = nav_contract.build_nav_tiles(
+                new_cells,
                 world_seed=WORLD_SEED,
                 overrides=self._terrain_overrides,
-                movement_mode="GROUND",
+                movement_mode=mode,
+            ) if new_cells else []
+            self._navigation_tiles = sorted(
+                [*retained_tiles, *rebuilt_tiles],
+                key=lambda row: (int(row.get("z", 0)), int(row.get("x", 0))),
             )
             self._navigation_cache_key = navigation_key
+            self._navigation_cache_cells = cell_coordinates
+            self._navigation_cache_override_revision = override_revision
+            self._navigation_cache_mode = mode
         return self._navigation_tiles
+
+    def _ensure_ground_navigation_locked(self) -> list[dict[str, Any]]:
+        """Ensure the shared ground tiles exist before an NPC path query."""
+        center = (
+            world.chunk_coord(self._x[0]),
+            world.chunk_coord(self._z[0]),
+        )
+        if center != self._navigation_interest_center:
+            self._navigation_interest_cells = list(
+                world.interest_cells(
+                    self._x[0],
+                    self._z[0],
+                    radius=world.DEFAULT_INTEREST_RADIUS,
+                )[:MAX_CHUNKS]
+            )
+            self._navigation_interest_center = center
+        return self._navigation_tiles_for_cells_locked(
+            self._navigation_interest_cells,
+            "GROUND",
+        )
 
     def _plan_npc_path_locked(
         self,
@@ -3769,15 +4980,64 @@ class GameEngineRuntime:
         desired_speed: float,
     ) -> None:
         """Plan one short route at decision cadence, with direct fallback."""
-        self._npc_path[index] = []
-        self._npc_path_index[index] = 0
         if self._movement_mode != "GROUND":
+            self._npc_path[index] = []
+            self._npc_path_index[index] = 0
             self._npc_path_status[index] = "MODE_DIRECT"
+            self._npc_path_goal_tile[index] = None
+            self._npc_path_navigation_key[index] = None
             return
         if desired_speed <= 0.0:
+            self._npc_path[index] = []
+            self._npc_path_index[index] = 0
             self._npc_path_status[index] = "STOPPED"
+            self._npc_path_goal_tile[index] = None
+            self._npc_path_navigation_key[index] = None
+            return
+        if getattr(self, '_benilla_world', None) is not None:
+            # Imported geometry has its own resident floors and hulls. GG's
+            # procedural tile cache is not a path through a mounted world.
+            self._npc_path[index] = []
+            self._npc_path_index[index] = 0
+            self._npc_path_status[index] = 'WORLD_WALKING'
+            self._npc_path_goal_tile[index] = None
+            self._npc_path_navigation_key[index] = None
             return
         tiles = self._ensure_ground_navigation_locked()
+        goal_tile = (
+            nav_contract.tile_coord(target_x),
+            nav_contract.tile_coord(target_z),
+        )
+        navigation_key = self._navigation_cache_key
+        cached_status = self._npc_path_status[index]
+        same_route = (
+            self._npc_path_goal_tile[index] == goal_tile
+            and self._npc_path_navigation_key[index] == navigation_key
+        )
+        if same_route and cached_status == "READY_AT_TILE":
+            return
+        if same_route and cached_status == "READY":
+            route_is_live = (
+                self._npc_path_index[index] < len(self._npc_path[index])
+            )
+            npc_tile = (
+                nav_contract.tile_coord(self._x[index]),
+                nav_contract.tile_coord(self._z[index]),
+            )
+            if route_is_live or npc_tile == goal_tile:
+                return
+        if (
+            same_route
+            and cached_status == "NO_PATH_FALLBACK"
+            and self._tick - self._npc_path_attempt_tick[index] < FIXED_HZ
+        ):
+            return
+
+        self._npc_path[index] = []
+        self._npc_path_index[index] = 0
+        self._npc_path_goal_tile[index] = goal_tile
+        self._npc_path_navigation_key[index] = navigation_key
+        self._npc_path_attempt_tick[index] = self._tick
         result = nav_contract.plan_path(
             tiles,
             self._x[index],
@@ -3832,6 +5092,20 @@ class GameEngineRuntime:
                 self._npc_state[index] = "DEAD"
                 self._npc_reason[index] = "COMBAT_DEFEATED"
                 continue
+            mounted = getattr(self, '_benilla_world', None)
+            swimming = False
+            if mounted is not None:
+                from backend.game_engine_benilla_locomotion import motion
+                position,vertical,mode,impact=motion(mounted,(self._x[index],self._y[index]-.65,self._z[index]),self._vy[index],dt)
+                if position[1]!=self._y[index]-.65:self._y[index]=position[1]+.65
+                self._vy[index]=vertical;swimming=mode=='SWIM'
+                if isinstance(combat_actor,dict) and impact>8:
+                    dealt,absorbed=combat_contract.deal_damage(self._combat_state,combat_actor,combat_actor['max_health']*min(1.,(impact-8.)/20.),'environment',self._sim_time)
+                    self._start_character_action_locked(self._npc_ids[index],'HitReact' if combat_actor['alive'] else 'Death')
+                    self._append_event_locked('NPC_FALL_DAMAGE','NPC landed after falling.',actor_id=self._npc_ids[index],payload=dict(damage=dealt,absorbed=absorbed))
+                if mode in ('FALL','HOLD') or isinstance(combat_actor,dict) and not combat_actor.get('alive',True):
+                    self._vx[index]=self._vz[index]=0.;self._npc_path_status[index]=mode
+                    continue
             archetype = self._npc_archetype[index]
             profile = npc_contract.PROFILES.get(
                 archetype,
@@ -3871,6 +5145,7 @@ class GameEngineRuntime:
                     self._npc_last_seen_x[index],
                     self._npc_last_seen_z[index],
                 )
+                decision = self._group_steering_locked(index, decision)
                 # Individual world-use decisions are a secondary target seam:
                 # player perception still wins, while a calm NPC may walk to
                 # a cache or station chosen by its own bounded identity state.
@@ -3952,6 +5227,36 @@ class GameEngineRuntime:
                 0.0,
                 min(profile["run_speed"], self._npc_decision_speed[index]),
             )
+            home_distance = math.hypot(self._x[index]-self._npc_home_x[index],
+                                       self._z[index]-self._npc_home_z[index])
+            if home_distance > profile['wander_radius'] and self._npc_ids[index] not in self._services['group']['members']:
+                # A live actor outside its home area walks back. Projecting
+                # its root onto the boundary teleports displaced actors and
+                # actors promoted while walking an outer part of a route.
+                target_dx = self._npc_home_x[index]-self._x[index]
+                target_dz = self._npc_home_z[index]-self._z[index]
+                target_distance = home_distance
+                desired_speed = profile['speed']
+                self._npc_reason[index] = 'HOME_RETURN'
+            mounted = getattr(self, '_benilla_world', None)
+            if mounted is not None:
+                from backend.game_engine_benilla_locomotion import routes
+                waypoint = routes(mounted).waypoint(str(self._npc_ids[index]),
+                    (self._x[index], self._y[index]-.65, self._z[index]),
+                    (self._x[index]+target_dx, self._y[index]-.65, self._z[index]+target_dz), self._sim_time,swimming=swimming)
+                target_dx, target_dz = waypoint[0]-self._x[index], waypoint[2]-self._z[index]
+                target_distance = math.hypot(target_dx, target_dz)
+                self._npc_path_status[index] = routes(mounted).last_status
+                desired_speed = min(desired_speed, target_distance/max(dt, .0001))
+                if target_distance < .01:
+                    self._vx[index] = self._vz[index] = 0.
+            movement_scale = combat_contract.movement_scale(
+                self._combat_state.get("actors", {}).get(str(self._npc_ids[index]), {}),
+                self._sim_time)
+            desired_speed *= movement_scale
+            active_action = self._character_action_for_locked(self._npc_ids[index])
+            if active_action.get("clip") in animation_contract.WORLD_INTERACTION_CLIPS:
+                desired_speed = 0.
             if target_distance > 0.3 and desired_speed > 0.0:
                 desired_vx = target_dx / target_distance * desired_speed
                 desired_vz = target_dz / target_distance * desired_speed
@@ -3964,49 +5269,45 @@ class GameEngineRuntime:
             self._vy[index] = 0.0
 
             current_speed = math.hypot(self._vx[index], self._vz[index])
-            if current_speed > profile["run_speed"]:
-                scale = profile["run_speed"] / current_speed
+            if current_speed > profile["run_speed"] * movement_scale:
+                scale = profile["run_speed"] * movement_scale / current_speed
                 self._vx[index] *= scale
                 self._vz[index] *= scale
-            self._x[index] += self._vx[index] * dt
-            self._z[index] += self._vz[index] * dt
-
-            # The home-radius clamp remains a safety net even when a route was
-            # available. It prevents malformed content targets from becoming
-            # world drift and keeps direct fallback bounded.
-            home_dx = self._x[index] - self._npc_home_x[index]
-            home_dz = self._z[index] - self._npc_home_z[index]
-            home_distance = math.hypot(home_dx, home_dz)
-            home_radius = profile["wander_radius"]
-            if home_distance > home_radius:
-                scale = home_radius / max(home_distance, 0.0001)
-                self._x[index] = self._npc_home_x[index] + home_dx * scale
-                self._z[index] = self._npc_home_z[index] + home_dz * scale
-                outward_velocity = (
-                    self._vx[index] * home_dx + self._vz[index] * home_dz
-                ) / max(home_distance, 0.0001)
-                if outward_velocity > 0.0:
-                    self._vx[index] -= outward_velocity * home_dx / home_distance
-                    self._vz[index] -= outward_velocity * home_dz / home_distance
-
-            self._y[index] = self._terrain_height_locked(
-                self._x[index], self._z[index]
-            ) + 0.65
+            if mounted is not None:
+                from backend.game_engine_benilla_locomotion import move
+                old_x, old_z = self._x[index], self._z[index]
+                nx, ny, nz = move(mounted, (old_x, self._y[index]-.65, old_z),
+                    old_x+self._vx[index]*dt, old_z+self._vz[index]*dt,swimming=swimming)
+                held = nx == old_x and nz == old_z
+                self._x[index], self._y[index], self._z[index] = nx, self._y[index] if held else ny+.65, nz
+                self._vx[index], self._vz[index] = (nx-old_x)/max(dt,.0001), (nz-old_z)/max(dt,.0001)
+                current_speed = math.hypot(self._vx[index], self._vz[index])
+            else:
+                self._x[index] += self._vx[index] * dt
+                self._z[index] += self._vz[index] * dt
+                self._y[index] = self._terrain_height_locked(self._x[index], self._z[index]) + 0.65
             if current_speed > 0.02:
-                # character_basis(yaw) maps yaw zero to -Z.  Derive the
-                # facing from that same convention so NPC meshes do not walk
-                # backwards after the player switched to WoW-style input.
-                self._yaw[index] = math.atan2(
-                    -self._vx[index], -self._vz[index]
-                )
+                # Authored Blender characters face +Z at yaw zero. Keep NPC
+                # mesh heading aligned with their actual velocity.
+                self._yaw[index] = math.atan2(self._vx[index], self._vz[index])
 
     def _tick_locked(self, dt: float) -> None:
+        mounted=getattr(self,'_benilla_world',None)
+        if getattr(self,'_mounted_world_resume',None) or getattr(mounted,'initial_collision_pending',False):
+            return
         started = time.perf_counter()
         self._set_replay_input_locked()
         if self._replaying is False and self._running is False:
             return
+        previously_grounded = self._grounded
+        previous_vertical_speed = self._vy[0]
         self._tick += 1
         self._sim_time += dt
+        self._tick_crafting_locked(dt)
+        self._double_jump_pose_remaining_s = max(
+            0.0,
+            self._double_jump_pose_remaining_s - dt,
+        )
         self._collision_cooldown = max(0.0, self._collision_cooldown - dt)
         for ability_id in tuple(self._ability_cooldowns):
             remaining = max(0.0, self._ability_cooldowns[ability_id] - dt)
@@ -4016,7 +5317,26 @@ class GameEngineRuntime:
                 self._ability_cooldowns[ability_id] = remaining
         self._resource = min(100.0, self._resource + 8.0 * dt)
 
-        current_input = dict(self._input)
+        current_input = self._client_tick_input_locked(self._input)
+        grapple_pressed = bool(current_input.get("grapple"))
+        grapple_edge = grapple_pressed and not self._grapple_held
+        if grapple_edge:
+            if self._grapple_anchor is not None:
+                self._grapple_detach_locked()
+            elif self._grapple_projectile is not None:
+                self._grapple_cancel_projectile_locked("PLAYER_RELEASE")
+            elif self._movement_mode == "GROUND" and self._vehicle_kind == "NONE":
+                self._grapple_fire_locked()
+        self._grapple_held = grapple_pressed
+        if self._grapple_anchor is not None and (
+            self._movement_mode != "GROUND" or self._vehicle_kind == "BOAT"
+        ):
+            self._grapple_detach_locked("MOVEMENT_MODE_CHANGED")
+        if self._grapple_projectile is not None and (
+            self._movement_mode != "GROUND" or self._vehicle_kind != "NONE"
+        ):
+            self._grapple_cancel_projectile_locked("MOVEMENT_MODE_CHANGED")
+        self._grapple_tick_projectile_locked(dt)
         if self._recording and len(self._recorded_inputs) < MAX_REPLAY_INPUTS:
             self._recorded_inputs.append({"tick": self._tick, **current_input})
 
@@ -4041,15 +5361,235 @@ class GameEngineRuntime:
                 self._activate_ability_locked(ability_id)
             self._ability_held[ability_id] = ability_held
 
-        speed = math.sqrt(
-            self._vx[0] * self._vx[0]
-            + self._vy[0] * self._vy[0]
-            + self._vz[0] * self._vz[0]
-        )
-        if self._movement_mode == "GROUND":
-            # WoW classic ground grammar: W/S moves relative to character
-            # facing, A/D turns in place and Q/E is the independent strafe
-            # axis. Camera orbit never silently changes the movement vector.
+        previous_player_x = self._x[0]
+        previous_player_z = self._z[0]
+        boat_index = self._boat_entity_index
+        if boat_index is not None and self._alive[boat_index]:
+            boat_x = self._x[boat_index]
+            boat_z = self._z[boat_index]
+            water = self._water_sample_locked(boat_x, boat_z)
+            if self._vehicle_kind == "BOAT":
+                boat_motion = mobility_contract.boat_step(
+                    x=boat_x,
+                    z=boat_z,
+                    yaw=self._yaw[boat_index],
+                    vx=self._vx[boat_index],
+                    vz=self._vz[boat_index],
+                    throttle=forward,
+                    turn=turn_input,
+                    brake=brake,
+                    current_x=water["current_mps"]["x"],
+                    current_z=water["current_mps"]["z"],
+                    dt=dt,
+                )
+                ahead_bed = max(
+                    0.0,
+                    terrain_contract.SEA_LEVEL
+                    - self._terrain_height_locked(boat_motion["x"], boat_motion["z"]),
+                )
+                if ahead_bed < mobility_contract.MIN_BOAT_DEPTH_M:
+                    boat_motion["x"] = boat_x
+                    boat_motion["z"] = boat_z
+                    boat_motion["vx"] = self._vx[boat_index] * 0.25
+                    boat_motion["vz"] = self._vz[boat_index] * 0.25
+                    boat_motion["speed"] = math.hypot(boat_motion["vx"], boat_motion["vz"])
+                self._x[boat_index] = boat_motion["x"]
+                self._z[boat_index] = boat_motion["z"]
+                self._yaw[boat_index] = boat_motion["yaw"]
+                self._vx[boat_index] = boat_motion["vx"]
+                self._vz[boat_index] = boat_motion["vz"]
+                water = self._water_sample_locked(self._x[boat_index], self._z[boat_index])
+                slope = water["slope"]
+                if water.get("has_surface", True):
+                    self._y[boat_index] = water["height_m"] + mobility_contract.BOAT_HULL_DRAFT_M
+                water_pitch, water_roll = mobility_contract.ride_tilt_degrees(
+                    self._yaw[boat_index], slope["x"], slope["z"]
+                )
+                self._pitch[boat_index] = water_pitch
+                self._roll[boat_index] = max(
+                    -18.0, min(18.0, water_roll + boat_motion["roll"])
+                )
+                self._x[0] = self._x[boat_index]
+                self._z[0] = self._z[boat_index]
+                self._y[0] = (
+                    self._y[boat_index]
+                    + mobility_contract.skiff_seat_offset(self._sy[boat_index])
+                )
+                self._yaw[0] = self._yaw[boat_index]
+                self._vx[0] = self._vx[boat_index]
+                self._vy[0] = 0.0
+                self._vz[0] = self._vz[boat_index]
+                self._grounded = True
+                self._jump_count = 0
+                self._double_jump_pose_remaining_s = 0.0
+                self._sprinting = False
+            else:
+                slope = water["slope"]
+                if water.get("has_surface", True):
+                    self._y[boat_index] = water["height_m"] + mobility_contract.BOAT_HULL_DRAFT_M
+                self._pitch[boat_index], self._roll[boat_index] = (
+                    mobility_contract.ride_tilt_degrees(
+                        self._yaw[boat_index], slope["x"], slope["z"]
+                    )
+                )
+
+        if self._vehicle_kind == "HOVERBOARD":
+            predicted_x = self._x[0] + self._vx[0] * dt
+            predicted_z = self._z[0] + self._vz[0] * dt
+            support_y = self._ground_contact_height_locked(
+                predicted_x, predicted_z, vehicle_kind="HOVERBOARD"
+            )
+            board_motion = mobility_contract.hoverboard_step(
+                x=self._x[0],
+                z=self._z[0],
+                yaw=self._yaw[0],
+                vx=self._vx[0],
+                vy=self._vy[0],
+                vz=self._vz[0],
+                forward=forward,
+                strafe=strafe,
+                turn=turn_input,
+                boost=boost,
+                jump_pressed=bool(current_input.get("jump")),
+                jump_was_pressed=self._jump_held,
+                jump_buffer_remaining=self._jump_buffer_remaining_s,
+                coyote_remaining=self._coyote_time_remaining_s,
+                jump_hold_time=self._jump_hold_time_s,
+                jump_count=self._jump_count,
+                grounded=self._grounded,
+                y=self._y[0],
+                ground_y=support_y,
+                dt=dt,
+            )
+            board_x = board_motion["x"]
+            board_z = board_motion["z"]
+            current_support_y = self._ground_contact_height_locked(
+                self._x[0], self._z[0], vehicle_kind="HOVERBOARD"
+            )
+            board_contact = mobility_contract.ground_surface_contact(
+                current_x=self._x[0],
+                current_z=self._z[0],
+                next_x=board_x,
+                next_z=board_z,
+                current_ground_y=current_support_y,
+                next_ground_y=support_y,
+                player_y=board_motion["y"],
+                airborne=not board_motion["grounded"],
+            )
+            if not board_contact["allowed"]:
+                x_only = mobility_contract.ground_surface_contact(
+                    current_x=self._x[0], current_z=self._z[0],
+                    next_x=board_x, next_z=self._z[0],
+                    current_ground_y=current_support_y,
+                    next_ground_y=self._ground_contact_height_locked(
+                        board_x, self._z[0], vehicle_kind="HOVERBOARD"
+                    ),
+                    player_y=board_motion["y"],
+                    airborne=not board_motion["grounded"],
+                )["allowed"]
+                z_only = mobility_contract.ground_surface_contact(
+                    current_x=self._x[0], current_z=self._z[0],
+                    next_x=self._x[0], next_z=board_z,
+                    current_ground_y=current_support_y,
+                    next_ground_y=self._ground_contact_height_locked(
+                        self._x[0], board_z, vehicle_kind="HOVERBOARD"
+                    ),
+                    player_y=board_motion["y"],
+                    airborne=not board_motion["grounded"],
+                )["allowed"]
+                if x_only:
+                    board_z = self._z[0]
+                    board_motion["vz"] = 0.0
+                elif z_only:
+                    board_x = self._x[0]
+                    board_motion["vx"] = 0.0
+                else:
+                    board_x = self._x[0]
+                    board_z = self._z[0]
+                    board_motion["vx"] = 0.0
+                    board_motion["vz"] = 0.0
+            self._x[0] = board_x
+            self._z[0] = board_z
+            actual_support_y = self._ground_contact_height_locked(
+                self._x[0], self._z[0], vehicle_kind="HOVERBOARD"
+            )
+            self._vx[0] = board_motion["vx"]
+            self._vz[0] = board_motion["vz"]
+            self._yaw[0] = board_motion["yaw"]
+            on_wave = (
+                self._water_depth_locked(self._x[0], self._z[0])
+                > mobility_contract.MIN_SWIMMABLE_DEPTH_M
+            )
+            # A wave can drop faster than gravity. Stick to it until a jump,
+            # or the crest passes through a body that is still falling.
+            if on_wave and int(board_motion["jump_count"]) == 0:
+                self._y[0] = actual_support_y
+                self._vy[0] = 0.0
+                self._grounded = True
+                self._coyote_time_remaining_s = controller.COYOTE_TIME_S
+                self._jump_hold_time_s = 0.0
+                self._jump_count = 0
+            else:
+                self._y[0] = max(actual_support_y, board_motion["y"])
+                self._vy[0] = board_motion["vy"]
+                if self._y[0] <= actual_support_y + 1e-4:
+                    self._y[0] = actual_support_y
+                    self._vy[0] = 0.0
+                    self._grounded = True
+                    self._coyote_time_remaining_s = controller.COYOTE_TIME_S
+                    self._jump_hold_time_s = 0.0
+                    self._jump_count = 0
+                else:
+                    self._grounded = False
+                    self._coyote_time_remaining_s = board_motion["coyote_remaining"]
+                    self._jump_hold_time_s = board_motion["jump_hold_time"]
+                    self._jump_count = int(board_motion["jump_count"])
+            self._jump_buffer_remaining_s = board_motion["jump_buffer_remaining"]
+            self._jump_held = bool(current_input.get("jump"))
+            if self._grounded and on_wave:
+                slope = self._water_sample_locked(self._x[0], self._z[0])["slope"]
+                self._pitch[0], self._roll[0] = mobility_contract.ride_tilt_degrees(
+                    self._yaw[0], slope["x"], slope["z"]
+                )
+            else:
+                self._pitch[0] = 0.0
+                self._roll[0] = 0.0
+            if board_motion["double_jumped"]:
+                self._double_jump_pose_remaining_s = (
+                    animation_contract.DOUBLE_JUMP_ANIMATION_SECONDS
+                )
+            elif board_motion["grounded"]:
+                self._double_jump_pose_remaining_s = 0.0
+            self._sprinting = bool(boost and abs(forward) > 0.01)
+            if board_motion["jumped"]:
+                self._append_event_locked(
+                    "BOARD_DOUBLE_JUMP" if board_motion["double_jumped"] else "BOARD_JUMP",
+                    "Hoverboard air-jump impulse applied."
+                    if board_motion["double_jumped"]
+                    else "Hoverboard jump impulse applied.",
+                )
+        elif (
+            self._grapple_anchor is not None
+            and self._vehicle_kind == "NONE"
+            and self._movement_mode == "GROUND"
+        ):
+            # While tethered, use low-drag air control and gravity. Ground
+            # friction/landing code would erase the momentum that makes the
+            # rope behave like a pendulum.
+            self._yaw[0] = (
+                self._yaw[0] + turn_input * controller.TURN_SPEED_RADPS * dt + math.pi
+            ) % math.tau - math.pi
+            air_drag = max(0.0, 1.0 - (0.16 + brake * 2.0) * dt)
+            self._vx[0] *= air_drag
+            self._vz[0] *= air_drag
+            self._vy[0] -= controller.GRAVITY_MPS2 * dt
+            self._x[0] += self._vx[0] * dt
+            self._y[0] += self._vy[0] * dt
+            self._z[0] += self._vz[0] * dt
+            self._grounded = False
+            self._jump_held = bool(current_input.get("jump"))
+            self._sprinting = False
+        elif self._vehicle_kind != "BOAT" and self._movement_mode == "GROUND":
             motion = controller.ground_step(
                 camera_yaw=self._camera_yaw,
                 character_yaw=self._yaw[0],
@@ -4066,66 +5606,246 @@ class GameEngineRuntime:
             self._vz[0] = motion["vz"]
             self._yaw[0] = motion["yaw"]
             self._sprinting = bool(motion["sprinting"])
-            ground_y = self._terrain_height_locked(self._x[0], self._z[0]) + 0.65
+            ground_y = self._ground_contact_height_locked(self._x[0], self._z[0])
             vertical_motion = controller.vertical_step(
                 y=self._y[0],
                 vertical_velocity=self._vy[0],
                 ground_y=ground_y,
                 jump_pressed=bool(current_input.get("jump")),
                 jump_was_pressed=self._jump_held,
+                coyote_remaining=self._coyote_time_remaining_s,
+                jump_buffer_remaining=self._jump_buffer_remaining_s,
+                jump_hold_time=self._jump_hold_time_s,
+                jump_count=self._jump_count,
                 dt=dt,
             )
             self._y[0] = vertical_motion["y"]
             self._vy[0] = vertical_motion["vertical_velocity"]
             self._grounded = bool(vertical_motion["grounded"])
+            self._coyote_time_remaining_s = float(vertical_motion["coyote_remaining"])
+            self._jump_buffer_remaining_s = float(vertical_motion["jump_buffer_remaining"])
+            self._jump_hold_time_s = float(vertical_motion["jump_hold_time"])
+            self._jump_count = int(vertical_motion["jump_count"])
+            if vertical_motion["double_jumped"]:
+                self._double_jump_pose_remaining_s = (
+                    animation_contract.DOUBLE_JUMP_ANIMATION_SECONDS
+                )
+            elif vertical_motion["grounded"]:
+                self._double_jump_pose_remaining_s = 0.0
             if vertical_motion["jumped"]:
-                self._append_event_locked("JUMP", "Player jump impulse applied.")
+                self._append_event_locked(
+                    "DOUBLE_JUMP" if vertical_motion["double_jumped"] else "JUMP",
+                    "Second jump impulse applied in air."
+                    if vertical_motion["double_jumped"]
+                    else "Player jump impulse applied.",
+                )
             self._jump_held = bool(current_input.get("jump"))
+            candidate_x = self._x[0] + self._vx[0] * dt
+            candidate_z = self._z[0] + self._vz[0] * dt
+            candidate_ground_y = self._ground_contact_height_locked(candidate_x, candidate_z)
+            contact = mobility_contract.ground_surface_contact(
+                current_x=self._x[0],
+                current_z=self._z[0],
+                next_x=candidate_x,
+                next_z=candidate_z,
+                current_ground_y=ground_y,
+                next_ground_y=candidate_ground_y,
+                player_y=self._y[0],
+                airborne=not self._grounded,
+            )
+            if contact["allowed"]:
+                self._x[0] = candidate_x
+                self._z[0] = candidate_z
+            else:
+                x_only = mobility_contract.ground_surface_contact(
+                    current_x=self._x[0], current_z=self._z[0],
+                    next_x=candidate_x, next_z=self._z[0],
+                    current_ground_y=ground_y,
+                    next_ground_y=self._ground_contact_height_locked(candidate_x, self._z[0]),
+                    player_y=self._y[0],
+                    airborne=not self._grounded,
+                )["allowed"]
+                z_only = mobility_contract.ground_surface_contact(
+                    current_x=self._x[0], current_z=self._z[0],
+                    next_x=self._x[0], next_z=candidate_z,
+                    current_ground_y=ground_y,
+                    next_ground_y=self._ground_contact_height_locked(self._x[0], candidate_z),
+                    player_y=self._y[0],
+                    airborne=not self._grounded,
+                )["allowed"]
+                if x_only:
+                    self._x[0] = candidate_x
+                    self._vz[0] = 0.0
+                elif z_only:
+                    self._z[0] = candidate_z
+                    self._vx[0] = 0.0
+                else:
+                    self._vx[0] = 0.0
+                    self._vz[0] = 0.0
+            landed_ground_y = self._ground_contact_height_locked(
+                self._x[0], self._z[0]
+            )
+            if ground_y - landed_ground_y > mobility_contract.MAX_STEP_UP_M:
+                # Leave a ledge as a fall instead of teleporting the root to
+                # the lower sample. The next fixed steps apply gravity and
+                # still allow the existing coyote-time jump window.
+                self._grounded = False
+                self._vy[0] = min(0.0, self._vy[0])
             if brake > 0.0:
                 brake_factor = max(0.0, 1.0 - min(1.0, brake * 10.0 * dt))
                 self._vx[0] *= brake_factor
                 self._vz[0] *= brake_factor
-        else:
+        elif self._vehicle_kind != "BOAT" and self._movement_mode == "SWIM":
+            water = self._water_sample_locked(self._x[0], self._z[0])
+            terrain_y = self._terrain_height_locked(self._x[0], self._z[0])
+            water_depth = max(0.0, water["height_m"] - terrain_y)
+            if getattr(self,'_benilla_world',None) is not None and water.get('body_kind')=='NONE':
+                # Finish this transition tick at the current swim height. The
+                # no-liquid sentinel must never become the buoyancy target.
+                water={**water,'height_m':self._y[0]-.18}
+            swim_motion = mobility_contract.swim_step(
+                x=self._x[0], z=self._z[0], yaw=self._yaw[0],
+                vx=self._vx[0], vy=self._vy[0], vz=self._vz[0],
+                forward=forward, strafe=strafe, turn=turn_input,
+                vertical=vertical, boost=boost, brake=brake,
+                y=self._y[0], terrain_y=terrain_y,
+                water_y=water["height_m"], water_depth=water_depth,
+                current_x=water["current_mps"]["x"],
+                current_z=water["current_mps"]["z"], dt=dt,
+                submerged_volume=water.get('has_surface') is False,
+            )
+            self._x[0] = swim_motion["x"]
+            previous_y=self._y[0];self._y[0] = swim_motion["y"]
+            self._z[0] = swim_motion["z"]
+            self._vx[0] = swim_motion["vx"]
+            self._vy[0] = swim_motion["vy"]
+            self._vz[0] = swim_motion["vz"]
+            self._yaw[0] = swim_motion["yaw"]
+            imported=getattr(self,'_benilla_world',None)
+            if imported is not None:
+                if self._y[0]>previous_y:
+                    ceiling=imported.ceiling(self._x[0],previous_y+.65,self._z[0])
+                    if ceiling is not None and self._y[0]+.65>ceiling:self._y[0]=ceiling-.65;self._vy[0]=min(0.,self._vy[0])
+                before=(self._x[0],self._z[0]);self._x[0],self._z[0]=imported.collide(self._x[0],self._y[0],self._z[0])
+                if self._x[0]!=before[0]:self._vx[0]=0.
+                if self._z[0]!=before[1]:self._vz[0]=0.
+            seabed_clearance_y = (
+                self._terrain_height_locked(self._x[0], self._z[0]) + 0.42
+            )
+            if self._y[0] < seabed_clearance_y:
+                self._y[0] = seabed_clearance_y
+                self._vy[0] = max(0.0, self._vy[0])
             self._grounded = False
             self._jump_held = False
-            self._sprinting = False
-            # Swim and flight keep the same facing-relative input grammar.
-            # Their constraints differ, but the player does not need a new
-            # control language when crossing from land into the air or water.
-            self._yaw[0] += turn_input * controller.TURN_SPEED_RADPS * dt
-            self._yaw[0] = (self._yaw[0] + math.pi) % math.tau - math.pi
-            facing = controller.character_basis(self._yaw[0])
-            forward_x, forward_z = facing["forward"]
-            right_x, right_z = facing["right"]
-            acceleration = 13.0 if self._movement_mode == "SWIM" else 18.0
-            if boost:
-                acceleration *= 1.25
-            self._vx[0] += (forward_x * forward + right_x * strafe) * acceleration * dt
-            self._vz[0] += (forward_z * forward + right_z * strafe) * acceleration * dt
-            self._vy[0] += vertical * acceleration * dt
-            damping = 0.90 if self._movement_mode == "SWIM" else 0.96
-            self._vx[0] *= damping
-            self._vy[0] *= damping
-            self._vz[0] *= damping
-            max_speed = 26.0 if self._movement_mode == "SWIM" else 48.0
-            speed = math.sqrt(
-                self._vx[0] * self._vx[0]
-                + self._vy[0] * self._vy[0]
-                + self._vz[0] * self._vz[0]
+            self._jump_count = 0
+            self._double_jump_pose_remaining_s = 0.0
+            self._coyote_time_remaining_s = 0.0
+            self._jump_buffer_remaining_s = 0.0
+            self._jump_hold_time_s = 0.0
+            self._sprinting = bool(boost and abs(forward) > 0.01)
+            new_depth = self._water_depth_locked(self._x[0], self._z[0])
+            if new_depth <= mobility_contract.SWIM_EXIT_DEPTH_M:
+                self._movement_mode = "GROUND"
+                self._input["movement_mode"] = "GROUND"
+                floor_y=self._ground_contact_height_locked(self._x[0],self._z[0])
+                if imported is None or self._y[0]<=floor_y+.025:
+                    self._y[0]=floor_y;self._vy[0]=0.;self._grounded=True
+                else:self._vy[0]=min(0.,self._vy[0]);self._grounded=False
+                self._append_event_locked("SHORE_EXIT", "Player reached walkable shore.")
+        elif self._vehicle_kind != "BOAT":
+            flight_motion = mobility_contract.flight_step(
+                x=self._x[0], z=self._z[0], yaw=self._yaw[0],
+                vx=self._vx[0], vy=self._vy[0], vz=self._vz[0],
+                forward=forward, strafe=strafe, turn=turn_input,
+                vertical=vertical, boost=boost, y=self._y[0],
+                terrain_y=self._terrain_height_locked(self._x[0], self._z[0]), dt=dt,
             )
-            if speed > max_speed:
-                scale = max_speed / speed
-                self._vx[0] *= scale
-                self._vy[0] *= scale
-                self._vz[0] *= scale
-        self._x[0] += self._vx[0] * dt
-        if self._movement_mode != "GROUND":
-            self._y[0] += self._vy[0] * dt
-        self._z[0] += self._vz[0] * dt
-        if self._movement_mode == "SWIM":
-            self._y[0] = max(0.2, min(24.0, self._y[0]))
-        elif self._movement_mode == "FLY":
-            self._y[0] = max(1.2, min(96.0, self._y[0]))
+            self._x[0] = flight_motion["x"]
+            self._y[0] = flight_motion["y"]
+            self._z[0] = flight_motion["z"]
+            self._vx[0] = flight_motion["vx"]
+            self._vy[0] = flight_motion["vy"]
+            self._vz[0] = flight_motion["vz"]
+            self._yaw[0] = flight_motion["yaw"]
+            self._grounded = False
+            self._jump_held = False
+            self._jump_count = 0
+            self._double_jump_pose_remaining_s = 0.0
+            self._coyote_time_remaining_s = 0.0
+            self._jump_buffer_remaining_s = 0.0
+            self._jump_hold_time_s = 0.0
+            self._sprinting = False
+            flight_floor_y = (
+                self._terrain_height_locked(self._x[0], self._z[0])
+                + mobility_contract.PLAYER_ROOT_HEIGHT_M
+            )
+            if self._y[0] < flight_floor_y:
+                self._y[0] = flight_floor_y
+                self._vy[0] = max(0.0, self._vy[0])
+
+        if (
+            self._grapple_anchor is not None
+            and self._vehicle_kind == "NONE"
+            and self._movement_mode == "GROUND"
+        ):
+            predicted_floor = self._ground_contact_height_locked(
+                self._x[0] + self._vx[0] * dt,
+                self._z[0] + self._vz[0] * dt,
+            )
+            constrained = controller.grapple_constraint(
+                position=(self._x[0], self._y[0], self._z[0]),
+                velocity=(self._vx[0], self._vy[0], self._vz[0]),
+                anchor=self._grapple_anchor,
+                rope_length=self._grapple_rope_length,
+                yaw=self._yaw[0],
+                forward=forward,
+                strafe=strafe,
+                dt=dt,
+                ground_y=predicted_floor,
+            )
+            self._x[0] = constrained["x"]
+            self._y[0] = constrained["y"]
+            self._z[0] = constrained["z"]
+            self._vx[0] = constrained["vx"]
+            self._vy[0] = constrained["vy"]
+            self._vz[0] = constrained["vz"]
+            actual_floor = self._ground_contact_height_locked(self._x[0], self._z[0])
+            if self._y[0] <= actual_floor + 0.025:
+                self._y[0] = actual_floor
+                self._grounded = True
+                self._vy[0] = max(0.0, self._vy[0])
+                self._jump_count = 0
+                self._coyote_time_remaining_s = controller.COYOTE_TIME_S
+            else:
+                self._grounded = False
+
+        if (
+            self._vehicle_kind == "NONE"
+            and self._movement_mode == "GROUND"
+            and self._grapple_anchor is None
+        ):
+            if self._water_depth_locked(self._x[0], self._z[0]) > mobility_contract.MIN_SWIMMABLE_DEPTH_M:
+                water = self._water_sample_locked(self._x[0], self._z[0])
+                if getattr(self,'_benilla_world',None) is None or self._y[0]<=water['height_m']+.3:
+                    self._movement_mode = "SWIM"
+                    self._input["movement_mode"] = "SWIM"
+                    if water.get('has_surface') is not False:self._y[0] = max(self._y[0], water["height_m"] + 0.18)
+                    self._grounded = False
+                    self._append_event_locked("WATER_ENTRY", "Player entered liquid and began swimming.")
+
+        if self._vehicle_kind == "BOAT" and boat_index is not None:
+            # The rider shares the hull's sampled wave orientation as well as
+            # its height. Otherwise the boat rocks under an upright avatar.
+            self._pitch[0] = self._pitch[boat_index]
+            self._roll[0] = self._roll[boat_index]
+        elif self._vehicle_kind != "HOVERBOARD":
+            self._pitch[0] = 0.0
+            self._roll[0] = 0.0
+
+        self._locomotion_distance_m += math.hypot(
+            self._x[0] - previous_player_x,
+            self._z[0] - previous_player_z,
+        )
 
         speed = math.sqrt(
             self._vx[0] * self._vx[0]
@@ -4133,7 +5853,7 @@ class GameEngineRuntime:
             + self._vz[0] * self._vz[0]
         )
 
-        boundary = CHUNK_SIZE * 128.0
+        boundary = max(abs(value) for value in planet_contract.MAP_BOUNDS_M.values()) + CHUNK_SIZE * 4
         if abs(self._x[0]) > boundary:
             self._x[0] = max(-boundary, min(boundary, self._x[0]))
             self._vx[0] *= -0.55
@@ -4143,14 +5863,15 @@ class GameEngineRuntime:
             self._vz[0] *= -0.55
             self._burst_locked(self._x[0], 0.65, self._z[0], 12)
 
-        if self._movement_mode == "GROUND":
+        if (
+            self._movement_mode == "GROUND"
+            and self._vehicle_kind == "NONE"
+            and self._grapple_anchor is None
+        ):
             # Ground movement follows the same continuous heightfield that the
             # renderer receives. There is no per-cell teleport or zone seam.
             # Enterable huts raise the floor to the deck when the player is on it.
-            ground_y = self._terrain_height_locked(self._x[0], self._z[0]) + 0.65
-            house_y = self._house_deck_height_locked(self._x[0], self._z[0])
-            if house_y is not None:
-                ground_y = house_y
+            ground_y = self._ground_contact_height_locked(self._x[0], self._z[0])
             if self._grounded and not self._jump_held:
                 self._y[0] = ground_y
                 self._vy[0] = 0.0
@@ -4164,14 +5885,24 @@ class GameEngineRuntime:
         # lifecycle.  It removes an ambient proxy at the same time, keeping
         # the render population stable while the authoritative actor pool
         # grows only within its explicit budget.
+        from backend.game_engine_benilla_triggers import tick as tick_world_triggers
+        tick_world_triggers(self)
         self._tick_world_events_locked()
         self._tick_population_locked()
         self._tick_individuals_locked()
         self._tick_npcs_locked(dt)
+        self._tick_survival_locked(dt)
         self._tick_combat_locked()
+        self._tick_spells_locked(dt)
+        self._tick_services_locked(dt)
         self._tick_social_locked()
+        self._world_population.tick(self._sim_time)
 
-        grid = self._build_spatial_grid_locked()
+        grid = (
+            self._build_spatial_grid_locked()
+            if self._vehicle_kind != "BOAT"
+            else {}
+        )
         player_cell = (
             math.floor(self._x[0] / 2.0),
             math.floor(self._z[0] / 2.0),
@@ -4187,6 +5918,12 @@ class GameEngineRuntime:
                         continue
                     if self._kind[other] == "HOUSE":
                         continue
+                    # The grid indexes XZ only; reject objects below/above the body.
+                    obstacle_low=self._y[other]-abs(self._sy[other])
+                    obstacle_high=self._y[other]+abs(self._sy[other])
+                    if (self._y[0]-mobility_contract.PLAYER_ROOT_HEIGHT_M>obstacle_high+.2
+                            or self._y[0]+1.7<obstacle_low-.2):
+                        continue
                     if distance < 0.0001:
                         dx, dz, distance = 1.0, 0.0, 1.0
                     nx, nz = dx / distance, dz / distance
@@ -4201,26 +5938,66 @@ class GameEngineRuntime:
                         self._collision_cooldown = 0.28
                         self._burst_locked(self._x[0], 0.9, self._z[0], 28)
                         self._append_event_locked("COLLISION", f"Player hit {self._kind[other].lower()}.")
-        self._tick_house_walls_locked()
+        if self._vehicle_kind != "BOAT":
+            self._tick_house_walls_locked()
+        if (
+            self._grapple_anchor is not None
+            and self._movement_mode == "GROUND"
+            and self._vehicle_kind == "NONE"
+        ):
+            # Entity and hut collision resolution can nudge the avatar off the
+            # rope sphere. Resolve the taut line once more at the end of the
+            # fixed step, with no extra swing input or acceleration.
+            final_floor = self._ground_contact_height_locked(self._x[0], self._z[0])
+            constrained = controller.grapple_constraint(
+                position=(self._x[0], self._y[0], self._z[0]),
+                velocity=(self._vx[0], self._vy[0], self._vz[0]),
+                anchor=self._grapple_anchor,
+                rope_length=self._grapple_rope_length,
+                yaw=self._yaw[0],
+                dt=0.0,
+                ground_y=final_floor,
+            )
+            self._x[0] = constrained["x"]
+            self._y[0] = constrained["y"]
+            self._z[0] = constrained["z"]
+            self._vx[0] = constrained["vx"]
+            self._vy[0] = constrained["vy"]
+            self._vz[0] = constrained["vz"]
+        if (not previously_grounded and self._grounded
+                and previous_vertical_speed < -.8
+                and self._movement_mode == "GROUND" and self._vehicle_kind == "NONE"
+                and not self._character_action_for_locked("player")
+                and self._combat_state.get("actors", {}).get("player", {}).get("alive", True)):
+            self._start_character_action_locked("player", "Land")
+        self._tick_landmark_visits_locked()
 
-        for index in range(MAX_PARTICLES):
+        self._sync_ride_particles_locked()
+        particle_offset = 0
+        while particle_offset < len(self._active_particle_indices):
+            index = self._active_particle_indices[particle_offset]
             if self._plife[index] <= 0.0:
+                self._active_particle_indices.pop(particle_offset)
+                self._particle_count = max(0, self._particle_count - 1)
                 continue
             self._plife[index] -= dt
             if self._plife[index] <= 0.0:
                 self._plife[index] = 0.0
                 self._particle_count = max(0, self._particle_count - 1)
+                self._active_particle_indices.pop(particle_offset)
                 continue
             self._pvy[index] -= 13.0 * dt
             self._px[index] += self._pvx[index] * dt
-            self._py[index] = max(0.08, self._py[index] + self._pvy[index] * dt)
+            self._py[index] = max(self._ride_particle_floor_locked(index), self._py[index] + self._pvy[index] * dt)
             self._pz[index] += self._pvz[index] * dt
             self._pvx[index] *= 0.985
             self._pvz[index] *= 0.985
+            particle_offset += 1
 
         if self._tick % 3 == 0:
             self._network_seq += 1
 
+        self._tick_auto_attack_locked()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self._last_tick_ms = elapsed_ms
         self._max_tick_ms = max(self._max_tick_ms, elapsed_ms)
@@ -4244,6 +6021,13 @@ class GameEngineRuntime:
                     if not self._running:
                         break
                     self._tick_locked(FIXED_DT)
+                    # Publish one complete, immutable presentation frame on the
+                    # simulation lane. The Qt thread reads the last completed
+                    # frame instead of waiting for terrain/pose construction.
+                    frame = self.render_snapshot_locked()
+                    frame['_qt_nature'] = (self._nature.groups, self._nature.revision)
+                    self._published_nature = (self._nature.groups, self._nature.revision)
+                    self._published_frame = frame
                 deadline += FIXED_DT
                 steps += 1
                 now = time.perf_counter()
@@ -4268,11 +6052,73 @@ class GameEngineRuntime:
             self._append_event_locked("PLAY", "Fixed-step simulation running at 60 Hz.")
             return self.snapshot_locked()
 
+    def start_render(self) -> dict[str, Any]:
+        """Resume play using the compact cached render view for the player UI."""
+        with self._lock:
+            self._ensure_thread_locked()
+            self._running = True
+            self._append_event_locked("PLAY", "Fixed-step simulation running at 60 Hz.")
+            if self._render_snapshot_cache is None:
+                return self.snapshot_locked()
+            return self._render_snapshot_from_cache_locked()
+
     def pause(self) -> dict[str, Any]:
         with self._lock:
             self._running = False
             self._append_event_locked("PAUSE", "Simulation paused; render state retained.")
             return self.snapshot_locked()
+
+    def pause_render(self) -> dict[str, Any]:
+        """Pause without rebuilding the large editor/inspector snapshot."""
+        with self._lock:
+            self._running = False
+            self._input.update({
+                "throttle": 0.0,
+                "steer": 0.0,
+                "turn": 0.0,
+                "brake": 0.0,
+                "boost": False,
+                "forward": 0.0,
+                "strafe": 0.0,
+                "vertical": 0.0,
+                "jump": False,
+                "grapple": False,
+                "ability_1": False,
+                "ability_2": False,
+                "ability_3": False,
+            })
+            self._jump_held = False
+            self._grapple_held = False
+            self._sprinting = False
+            for ability_id in self._ability_held:
+                self._ability_held[ability_id] = False
+            self._append_event_locked("PAUSE", "Simulation paused; render state retained.")
+            if self._render_snapshot_cache is None:
+                return self.snapshot_locked()
+            return self._render_snapshot_from_cache_locked()
+
+    def character_create(self, request: Any) -> dict[str, Any]:
+        with self._lock:
+            response=character_creation.view(self._character_creation)
+            try:
+                if isinstance(request,str):request=json.loads(request)
+                if not isinstance(request,dict):raise ValueError('Ogiltigt karaktärsval.')
+                operation=str(request.get('op','CATALOG')).upper()
+                selection=request.get('selection') or response['selection']
+                if operation in {'PREVIEW','APPLY'}:
+                    response['preview']=character_creation.preview(selection)
+                    response['selection']=response['preview']['selection']
+                    if operation=='APPLY':
+                        self._character_creation=character_creation.save_selection(selection)
+                        self._render_snapshot_cache=None
+                        self._render_snapshot_signature=None
+                        response['active']=True
+                        response['applied']=True
+                elif operation!='CATALOG':raise ValueError('Okänt karaktärsval.')
+                else:response['preview']=character_creation.preview(selection)
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                response['error']=str(exc)
+            return response
 
     def reset(self) -> dict[str, Any]:
         with self._lock:
@@ -4283,6 +6129,8 @@ class GameEngineRuntime:
             self._replay_inputs = []
             self._replay_index = 0
             self._reset_world_locked()
+            if getattr(self,'_benilla_world',None) is not None:
+                self._x[0],self._y[0],self._z[0]=self._benilla_world.config['spawn'];self._benilla_world.safe=None
             return self.snapshot_locked()
 
     def step(self) -> dict[str, Any]:
@@ -4293,6 +6141,38 @@ class GameEngineRuntime:
                 self._running = False
             return self.snapshot_locked()
 
+    def explore_region(self, region_id: str) -> dict[str, Any]:
+        """Explicit local exploration jump to a known atlas destination."""
+        with self._lock:
+            if self._instance_private_locked():return {'schema':SCHEMA,'error':'INSTANCE_EXIT_REQUIRED'}
+            if self._player_defeated_locked():return {"schema":SCHEMA,"error":"PLAYER_DEFEATED"}
+            if self._services.get('taxi_flight'):return {"schema":SCHEMA,"error":"TAXI_IN_PROGRESS"}
+            wanted = str(region_id or "").upper()
+            regions = planet_contract.map_contract()["landmasses"]
+            region = next((r for r in regions if r["id"] == wanted), None)
+            if region is None:
+                return {"schema": SCHEMA, "error": "EXPLORATION_REGION_UNKNOWN"}
+            center = region["center_m"]
+            x, z = float(center["x"]), float(center["z"])
+            town=next((p for p in world_places_contract.catalog()['places'] if p['region_id']==wanted and p['kind']=='TOWN'),None)
+            if town:x,z=town['x'],town['z']
+            self._vehicle_kind = "NONE"
+            self._boat_entity_index = None
+            self._combat_target_id = ""
+            self._x[0], self._z[0] = x, z
+            self._y[0] = self._terrain_height_locked(x, z) + 8.0
+            self._vx[0] = self._vy[0] = self._vz[0] = 0.0
+            self._input = self._default_input()
+            self._input["movement_mode"] = self._movement_mode = "FLY"
+            self._grounded = False
+            self._jump_held = False
+            self._jump_buffer_remaining_s = self._jump_hold_time_s = 0.0
+            self._coyote_time_remaining_s = 0.0
+            self._append_event_locked("EXPLORE_REGION", f"Exploring {region['name']}.")
+            snapshot = self.snapshot_locked()
+            snapshot["exploration_result"] = {"region": region["id"], "name": region["name"]}
+            return snapshot
+
     def set_movement_mode(self, mode: str) -> dict[str, Any]:
         normalized = world.normalize_movement_mode(mode, "")
         if not normalized:
@@ -4302,6 +6182,15 @@ class GameEngineRuntime:
                 "allowed": list(MOVEMENT_MODES),
             }
         with self._lock:
+            if self._player_defeated_locked() and normalized!='GROUND':return {"schema":SCHEMA,"error":"PLAYER_DEFEATED"}
+            if self._services.get('taxi_flight'):return {"schema":SCHEMA,"error":"TAXI_IN_PROGRESS"}
+            if self._vehicle_kind != "NONE" and normalized != "GROUND":
+                return {
+                    "schema": SCHEMA,
+                    "error": "EXIT_VEHICLE_BEFORE_CHANGING_MOVEMENT_MODE",
+                    "vehicle": self._vehicle_kind,
+                    "requested_mode": normalized,
+                }
             if normalized == self._movement_mode:
                 return self.snapshot_locked()
             previous = self._movement_mode
@@ -4309,9 +6198,14 @@ class GameEngineRuntime:
             self._input["movement_mode"] = normalized
             if normalized == "GROUND":
                 self._vy[0] = 0.0
-                self._y[0] = self._terrain_height_locked(self._x[0], self._z[0]) + 0.65
+                self._y[0] = self._ground_contact_height_locked(
+                    self._x[0], self._z[0]
+                )
                 self._grounded = True
                 self._jump_held = False
+                self._coyote_time_remaining_s = 0.0
+                self._jump_buffer_remaining_s = 0.0
+                self._jump_hold_time_s = 0.0
             elif previous == "GROUND":
                 self._y[0] = max(1.2, self._y[0] + 1.0)
             self._append_event_locked(
@@ -4319,6 +6213,207 @@ class GameEngineRuntime:
                 f"Movement mode changed: {previous} -> {normalized}.",
             )
             return self.snapshot_locked()
+
+    def _mobility_action_locked(self, action: str) -> dict[str, Any]:
+        if self._player_defeated_locked():return {"ok":False,"error":"PLAYER_DEFEATED"}
+        if self._services.get('taxi_flight'):return {"ok":False,"error":"TAXI_IN_PROGRESS"}
+        wanted = str(action or "").strip().upper()
+        player_x = self._x[0]
+        player_z = self._z[0]
+        depth = self._water_depth_locked(player_x, player_z)
+
+        if wanted == "TOGGLE_FLIGHT":
+            if self._vehicle_kind != "NONE":
+                return {
+                    "ok": False,
+                    "error": "EXIT_VEHICLE_BEFORE_FLIGHT",
+                    "vehicle": self._vehicle_kind,
+                }
+            if self._movement_mode == "FLY":
+                self._movement_mode = "GROUND"
+                self._input["movement_mode"] = "GROUND"
+                floor_y = self._ground_contact_height_locked(player_x, player_z)
+                if self._y[0] <= floor_y + 0.03:
+                    self._y[0] = floor_y
+                    self._vy[0] = 0.0
+                    self._grounded = True
+                    self._coyote_time_remaining_s = controller.COYOTE_TIME_S
+                else:
+                    # Landing from the flight test mode is an actual fall;
+                    # keep the current height and let the fixed-step gravity
+                    # bring the player down onto the same terrain collider.
+                    self._vy[0] = min(0.0, self._vy[0])
+                    self._grounded = False
+                    self._coyote_time_remaining_s = 0.0
+                self._append_event_locked("FLIGHT_LAND", "Flight ended; player is descending to terrain.")
+            else:
+                self._movement_mode = "FLY"
+                self._input["movement_mode"] = "FLY"
+                floor_y = self._ground_contact_height_locked(player_x, player_z)
+                water_surface_y = self._water_sample_locked(
+                    player_x, player_z
+                )["height_m"] + 0.7
+                self._y[0] = max(self._y[0], floor_y + 0.9, water_surface_y)
+                self._vy[0] = max(0.0, self._vy[0])
+                self._grounded = False
+                self._jump_held = False
+                self._coyote_time_remaining_s = 0.0
+                self._jump_buffer_remaining_s = 0.0
+                self._jump_hold_time_s = 0.0
+                self._append_event_locked("FLIGHT_TAKEOFF", "Free-flight test mode engaged.")
+            self._sprinting = False
+            return {
+                "ok": True,
+                "action": wanted,
+                "vehicle": self._vehicle_kind,
+                "movement_mode": self._movement_mode,
+                "grounded": self._grounded,
+            }
+
+        if wanted == "TOGGLE_HOVERBOARD":
+            if self._vehicle_kind == "BOAT":
+                return {"ok": False, "error": "EXIT_BOAT_FIRST"}
+            if self._vehicle_kind == "HOVERBOARD":
+                was_airborne = not self._grounded
+                vertical_velocity = self._vy[0]
+                self._vehicle_kind = "NONE"
+                if depth > mobility_contract.SWIM_EXIT_DEPTH_M:
+                    self._movement_mode = "SWIM"
+                    self._input["movement_mode"] = "SWIM"
+                    water=self._water_sample_locked(player_x,player_z)
+                    if water.get('has_surface') is not False:self._y[0]=max(self._y[0],water['height_m']+.18)
+                    self._vy[0] = 0.0
+                    self._grounded = False
+                else:
+                    self._movement_mode = "GROUND"
+                    self._input["movement_mode"] = "GROUND"
+                    floor_y = self._ground_contact_height_locked(player_x, player_z)
+                    if was_airborne and self._y[0] > floor_y + 0.03:
+                        self._vy[0] = min(0.0, vertical_velocity)
+                        self._grounded = False
+                    else:
+                        self._y[0] = floor_y
+                        self._vy[0] = 0.0
+                        self._grounded = True
+                self._append_event_locked("HOVERBOARD_EXIT", "Player stepped off the hoverboard.")
+                return {"ok": True, "action": wanted, "vehicle": "NONE"}
+            if self._movement_mode == "FLY":
+                return {"ok": False, "error": "LAND_BEFORE_HOVERBOARD"}
+            if (
+                self._movement_mode == "GROUND"
+                and not self._grounded
+                and self._y[0]
+                > self._ground_contact_height_locked(player_x, player_z) + 0.15
+            ):
+                return {"ok": False, "error": "LAND_BEFORE_HOVERBOARD"}
+            self._vehicle_kind = "HOVERBOARD"
+            self._movement_mode = "GROUND"
+            self._y[0] = self._ground_contact_height_locked(
+                player_x, player_z, vehicle_kind="HOVERBOARD"
+            )
+            self._vy[0] = 0.0
+            self._grounded = True
+            self._jump_held = False
+            self._coyote_time_remaining_s = controller.COYOTE_TIME_S
+            self._jump_buffer_remaining_s = 0.0
+            self._jump_hold_time_s = 0.0
+            self._append_event_locked("HOVERBOARD_ENTER", "Hoverboard ready; jump height follows button hold.")
+            return {"ok": True, "action": wanted, "vehicle": self._vehicle_kind}
+
+        if wanted == "MOUNT_BOAT":
+            boat_index = self._ride_boat_index_locked()
+            if self._vehicle_kind == "BOAT":
+                if boat_index is not None and self._alive[boat_index]:
+                    boat_x = self._x[boat_index]
+                    boat_z = self._z[boat_index]
+                    # Step toward the island, clear of the longer hull.
+                    toward_land_x = -boat_x
+                    toward_land_z = -boat_z
+                    length = max(0.001, math.hypot(toward_land_x, toward_land_z))
+                    self._x[0] = boat_x + toward_land_x / length * 3.2
+                    self._z[0] = boat_z + toward_land_z / length * 3.2
+                    self._vx[0] = self._vx[boat_index]
+                    self._vz[0] = self._vz[boat_index]
+                    depth = self._water_depth_locked(self._x[0], self._z[0])
+                    if depth > mobility_contract.SWIM_EXIT_DEPTH_M:
+                        self._movement_mode = "SWIM"
+                        self._input["movement_mode"] = "SWIM"
+                        water=self._water_sample_locked(self._x[0],self._z[0])
+                        if water.get('has_surface') is not False:self._y[0]=water['height_m']+.18
+                        self._grounded = False
+                    else:
+                        self._movement_mode = "GROUND"
+                        self._input["movement_mode"] = "GROUND"
+                        self._y[0] = self._ground_contact_height_locked(
+                            self._x[0], self._z[0]
+                        )
+                        self._grounded = True
+                    self._static[boat_index] = True
+                    bisect.insort(self._static_entity_indices, boat_index)
+                self._vehicle_kind = "NONE"
+                self._vy[0] = 0.0
+                self._append_event_locked("BOAT_EXIT", "Player left the skiff at the cove.")
+                return {"ok": True, "action": wanted, "vehicle": "NONE"}
+            if self._vehicle_kind == "HOVERBOARD":
+                return {"ok": False, "error": "EXIT_HOVERBOARD_FIRST"}
+            if boat_index is None or not self._alive[boat_index]:
+                return {"ok": False, "error": "SKIFF_UNAVAILABLE"}
+            boat_x = self._x[boat_index]
+            boat_z = self._z[boat_index]
+            distance = math.hypot(player_x - boat_x, player_z - boat_z)
+            if distance > mobility_contract.SKIFF_BOARD_RADIUS_M:
+                return {"ok": False, "error": "TOO_FAR_FROM_SKIFF", "distance_m": round(distance, 2)}
+            seat_height = (
+                self._y[boat_index]
+                + mobility_contract.skiff_seat_offset(self._sy[boat_index])
+            )
+            if abs(self._y[0] - seat_height) > mobility_contract.SKIFF_BOARD_HEIGHT_M:
+                return {"ok": False, "error": "SKEWED_HEIGHT_FROM_SKIFF"}
+            # Depth is the seabed under calm sea, not the passing trough,
+            # or a swell would lock the player out of the hull.
+            seabed = max(
+                0.0,
+                terrain_contract.SEA_LEVEL
+                - self._terrain_height_locked(boat_x, boat_z),
+            )
+            if seabed < mobility_contract.SKIFF_BOARD_DEPTH_M:
+                return {"ok": False, "error": "BOAT_IN_SHALLOWS"}
+            if self._static[boat_index]:
+                self._static[boat_index] = False
+                if boat_index in self._static_entity_indices:
+                    self._static_entity_indices.remove(boat_index)
+            self._vehicle_kind = "BOAT"
+            self._movement_mode = "GROUND"
+            self._x[0] = boat_x
+            self._z[0] = boat_z
+            self._y[0] = (
+                self._y[boat_index]
+                + mobility_contract.skiff_seat_offset(self._sy[boat_index])
+            )
+            self._yaw[0] = self._yaw[boat_index]
+            self._vx[0] = self._vx[boat_index]
+            self._vy[0] = 0.0
+            self._vz[0] = self._vz[boat_index]
+            self._grounded = True
+            self._jump_held = False
+            self._append_event_locked("BOAT_ENTER", "Player boarded the cove skiff.")
+            return {"ok": True, "action": wanted, "vehicle": self._vehicle_kind}
+
+        return {"ok": False, "error": "MOBILITY_ACTION_INVALID", "action": wanted}
+
+    def mobility_action(self, action: str) -> dict[str, Any]:
+        with self._lock:
+            result = self._mobility_action_locked(action)
+            snapshot = self.snapshot_locked()
+            snapshot["mobility_action"] = result
+            return snapshot
+
+    def mobility_water_clock(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "time_s": self._sim_time,
+                "sea_level_m": terrain_contract.SEA_LEVEL,
+            }
 
     def _set_input_locked(self, raw: str) -> dict[str, Any] | None:
         """Apply one input packet while the runtime lock is held.
@@ -4337,15 +6432,26 @@ class GameEngineRuntime:
         normalized_mode = world.normalize_movement_mode(
             requested_mode, self._movement_mode
         )
+        if self._opening_cinematic:normalized_mode='GROUND'
+        elif self._player_defeated_locked():normalized_mode='GROUND'
+        elif self._services.get('taxi_flight'):normalized_mode='FLY'
         self._movement_mode = normalized_mode
-        self._camera_yaw = _clamp(payload.get("camera_yaw"), -360.0, 360.0)
-        self._camera_pitch = _clamp(payload.get("camera_pitch"), -89.0, 20.0, -27.0)
-        self._camera_distance = _clamp(
-            payload.get("camera_distance"),
-            4.0,
-            160.0,
-            world.DEFAULT_CAMERA_DISTANCE_M,
-        )
+        mouse_look = bool(payload.get("mouse_look")) and not self._opening_cinematic
+        facing_yaw = _clamp(payload.get("facing_yaw"), -180.0, 180.0,
+                            math.degrees(self._yaw[0]))
+        if mouse_look:
+            self._yaw[0] = math.radians(facing_yaw)
+        if not self._opening_cinematic:
+            self._camera_yaw = _clamp(payload.get("camera_yaw"), -360.0, 360.0)
+            self._camera_pitch = _clamp(payload.get("camera_pitch"), -89.0, 89.0, -8.0)
+            self._camera_distance = _clamp(
+                payload.get("camera_distance"),
+                0.0,
+                160.0,
+                world.DEFAULT_CAMERA_DISTANCE_M,
+            )
+        if payload.get('cancel_legacy_input'):
+            self._legacy_held.clear();self._legacy_autorun=False;self._legacy_jump=False
         self._input = {
             "throttle": _clamp(payload.get("throttle"), -1.0, 1.0),
             "steer": _clamp(
@@ -4362,7 +6468,10 @@ class GameEngineRuntime:
             "strafe": _clamp(payload.get("strafe"), -1.0, 1.0),
             "vertical": _clamp(payload.get("vertical"), -1.0, 1.0),
             "jump": bool(payload.get("jump")),
+            "grapple": bool(payload.get("grapple")),
             "movement_mode": normalized_mode,
+            "mouse_look": mouse_look,
+            "facing_yaw": facing_yaw,
             "camera_yaw": self._camera_yaw,
             "camera_pitch": self._camera_pitch,
             "camera_distance": self._camera_distance,
@@ -4733,11 +6842,239 @@ class GameEngineRuntime:
             snapshot["addon_result"] = result
             return snapshot
 
-    def attack(self, target_id: str = "", action_id: str = "basic_attack") -> dict[str, Any]:
-        """Resolve one close-range attack against a real physical NPC."""
+    def _target_rows_locked(self, *, require_sight=False, only_id="") -> list[dict[str, Any]]:
+        rows = []
+        actors = self._combat_state.get("actors", {})
+        for index in self._npc_indices[:npc_contract.MAX_NPCS]:
+            identity = str(self._npc_ids[index] or "")
+            if only_id and identity != only_id:
+                continue
+            actor = actors.get(identity, {})
+            if not identity or not self._alive[index] or not actor.get("alive", True):
+                continue
+            distance = math.sqrt((self._x[index]-self._x[0])**2
+                                 + (self._y[index]-self._y[0])**2
+                                 + (self._z[index]-self._z[0])**2)
+            if distance > 64 or (require_sight and not self._npc_line_of_sight_locked(index)):
+                continue
+            person = self._individual_state.get("individuals", {}).get(identity, {})
+            rows.append({"id": identity, "entity_id": f"e-{index:04d}","guid":index+1,
+                         "can_attack": identity not in self._services['group']['members'] or self._duel_opponent_locked(identity),
+                         "friend": identity in self._services['group']['members'],
+                         "name": person.get("name") or str(self._npc_archetype[index]).replace("_", " ").title(),
+                         "distance_m": round(distance, 3), "x": self._x[index],
+                         "y": self._y[index], "z": self._z[index],
+                         "health": actor.get("health", 0), "max_health": actor.get("max_health", 1)})
+        return sorted(rows, key=lambda row: (row["distance_m"], row["id"]))
+
+    def _target_view_locked(self) -> dict[str, Any]:
+        if self._combat_target_id=='player':
+            actor=self._combat_state.get('actors',{}).get('player',{})
+            return {'schema':'gg.game-engine.targeting.v1','selected':{'id':'player','entity_id':'e-0000','guid':1,
+                'name':getattr(self,'_local_character_name','Gold Goblin'),'health':actor.get('health',100),'max_health':actor.get('max_health',100),
+                'is_player':True,'can_attack':False,'distance_m':0},'range_m':64,'selection_does_damage':False}
+        if self._combat_target_id.startswith("nature:") or self._combat_target_id in self._item_instances:
+            selected=self._selected_interaction_locked()
+            if not selected:self._combat_target_id="";self._actions.auto_attack=False
+            return {"schema":"gg.game-engine.targeting.v1","selected":selected,"range_m":64,"selection_does_damage":False}
+        rows = self._target_rows_locked(only_id=self._combat_target_id) if self._combat_target_id else ()
+        selected = next((row for row in rows
+                         if row["id"] == self._combat_target_id), None)
+        if selected is None:
+            self._combat_target_id = ""
+        return {"schema": "gg.game-engine.targeting.v1", "selected": selected or {},
+                "range_m": 64, "selection_does_damage": False,
+                "attack_validation": "EXISTING_AUTHORITATIVE_RANGE_LOS_COOLDOWN"}
+
+    def cycle_target(self, reverse: bool = False) -> dict[str, Any]:
         with self._lock:
             self._ensure_combat_actors_locked()
+            rows = self._target_rows_locked(require_sight=True)
+            ids = [row["id"] for row in rows]
+            if not ids:
+                self._combat_target_id = ""
+            elif self._combat_target_id in ids:
+                index = ids.index(self._combat_target_id)
+                self._combat_target_id = ids[(index + (-1 if reverse else 1)) % len(ids)]
+            else:
+                self._combat_target_id = ids[-1 if reverse else 0]
+            return self.snapshot_locked()
+
+    def clear_target(self) -> dict[str, Any]:
+        with self._lock:
+            self._combat_target_id = ""
+            return self.snapshot_locked()
+
+    def _firearm_rows_locked(self):
+        return [row for row in self._player_equipped_instances_locked()
+                if row.get('definition_id')=='item.weapon_pistol'
+                and row.get('equipped_slot') in ('MAIN_HAND','OFF_HAND')]
+
+    def _firearms_view_locked(self):
+        hands=[]
+        for row in self._firearm_rows_locked():
+            spec,mag=firearms_contract.settle(row,self._sim_time)
+            hands.append(dict(instance_id=row['instance_id'],slot=row['equipped_slot'],
+                profile=spec,magazine=dict(mag),reserve=int(self._inventory.get(spec['ammo_id'],0))))
+        shots=[shot for shot in getattr(self,'_firearm_shots',[]) if self._sim_time-shot['time_s']<2]
+        self._firearm_shots=shots[-24:]
+        return dict(hands=hands,shots=copy.deepcopy(self._firearm_shots))
+
+    def _reload_gun_locked(self,row):
+        spec,mag=firearms_contract.settle(row,self._sim_time)
+        if mag['pending']:return dict(ok=False,status='RELOADING',reload_until=mag['reload_until'])
+        need=spec['capacity']-mag['rounds']
+        if need<=0:return dict(ok=False,status='MAGAZINE_FULL')
+        stacks=sorted((r for r in self._item_instances.values()
+            if r.get('owner_id')=='player' and r.get('location')=='INVENTORY'
+            and r.get('definition_id')==spec['ammo_id']),key=lambda r:r['instance_id'])
+        available=min(int(self._inventory.get(spec['ammo_id'],0)),sum(int(r.get('quantity',1)) for r in stacks))
+        amount=min(need,available)
+        if amount<=0:return dict(ok=False,status='NO_AMMO',ammo_id=spec['ammo_id'],ammo_name=spec['ammo_name'])
+        remaining=amount
+        for stack in stacks:
+            used=min(remaining,int(stack.get('quantity',1)))
+            if used and not self._consume_inventory_item_locked(stack,used):raise RuntimeError('AMMO_TRANSFER_INVARIANT')
+            remaining-=used
+            if not remaining:break
+        mag['pending']=amount;mag['reload_until']=self._sim_time+spec['reload_s']
+        self._start_character_action_locked("player", "Reload")
+        return dict(ok=True,status='RELOADING',rounds_transferred=amount,reload_until=mag['reload_until'],
+            slot=row['equipped_slot'],ammo_name=spec['ammo_name'])
+
+    def reload_firearms(self):
+        with self._lock:
+            rows=self._firearm_rows_locked()
+            results=[self._reload_gun_locked(row) for row in rows]
+            snapshot=self.snapshot_locked()
+            snapshot['firearm_result']=dict(action='RELOAD',hands=results)
+            if not rows:snapshot['error']='FIREARM_REQUIRED'
+            elif not any(row.get('ok') or row.get('status')=='RELOADING' for row in results):
+                snapshot['error']='FIREARM_'+results[0]['status']
+            return snapshot
+
+    def _firearm_attack_locked(self,target_id,automatic_only=False):
+        def finish(result):
+            self._last_combat=copy.deepcopy(result)
+            # Automatic fire uses the same bounded stream as movement. A shot
+            # must not rebuild terrain/catalogues and the whole inventory UI.
+            snapshot=self.render_snapshot_locked();snapshot['combat_result']=copy.deepcopy(result)
+            if not result.get('ok'):snapshot['error']='FIREARM_'+result.get('status','FAILED')
+            return snapshot
+        self._ensure_combat_actors_locked()
+        player_profile=self._player_combat_profile_locked()
+        actor=combat_contract.ensure_actor(self._combat_state,'player',player_profile)
+        if not actor.get('alive'):return finish(dict(ok=False,status='PLAYER_DEFEATED'))
+        guns=[]
+        for row in self._firearm_rows_locked():
+            spec,mag=firearms_contract.settle(row,self._sim_time)
+            if automatic_only and not spec['automatic']:
+                continue
+            ready=not mag['pending'] and mag['next_fire']<=self._sim_time+1e-8
+            loaded=mag['rounds']>=spec['rounds_per_shot']
+            can_reload=int(self._inventory.get(spec['ammo_id'],0))>0
+            guns.append((not (ready and loaded),not ready,not can_reload,
+                row['equipped_slot']==getattr(self,'_firearm_last_hand',''),row,spec,mag))
+        if not guns:return finish(dict(ok=False,status='AUTOMATIC_REQUIRED'))
+        _,_,_,_,row,spec,mag=min(guns,key=lambda r:r[:4])
+        if mag['pending']:return finish(dict(ok=False,status='RELOADING',reload_until=mag['reload_until']))
+        if mag['next_fire']>self._sim_time+1e-8:
+            return finish(dict(ok=False,status='COOLDOWN',cooldown_remaining_s=mag['next_fire']-self._sim_time))
+        if mag['rounds']<spec['rounds_per_shot']:
+            reload_result=self._reload_gun_locked(row)
+            return finish(dict(reload_result,ok=False))
+        wanted=str(target_id or self._combat_target_id or '')
+        candidates=[]
+        for index in self._npc_indices[:npc_contract.MAX_NPCS]:
+            key=self._npc_ids[index]
+            if key in self._services['group']['members'] and not self._duel_opponent_locked(key):continue
+            if not self._alive[index] or not key or (wanted and key!=wanted):continue
+            if not self._combat_state.get('actors',{}).get(key,{}).get('alive',True):continue
+            dx=self._x[index]-self._x[0];dz=self._z[index]-self._z[0];distance=math.hypot(dx,dz)
+            if not wanted:
+                facing=abs((math.atan2(dx,dz)-self._yaw[0]+math.pi)%math.tau-math.pi)
+                if facing>math.radians(6) or distance>spec['range_m']:continue
+            candidates.append((distance,str(key),index))
+        candidates.sort()
+        index=None;resolved_id=''
+        if candidates:
+            distance,resolved_id,index=candidates[0]
+            if distance>spec['range_m']:return finish(dict(ok=False,status='TARGET_OUT_OF_RANGE',range_m=spec['range_m']))
+            if not self._npc_line_of_sight_locked(index):return finish(dict(ok=False,status='LINE_OF_SIGHT_BLOCKED'))
+            target=[self._x[index],self._y[index]+.25,self._z[index]]
+        elif wanted:return finish(dict(ok=False,status='TARGET_REQUIRED'))
+        else:
+            distance=spec['range_m']
+            target=[self._x[0]+math.sin(self._yaw[0])*distance,self._y[0]+.15,self._z[0]+math.cos(self._yaw[0])*distance]
+        side=.38 if row['equipped_slot']=='MAIN_HAND' else -.38
+        yaw=self._yaw[0]
+        start=[self._x[0]+math.cos(yaw)*side+math.sin(yaw)*.30,self._y[0]+.13,
+               self._z[0]-math.sin(yaw)*side+math.cos(yaw)*.30]
+        seed=self._tick*17+mag['shots']*31+spec['variant']
+        offsets=firearms_contract.projectile_offsets(spec,distance,seed)
+        hits=sum(math.hypot(x,y)<=.50 for x,y in offsets) if index is not None else 0
+        cooldown=(1/spec['rounds_per_s'])*(1+combat_contract.status_strength(actor,'attack_slow',self._sim_time))
+        if index is not None:
+            person=self._individual_state.get('individuals',{}).get(resolved_id)
+            defender_profile=dict(self._npc_combat_profile_locked(resolved_id,person))
+            defender_profile['armor']*=1-spec['armor_penetration']
+            player_profile=dict(player_profile,damage=spec['damage_per_projectile']*hits+player_profile['damage']*.12,
+                attack_cooldown_s=1/spec['rounds_per_s'],
+                enchant_effects=enchant_contract.equipped_effects([row],int(self._progression.get('level',1)))+spec['status_effects'])
+            result=combat_contract.resolve_attack(self._combat_state,attacker_id='player',defender_id=resolved_id,
+                attacker_profile=player_profile,defender_profile=defender_profile,sim_time=self._sim_time,
+                seed=seed,action_id='firearm_shot',cooldown_group=row['instance_id'])
+            if not result.get('ok'):return finish(result)
+        else:result=dict(ok=True,status='FIRED',damage=0,defeated=False,time_s=self._sim_time)
+        mag['rounds']-=spec['rounds_per_shot'];mag['shots']+=1;mag['next_fire']=self._sim_time+cooldown
+        self._firearm_last_hand=row['equipped_slot']
+        flight=max(.04,min(1.5,distance/spec['speed_m_s']))
+        shot=dict(id=row['instance_id']+':'+str(mag['shots']),time_s=self._sim_time,slot=row['equipped_slot'],
+            construction=spec['construction'],ammo_id=spec['ammo_id'],color=spec['color'],shape=spec['shape'],
+            start=start,target=target,flight_s=flight,projectiles=len(offsets),offsets=offsets,
+            impact=bool(index is not None),silent=spec['construction']=='silenced',
+            impact_size=.9 if spec['construction']=='rocket' else .35 if spec['construction'] in ('plasma','rail') else .15)
+        shot['enchants']=enchant_contract.firearm_bursts(row,int(self._progression.get('level',1)))
+        shot['enchant_colors']=list(dict.fromkeys(c for enchant in shot['enchants'] for c in enchant['colors']))[:6]
+        self._firearm_shots=(getattr(self,'_firearm_shots',[])+[shot])[-24:]
+        self._start_character_action_locked(
+            "player", self._player_attack_animation_clip_locked("firearm_shot")
+        )
+        result.update(weapon_id=row['instance_id'],hand=row['equipped_slot'],ammo_id=spec['ammo_id'],
+            rounds_consumed=spec['rounds_per_shot'],magazine_rounds=mag['rounds'],pellets_hit=hits,
+            projectiles=len(offsets),distance_m=round(distance,3),cooldown_s=cooldown,shot=shot)
+        if index is not None:
+            self._start_character_action_locked(
+                resolved_id, "Death" if result.get("defeated") else "HitReact"
+            )
+            result['faction']=factions_contract.adjust_person(self._faction_state,resolved_id,-30,
+                source='PLAYER_ATTACK',sim_time=self._sim_time)
+            identity_contract.record_memory(self._individual_state,resolved_id,'PLAYER_ATTACK','player',self._sim_time,
+                text='The player shot at me; I will remember the threat.',weight=.92)
+            if result.get('defeated'):result['defeat']=self._handle_npc_defeat_locked(resolved_id,index,result)
+        self._append_event_locked('COMBAT_ATTACK','Fired '+spec['name']+'.',actor_id='player',
+            subject_id=row['instance_id'],target_id=resolved_id,payload=copy.deepcopy(result))
+        return finish(result)
+
+    def attack(self, target_id: str = "", action_id: str = "basic_attack") -> dict[str, Any]:
+        """Resolve equipped firearm, ranged wand or melee attacks on NPCs."""
+        with self._lock:
+            if self._services.get('taxi_flight'):return {'error':'TAXI_IN_PROGRESS'}
+            if str(target_id or self._combat_target_id) in self._services['group']['members'] and not self._duel_opponent_locked(str(target_id or self._combat_target_id)):
+                result=self.snapshot_locked();result['error']='COMBAT_FRIENDLY_GROUP_TARGET';return result
+            if any(row.get('definition_id')=='item.weapon_pistol' for row in self._player_equipped_instances_locked()):
+                return self._firearm_attack_locked(str(target_id or ''),action_id=='automatic_fire')
+            self._ensure_combat_actors_locked()
             player_profile = self._player_combat_profile_locked()
+            wand=next((row for row in self._player_equipped_instances_locked()
+                if row.get('definition_id')=='item.weapon_wand' and row.get('equipped_slot')=='MAIN_HAND'),None)
+            wand_spec=None
+            if wand:
+                from backend.game_engine_caster_designs import wand_profile
+                wand_spec=wand_profile(item_state.item_appearance_index(wand['instance_id']))
+                player_profile=dict(player_profile,attack_range_m=wand_spec['range_m'],
+                    attack_cooldown_s=wand_spec['cooldown_s'],damage=player_profile['damage']+wand_spec['damage'],
+                    enchant_effects=player_profile.get('enchant_effects',[])+wand_spec['status_effects'])
             player_actor = combat_contract.ensure_actor(
                 self._combat_state,
                 "player",
@@ -4750,12 +7087,15 @@ class GameEngineRuntime:
                 snapshot["combat_result"] = result
                 return snapshot
 
-            wanted = str(target_id or "").strip()
+            self._target_view_locked()
+            wanted = str(target_id or self._combat_target_id or "").strip()
             candidates: list[tuple[float, str, int]] = []
             for index in self._npc_indices[: npc_contract.MAX_NPCS]:
                 if not self._alive[index] or not self._npc_ids[index]:
                     continue
                 identity_id = str(self._npc_ids[index])
+                if identity_id in self._services['group']['members'] and not self._duel_opponent_locked(identity_id):
+                    continue
                 if wanted and identity_id != wanted:
                     continue
                 actor = self._combat_state.get("actors", {}).get(identity_id)
@@ -4813,6 +7153,25 @@ class GameEngineRuntime:
             result["distance_m"] = round(distance, 3)
             self._last_combat = copy.deepcopy(result)
             if result.get("ok"):
+                self._start_character_action_locked(
+                    "player", self._player_attack_animation_clip_locked(action_id)
+                )
+                self._start_character_action_locked(
+                    resolved_id, "Death" if result.get("defeated") else "HitReact"
+                )
+                if wand_spec:
+                    yaw=self._yaw[0]
+                    shot=dict(id=wand['instance_id']+':cast:'+str(self._tick)+':'+str(self._sim_time),
+                        kind='WAND',time_s=self._sim_time,slot='MAIN_HAND',construction='wand',
+                        ammo_id='',color=wand_spec['colors'][0],shape='cell',
+                        start=[self._x[0]+math.cos(yaw)*.38,self._y[0]+.7,self._z[0]-math.sin(yaw)*.38],
+                        target=[self._x[index],self._y[index]+.25,self._z[index]],
+                        flight_s=max(.08,min(1.2,distance/35)),projectiles=1,offsets=[[0,0]],
+                        impact=True,silent=True,impact_size=.23,
+                        enchants=enchant_contract.firearm_bursts(wand,int(self._progression.get('level',1))))
+                    shot['enchant_colors']=list(dict.fromkeys(wand_spec['colors']+[c for e in shot['enchants'] for c in e['colors']]))[:6]
+                    self._firearm_shots=(getattr(self,'_firearm_shots',[])+[shot])[-24:]
+                    result['cast']=shot
                 faction_result = factions_contract.adjust_person(
                     self._faction_state,
                     resolved_id,
@@ -5115,12 +7474,21 @@ class GameEngineRuntime:
 
     def craft_recipe(self, recipe_id: str = "recipe.field_ration") -> dict[str, Any]:
         with self._lock:
+            recipe=self._content.get('recipes',{}).get(str(recipe_id or 'recipe.field_ration'))
+            if recipe and not self._profession_known_locked(recipe.get('profession','SURVIVAL')):
+                return self._local_action_error_locked('PROFESSION_NOT_KNOWN')
+            candidate = dict(self._inventory)
             ok, result = content_catalog.craft(
                 self._content,
                 str(recipe_id or "recipe.field_ration"),
-                self._inventory,
+                candidate,
             )
             if ok:
+                error = self._craft_inventory_error_locked(candidate)
+                if error:
+                    ok, result = False, {'error': error, 'recipe_id': recipe_id}
+            if ok:
+                self._inventory = candidate
                 self._reconcile_item_instances_locked()
             self._last_crafting = dict(result)
             if ok:
@@ -5148,6 +7516,71 @@ class GameEngineRuntime:
             snapshot["craft_result"] = result
             return snapshot
 
+    def _craft_enchant_scroll_locked(self, enchant_id: str, station_id: str) -> dict[str, Any]:
+        """Create a persistent scroll at the real table; validate before spending."""
+        definition = enchant_contract.definition(enchant_id)
+        enchant_id = definition.get('id', enchant_id)
+        error = ''
+        station = self._gear_tables.get('workstations', {}).get('station.enchanting_altar', {})
+        position = station.get('position', {})
+        cost = enchant_contract.scroll_cost(definition) if definition else {}
+        if not definition:
+            error = 'ENCHANT_RECIPE_INVALID'
+        elif not self._profession_known_locked('ENCHANTING'):
+            error = 'PROFESSION_NOT_KNOWN'
+        elif station_id != 'station.enchanting_altar' or not station:
+            error = 'ENCHANT_TABLE_REQUIRED'
+        elif math.dist((self._x[0], self._y[0], self._z[0]),
+                (float(position.get('x', 0)),
+                 self._terrain_height_locked(float(position.get('x', 0)), float(position.get('z', 0))) + .65,
+                 float(position.get('z', 0)))) > item_state.INTERACTION_RADIUS_M:
+            error = 'ENCHANT_TABLE_OUT_OF_REACH'
+        elif int(self._progression.get('level', 1)) < definition['required_level']:
+            error = 'ENCHANT_LEVEL_REQUIRED'
+        elif len(self._item_instances) >= item_state.MAX_WORLD_INSTANCES or sum(
+                1 for row in self._item_instances.values()
+                if row.get('owner_id') == 'player' and row.get('location') == 'INVENTORY') >= item_state.MAX_INVENTORY_SLOTS:
+            error = 'ITEM_INVENTORY_FULL'
+        elif any(int(self._inventory.get(key, 0)) < amount for key, amount in cost.items()):
+            error = 'GEAR_MATERIALS_MISSING'
+        if error:
+            snapshot = self.snapshot_locked()
+            snapshot['error'] = error
+            snapshot['gear_craft_result'] = dict(error=error, inputs=cost,
+                required_level=definition.get('required_level', 1))
+            return snapshot
+        instance_id = self._next_item_instance_id_locked('enchant-scroll')
+        while instance_id in self._item_instances:
+            instance_id = self._next_item_instance_id_locked('enchant-scroll')
+        row = item_state.make_instance(self._item_catalog, instance_id, 'item.enchant_scroll')
+        row['scroll_enchant_id'] = enchant_id
+        row = item_state.normalize_instance(self._item_catalog, row)
+        # All validation is complete. Commit resources and the single scroll together.
+        for key, amount in cost.items():
+            self._inventory[key] -= amount
+        self._item_instances[instance_id] = row
+        self._inventory['item.enchant_scroll'] = self._inventory.get('item.enchant_scroll', 0) + 1
+        self._reconcile_item_instances_locked()
+        profession = self._profession_state.setdefault('ENCHANTING', dict(
+            id='ENCHANTING', name='Enchanting', level=1, xp=0, max_level=100, specializations=[]))
+        profession['xp'] += 15 * definition['tier']
+        while profession['level'] < 100 and profession['xp'] >= profession['level'] * 100:
+            profession['xp'] -= profession['level'] * 100
+            profession['level'] += 1
+        result = dict(action='CRAFT_ENCHANT_SCROLL', enchant_id=enchant_id,
+            name=row['name'], station_id=station_id, inputs=cost,
+            tier=definition['tier'], created=[item_state.instance_view(self._item_catalog, row)],
+            profession=copy.deepcopy(profession))
+        self._last_crafting = copy.deepcopy(result)
+        self._append_event_locked('GEAR_CRAFT', 'Created ' + row['name'] + '.',
+            actor_id='player', subject_id=instance_id, target_id=station_id, payload=result)
+        self._record_quest_event_locked(dict(kind='CRAFT', target_id=instance_id,
+            definition_id='item.enchant_scroll', amount=1, rarity=row['rarity']))
+        snapshot = self.snapshot_locked()
+        snapshot['gear_craft_result'] = result
+        snapshot['craft_result'] = result
+        return snapshot
+
     def craft_gear(
         self,
         recipe_id: str = "recipe.fiber_rope",
@@ -5156,19 +7589,39 @@ class GameEngineRuntime:
         """Craft one station recipe and preserve its result as item instances."""
         with self._lock:
             wanted = str(recipe_id or "recipe.fiber_rope")
+            if wanted.startswith('recipe.enchant_scroll.'):
+                return self._craft_enchant_scroll_locked(
+                    wanted.removeprefix('recipe.enchant_scroll.'), str(station_id or ''))
             recipe = self._gear_tables.get("recipes", {}).get(wanted, {})
+            if wanted.startswith('recipe.ammo_') and recipe:
+                station=self._gear_tables.get('workstations',{}).get('station.workbench',{})
+                p=station.get('position',{})
+                x=float(p.get('x',0));z=float(p.get('z',0))
+                if station_id=='station.workbench' and math.dist((self._x[0],self._y[0],self._z[0]),
+                        (x,self._terrain_height_locked(x,z)+.65,z))>item_state.INTERACTION_RADIUS_M:
+                    snapshot=self.snapshot_locked();snapshot['error']='AMMO_WORKBENCH_OUT_OF_REACH'
+                    snapshot['gear_craft_result']={'error':snapshot['error']}
+                    return snapshot
             profession_id = str(recipe.get("profession", "SURVIVAL")) if isinstance(recipe, dict) else "SURVIVAL"
+            if recipe and not self._profession_known_locked(profession_id):
+                return self._local_action_error_locked('PROFESSION_NOT_KNOWN')
             profession = self._profession_state.get(profession_id, {})
             profession_level = max(1, int(profession.get("level", 1))) if isinstance(profession, dict) else 1
             before_ids = set(self._item_instances)
+            candidate = dict(self._inventory)
             ok, result = gear_contract.craft(
                 self._gear_tables,
                 wanted,
-                self._inventory,
+                candidate,
                 station_id=str(station_id or ""),
                 profession_level=profession_level,
             )
             if ok:
+                error = self._craft_inventory_error_locked(candidate)
+                if error:
+                    ok, result = False, {'error': error, 'recipe_id': wanted}
+            if ok:
+                self._inventory = candidate
                 self._reconcile_item_instances_locked()
                 profession_row = self._profession_state.setdefault(
                     str(result.get("profession", profession_id)),
@@ -5259,6 +7712,7 @@ class GameEngineRuntime:
                 snapshot["error"] = "GEAR_SOCKET_TARGET_REQUIRED"
                 snapshot["gear_result"] = {"error": snapshot["error"]}
                 return snapshot
+            if self._item_binding_locked(selected):return self._local_action_error_locked('ITEM_PENDING_CONFIRMATION')
             gear_state = selected.get("gear")
             if not isinstance(gear_state, dict):
                 snapshot = self.snapshot_locked()
@@ -5365,16 +7819,41 @@ class GameEngineRuntime:
                 snapshot["error"] = "GEAR_ENCHANT_TARGET_REQUIRED"
                 snapshot["gear_result"] = {"error": snapshot["error"]}
                 return snapshot
+            if self._item_binding_locked(selected):return self._local_action_error_locked('ITEM_PENDING_CONFIRMATION')
             gear_state = selected.get("gear")
             category = str(gear_state.get("base_type", "")) if isinstance(gear_state, dict) else ""
             wanted = str(enchant_id or "")
             if not wanted:
                 wanted = "enchant.aquatic_edge" if category in {"SWORD", "BOW", "DAGGER"} else "enchant.treasure_sense"
-            ok, result = gear_contract.apply_enchant(
-                gear_state,
-                wanted,
-                self._gear_tables,
-            )
+            definition = enchant_contract.definition(wanted)
+            wanted = definition.get('id', wanted)
+            scroll = None
+            enchant_tables = self._gear_tables
+            if definition:
+                scroll = next((row for row in self._item_instances.values()
+                    if row.get('scroll_enchant_id') == wanted and row.get('owner_id') == 'player'
+                    and row.get('location') == 'INVENTORY'), None)
+                error = ''
+                if int(self._progression.get('level', 1)) < definition['required_level']:
+                    error = 'ENCHANT_LEVEL_REQUIRED'
+                elif scroll is None:
+                    error = 'ENCHANT_SCROLL_REQUIRED'
+                if error:
+                    snapshot = self.snapshot_locked()
+                    snapshot['error'] = error
+                    snapshot['gear_result'] = dict(error=error, required_level=definition['required_level'])
+                    return snapshot
+                enchant_tables = dict(self._gear_tables,
+                    enchantments=dict(self._gear_tables['enchantments'], **{wanted: definition}))
+            working = copy.deepcopy(gear_state)
+            ok, result = gear_contract.apply_enchant(working, wanted, enchant_tables)
+            if ok and scroll is not None:
+                if not self._consume_inventory_item_locked(scroll):
+                    ok, result = False, dict(error='ENCHANT_SCROLL_CONSUME_FAILED')
+                else:
+                    result['consumed_scroll_id'] = scroll['instance_id']
+            if ok:
+                selected['gear'] = working
             if ok:
                 result["item"] = item_state.instance_view(
                     self._item_catalog,
@@ -5440,6 +7919,7 @@ class GameEngineRuntime:
     def pickup_item(self, instance_id: str = "") -> dict[str, Any]:
         """Move the nearest reachable ground item into the player inventory."""
         with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
             row, distance = self._nearest_item_locked(str(instance_id or ""))
             if row is None or str(row.get("kind")) == "CONTAINER":
                 snapshot = self.snapshot_locked()
@@ -5450,6 +7930,9 @@ class GameEngineRuntime:
                 snapshot["error"] = result["error"]
                 snapshot["item_result"] = result
                 return snapshot
+            group = self._shared_group_loot_context_locked()
+            if group and group.get('members') and group.get('loot_method') != 'freeforall':
+                return self._open_shared_group_loot_source_locked(row)
             ok, transition = self._move_item_locked(
                 row,
                 "INVENTORY",
@@ -5496,6 +7979,7 @@ class GameEngineRuntime:
     def open_container(self, instance_id: str = "") -> dict[str, Any]:
         """Open one nearby container while keeping its contents in the world state."""
         with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
             row, distance = self._nearest_item_locked(
                 str(instance_id or ""),
                 container_only=True,
@@ -5519,6 +8003,15 @@ class GameEngineRuntime:
                     subject_id=str(row.get("instance_id", "")),
                     payload={"container_state": row.get("container_state", "OPEN")},
                 )
+            if str(row.get("definition_id")) == "container.supply_crate":
+                self._open_stash_container_id = str(row.get("instance_id"))
+                self._open_merchant_id = ""
+                try:
+                    self._stash_state = self._stash_store.load(self._account_id)
+                    self._stash_error = ""
+                except (OSError, ValueError) as exc:
+                    self._stash_error = type(exc).__name__ + ":" + str(exc)
+            self._open_loot_locked(row)
             result = {
                 "action": "OPEN",
                 "distance_m": round(distance, 3),
@@ -5536,6 +8029,7 @@ class GameEngineRuntime:
     def loot_container(self, instance_id: str = "") -> dict[str, Any]:
         """Transfer all bounded contents from one nearby openable cache."""
         with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
             row, distance = self._nearest_item_locked(
                 str(instance_id or ""),
                 container_only=True,
@@ -5549,6 +8043,9 @@ class GameEngineRuntime:
                 snapshot["error"] = result["error"]
                 snapshot["item_result"] = result
                 return snapshot
+            group = self._shared_group_loot_context_locked()
+            if group and group.get('members') and group.get('loot_method') != 'freeforall':
+                return self._open_shared_group_loot_source_locked(row)
             row["container_state"] = "OPEN"
             contents = [
                 child
@@ -5568,8 +8065,12 @@ class GameEngineRuntime:
                             sim_time=self._sim_time,
                         )
                     )
-            row["contents"] = []
-            row["container_state"] = "LOOTED"
+            remaining = [
+                child for child in contents
+                if str(child.get("location")) == "CONTAINER"
+            ]
+            row["contents"] = [str(child.get("instance_id")) for child in remaining]
+            row["container_state"] = "OPEN" if remaining else "LOOTED"
             result = {
                 "action": "LOOT",
                 "distance_m": round(distance, 3),
@@ -5608,9 +8109,35 @@ class GameEngineRuntime:
             snapshot["item_result"] = result
             return snapshot
 
-    def equip_item(self, instance_id: str = "") -> dict[str, Any]:
+    def equip_item(self, instance_id: str = "", slot: str = "", *, _bind_confirmed=False) -> dict[str, Any]:
+        with self._lock:
+            return self._equipment_transaction_locked(lambda:self._equip_item_locked(instance_id,slot,_bind_confirmed=_bind_confirmed))
+
+    def _equipment_transaction_locked(self,action):
+        if getattr(self,'_service_atomic_active',False):return action()
+        fields=('_item_instances','_inventory','_quest_state','_combat_state','_event_journal','_events',
+                '_last_item_interaction','_persistence_revision')
+        backup={key:copy.deepcopy(getattr(self,key)) for key in fields}
+        self._service_atomic_active=True
+        try:
+            result=action()
+            if result.get('error'):raise ValueError(result['error'])
+            if self._item_instances!=backup['_item_instances'] or self._quest_state!=backup['_quest_state']:
+                self.save_state(snapshot=False)
+            return result
+        except (ValueError,TypeError,KeyError,OverflowError,OSError) as error:
+            for key,value in backup.items():setattr(self,key,value)
+            self._loot_items=[self._item_instances[r['instance_id']] for r in self._loot_items if r['instance_id'] in self._item_instances]
+            self._ui_snapshot_base=None;self._render_snapshot_cache=None
+            code='ITEM_EQUIPMENT_SAVE_FAILED' if isinstance(error,OSError) else str(error)
+            result=self._local_action_error_locked(code);result['item_result']={'error':code}
+            return result
+        finally:self._service_atomic_active=False
+
+    def _equip_item_locked(self, instance_id: str = "", slot: str = "", *, _bind_confirmed=False) -> dict[str, Any]:
         """Equip a nearby inventory item by slot, replacing the previous item."""
         with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
             selected = self._item_instance_locked(str(instance_id or ""))
             if selected is None or str(selected.get("location")) != "INVENTORY" or str(selected.get("owner_id")) != "player":
                 if instance_id:
@@ -5632,21 +8159,58 @@ class GameEngineRuntime:
                         selected = candidate
                         break
             definition = item_state.definition(self._item_catalog, selected.get("definition_id")) if selected else None
-            slot = str(definition.get("equip_slot", "")) if isinstance(definition, dict) else ""
+            requested_slot=str(slot or '').strip().upper()
+            allowed=item_state.allowed_equip_slots(self._item_catalog,selected.get('definition_id'),selected.get('instance_id')) if selected else []
+            slot = requested_slot or (str(definition.get("equip_slot", "")) if isinstance(definition, dict) else "")
+            if requested_slot and requested_slot not in allowed:
+                snapshot=self.snapshot_locked()
+                snapshot['error']='ITEM_EQUIP_SLOT_INCOMPATIBLE'
+                snapshot['item_result']={'error':snapshot['error'],'slot':requested_slot}
+                return snapshot
+            if not requested_slot and allowed==['MAIN_HAND','OFF_HAND']:
+                # A second small gun chooses the other hand. Explicit drag
+                # and hand buttons can always replace a chosen slot.
+                worn={str(row.get('equipped_slot')):row for row in self._player_equipped_instances_locked()}
+                main=worn.get('MAIN_HAND',{})
+                if main.get('definition_id')==selected.get('definition_id') and item_state.equipment_wielding(main)!='2H' and worn.get('OFF_HAND',{}).get('definition_id')!=selected.get('definition_id'):
+                    slot='OFF_HAND'
             if selected is None or not slot:
                 snapshot = self.snapshot_locked()
                 result = {"error": "ITEM_EQUIP_TARGET_REQUIRED"}
                 snapshot["error"] = result["error"]
                 snapshot["item_result"] = result
                 return snapshot
+            worn=self._player_equipped_instances_locked()
+            if int(definition.get('required_level',0))>self._progression.get('level',1):
+                return self._local_action_error_locked('ITEM_LEVEL_REQUIRED')
+            if selected.get('bound_to') and selected['bound_to']!=str(self._persistence_key):
+                return self._local_action_error_locked('ITEM_BOUND_TO_ANOTHER_CHARACTER')
+            if slot=='OFF_HAND' and any(row.get('equipped_slot')=='MAIN_HAND' and item_state.equipment_wielding(row)=='2H' for row in worn):
+                snapshot=self.snapshot_locked();snapshot['error']='ITEM_EQUIP_TWO_HANDS_OCCUPIED'
+                snapshot['item_result']={'error':snapshot['error']}
+                return snapshot
+            two_handed=item_state.equipment_wielding(selected)=='2H'
+            replaced = []
             for equipped in list(self._item_instances.values()):
                 if (
                     equipped is not selected
                     and str(equipped.get("location")) == "EQUIPPED"
                     and str(equipped.get("owner_id")) == "player"
-                    and str(equipped.get("equipped_slot")) == slot
+                    and (str(equipped.get("equipped_slot")) == slot or (two_handed and str(equipped.get('equipped_slot'))=='OFF_HAND'))
                 ):
-                    self._move_item_locked(equipped, "INVENTORY", owner_id="player")
+                    replaced.append(equipped)
+            inventory_count=sum(row.get('owner_id')=='player' and row.get('location')=='INVENTORY' for row in self._item_instances.values())
+            if inventory_count-1+len(replaced)>item_state.MAX_INVENTORY_SLOTS:
+                snapshot=self.snapshot_locked();snapshot['error']='ITEM_INVENTORY_FULL'
+                snapshot['item_result']={'error':snapshot['error']}
+                return snapshot
+            self._ensure_inventory_slots_locked()
+            source_slot=int(selected.get('slot_index',-1))
+            replaced.sort(key=lambda r:r.get('equipped_slot')!=slot)
+            if not _bind_confirmed and self._item_binding_needed_locked(selected,'EQUIP'):
+                self._ensure_inventory_slots_locked()
+                return self._item_binding_request_locked('ItemBindingEquip',selected,slot,
+                    popup='EQUIP_BIND_CONFIRM' if requested_slot else 'AUTOEQUIP_BIND_CONFIRM')
             ok, transition = self._move_item_locked(
                 selected,
                 "EQUIPPED",
@@ -5658,6 +8222,17 @@ class GameEngineRuntime:
                 snapshot["error"] = transition.get("error", "ITEM_EQUIP_FAILED")
                 snapshot["item_result"] = transition
                 return snapshot
+            for n,previous in enumerate(replaced):
+                moved, previous_transition = self._move_item_locked(
+                    previous, "INVENTORY", owner_id="player"
+                )
+                if not moved:
+                    self._move_item_locked(selected, "INVENTORY", owner_id="player")
+                    snapshot = self.snapshot_locked()
+                    snapshot["error"] = previous_transition.get("error", "ITEM_EQUIP_FAILED")
+                    snapshot["item_result"] = previous_transition
+                    return snapshot
+                if n==0 and source_slot>=0:previous['slot_index']=source_slot
             result = {
                 "action": "EQUIP",
                 "slot": slot,
@@ -5692,6 +8267,7 @@ class GameEngineRuntime:
     def drop_item(self, instance_id: str = "") -> dict[str, Any]:
         """Drop one owned item in front of the player as a persistent world item."""
         with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
             selected = self._item_instance_locked(str(instance_id or ""))
             if selected is None or not self._item_owned_state(
                 selected.get("location"), selected.get("owner_id")
@@ -5717,6 +8293,7 @@ class GameEngineRuntime:
                 snapshot["item_result"] = result
                 return snapshot
             facing = controller.character_basis(self._yaw[0])
+            if selected.get('bound_to'):return self._local_action_error_locked('ITEM_BOUND_CANNOT_DROP')
             position = {
                 "x": self._x[0] + facing["forward"][0] * 1.6,
                 "y": 0.0,
@@ -5755,9 +8332,132 @@ class GameEngineRuntime:
             snapshot["item_result"] = result
             return snapshot
 
+    def unequip_item(self, instance_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._equipment_transaction_locked(lambda:self._unequip_item_locked(instance_id))
+
+    def _unequip_item_locked(self, instance_id: str) -> dict[str, Any]:
+        """Move one worn item back to the one-bag inventory."""
+        with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
+            selected = self._item_instance_locked(str(instance_id or ""))
+            if not selected or str(selected.get("location")) != "EQUIPPED" or str(selected.get("owner_id")) != "player":
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = "ITEM_UNEQUIP_TARGET_REQUIRED"
+                return snapshot
+            ok, result = self._move_item_locked(selected, "INVENTORY", owner_id="player")
+            if not ok:
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = result.get("error", "ITEM_UNEQUIP_FAILED")
+                return snapshot
+            self._last_item_interaction = {"action": "UNEQUIP", "name": selected.get("name", "")}
+            self._append_event_locked("ITEM_UNEQUIP", f"Unequipped {selected.get('name', 'item')}.")
+            snapshot = self.snapshot_locked()
+            snapshot["item_result"] = dict(self._last_item_interaction)
+            return snapshot
+
+    def move_inventory_slot(self, instance_id: str, slot_index: int) -> dict[str, Any]:
+        """Rearrange one-bag cells without changing ownership or item state."""
+        with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
+            self._ensure_inventory_slots_locked()
+            selected = self._item_instance_locked(str(instance_id or ""))
+            target = _safe_int(slot_index, -1)
+            if not selected or str(selected.get("location")) != "INVENTORY" or str(selected.get("owner_id")) != "player" or not 0 <= target < item_state.MAX_INVENTORY_SLOTS:
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = "ITEM_INVENTORY_SLOT_INVALID"
+                return snapshot
+            previous = int(selected.get("slot_index", -1))
+            if self._item_binding_locked(selected):return self._local_action_error_locked('ITEM_PENDING_CONFIRMATION')
+            for row in self._item_instances.values():
+                if row is not selected and isinstance(row, dict) and str(row.get("location")) == "INVENTORY" and str(row.get("owner_id")) == "player" and int(row.get("slot_index", -1)) == target:
+                    if self._item_binding_locked(row):return self._local_action_error_locked('ITEM_PENDING_CONFIRMATION')
+                    definition=item_state.definition(self._item_catalog,selected.get('definition_id')) or {}
+                    if int(definition.get('stack_limit',1))>1 and self._stacks_compatible(selected,row):
+                        return self.transfer_inventory_stack(str(selected['instance_id']),target,0)
+                    row["slot_index"] = previous
+                    break
+            selected["slot_index"] = target
+            self._sync_saved_player_items_locked()
+            snapshot = self.snapshot_locked()
+            snapshot["item_result"] = {"action": "BAG_MOVE", "name": selected.get("name", "")}
+            return snapshot
+
+    def move_equipment_to_inventory(self, instance_id: str, slot_index: int) -> dict[str, Any]:
+        with self._lock:
+            return self._equipment_transaction_locked(lambda:self._move_equipment_to_inventory_locked(instance_id,slot_index))
+
+    def _move_equipment_to_inventory_locked(self, instance_id: str, slot_index: int) -> dict[str, Any]:
+        """Place a worn item in one bag cell, swapping compatible gear under the same lock."""
+        with self._lock:
+            self._ensure_inventory_slots_locked()
+            selected=self._item_instance_locked(str(instance_id or ""));target=_safe_int(slot_index,-1)
+            if not selected or selected.get("location")!="EQUIPPED" or selected.get("owner_id")!="player" or not 0<=target<item_state.MAX_INVENTORY_SLOTS:
+                snapshot=self.snapshot_locked();snapshot["error"]="ITEM_EQUIPMENT_MOVE_INVALID";return snapshot
+            occupied=next((row for row in self._item_instances.values() if row.get("location")=="INVENTORY" and row.get("owner_id")=="player" and int(row.get("slot_index",-1))==target),None)
+            if occupied:
+                result=self.equip_item(str(occupied["instance_id"]),str(selected.get("equipped_slot","")))
+            else:result=self.unequip_item(str(selected["instance_id"]))
+            if result.get("error"):return result
+            if any(e['event'] in ('EQUIP_BIND_CONFIRM','AUTOEQUIP_BIND_CONFIRM') for e in result.get('client_events',[])):return result
+            return self.move_inventory_slot(str(selected["instance_id"]),target)
+
+    @staticmethod
+    def _stacks_compatible(left, right):
+        ignored={'instance_id','quantity','slot_index','position','visual_phase','custody_origin'}
+        return {k:v for k,v in left.items() if k not in ignored}=={k:v for k,v in right.items() if k not in ignored}
+
+    def transfer_inventory_stack(self, instance_id: str, slot_index: int, count: int) -> dict[str, Any]:
+        """Split or merge an exact owned stack; count=0 moves as much as fits."""
+        with self._lock:
+            if self._player_defeated_locked():return self._local_action_error_locked('PLAYER_DEFEATED')
+            self._ensure_inventory_slots_locked()
+            selected=self._item_instance_locked(str(instance_id or ""))
+            def reject(reason):
+                snapshot=self.snapshot_locked();snapshot['error']=reason;return snapshot
+            if self._item_binding_locked(selected):return reject('ITEM_PENDING_CONFIRMATION')
+            if (not selected or selected.get('location')!='INVENTORY' or selected.get('owner_id')!='player'
+                    or type(slot_index) is not int or not 0<=slot_index<item_state.MAX_INVENTORY_SLOTS
+                    or type(count) is not int or not 0<=count<=int(selected.get('quantity',1))):
+                return reject('ITEM_STACK_TRANSFER_INVALID')
+            if int(selected.get('slot_index',-1))==slot_index:return reject('ITEM_STACK_SAME_SLOT')
+            target=next((r for r in self._item_instances.values() if r.get('location')=='INVENTORY'
+                and r.get('owner_id')=='player' and int(r.get('slot_index',-1))==slot_index),None)
+            if self._item_binding_locked(target):return reject('ITEM_PENDING_CONFIRMATION')
+            definition=item_state.definition(self._item_catalog,selected.get('definition_id')) or {}
+            limit=max(1,int(definition.get('stack_limit',1)));quantity=int(selected.get('quantity',1))
+            if count==0:count=min(quantity,max(0,limit-int(target.get('quantity',1)))) if target else quantity
+            if count==0:return reject('ITEM_STACK_CAPACITY')
+            if target:
+                # GG state such as condition/enchantment must never disappear in a merge.
+                if not self._stacks_compatible(selected,target):return reject('ITEM_STACK_INCOMPATIBLE')
+                if int(target.get('quantity',1))+count>limit:return reject('ITEM_STACK_CAPACITY')
+                target['quantity']=int(target.get('quantity',1))+count
+                selected['quantity']=quantity-count
+                if not selected['quantity']:self._item_instances.pop(str(selected['instance_id']))
+            elif count==quantity:selected['slot_index']=slot_index
+            else:
+                if limit<=1:return reject('ITEM_NOT_STACKABLE')
+                if len(self._item_instances)>=item_state.MAX_WORLD_INSTANCES:return reject('ITEM_WORLD_CAPACITY')
+                identity=self._next_item_instance_id_locked('inventory-split')
+                while identity in self._item_instances:identity=self._next_item_instance_id_locked('inventory-split')
+                new=copy.deepcopy(selected);new.update(instance_id=identity,quantity=count,slot_index=slot_index)
+                # A child stack is a new physical instance. Retain the parent
+                # lineage, but never assign it to two registry rows.
+                new.pop('custody_origin',None)
+                character=getattr(self,'_local_character_id','')
+                if character:new['custody_origin']=item_state.normalize_custody_origin(dict(character=character,instance=identity))
+                selected['quantity']=quantity-count;self._item_instances[identity]=new
+            self._sync_saved_player_items_locked()
+            self._append_event_locked('ITEM_STACK_TRANSFER',f"Moved {count} units of {selected.get('name','item')}.")
+            snapshot=self.snapshot_locked();snapshot['item_result']={'action':'STACK_TRANSFER','count':count,'slot_index':slot_index};return snapshot
+
     def interact_item(self) -> dict[str, Any]:
         """Dispatch the nearest item interaction using the same target contract as UI."""
         with self._lock:
+            stash = self._stash_view_locked()
+            if stash.get("focused") and self._vehicle_kind == "NONE":
+                return self.open_container(str(stash.get("container_id", "")))
             row, _ = self._nearest_item_locked()
             if row is None:
                 snapshot = self.snapshot_locked()
@@ -5769,10 +8469,202 @@ class GameEngineRuntime:
                 snapshot["item_result"] = result
                 return snapshot
             if str(row.get("kind")) == "CONTAINER":
+                if str(row.get("definition_id")) == "container.supply_crate":
+                    return self.open_container(str(row.get("instance_id")))
                 if str(row.get("container_state", "CLOSED")) == "CLOSED":
                     return self.open_container(str(row.get("instance_id")))
                 return self.loot_container(str(row.get("instance_id")))
             return self.pickup_item(str(row.get("instance_id")))
+
+    def _stash_access_locked(self) -> bool:
+        if self._player_defeated_locked():return False
+        if not self._open_stash_container_id or self._stash_error:
+            return False
+        row, _ = self._nearest_item_locked(
+            self._open_stash_container_id, container_only=True
+        )
+        return bool(
+            row is not None
+            and str(row.get("definition_id")) == "container.supply_crate"
+            and str(row.get("container_state")) != "CLOSED"
+        )
+
+    def _stash_view_locked(self) -> dict[str, Any]:
+        rows = self._stash_state.get("items", [])
+        nearby = None
+        nearest_distance = float("inf")
+        for row in self._item_instances.values():
+            if not isinstance(row, dict) or str(row.get("location")) != "GROUND" or not self._instance_item_visible_locked(row):
+                continue
+            if str(row.get("definition_id")) != "container.supply_crate":
+                continue
+            position = row.get("position") or {}
+            distance = math.hypot(
+                _clamp(position.get("x"), -1_000_000, 1_000_000) - self._x[0],
+                _clamp(position.get("z"), -1_000_000, 1_000_000) - self._z[0],
+            )
+            if distance < nearest_distance:
+                nearby, nearest_distance = row, distance
+        container_id = str(nearby.get("instance_id", "")) if nearby else ""
+        in_reach = nearby is not None and nearest_distance <= item_state.INTERACTION_RADIUS_M
+        focused = False
+        if in_reach:
+            position = nearby.get("position") or {}
+            forward = controller.character_basis(self._yaw[0])["forward"]
+            dx = _clamp(position.get("x"), -1_000_000, 1_000_000) - self._x[0]
+            dz = _clamp(position.get("z"), -1_000_000, 1_000_000) - self._z[0]
+            focused = (dx * forward[0] + dz * forward[1]) / max(0.01, nearest_distance) >= 0.4
+        return {
+            "schema": mmo.STASH_SCHEMA,
+            "capacity": mmo.MAX_STASH_SLOTS,
+            "revision": max(0, _safe_int(self._stash_state.get("revision"))),
+            "accessible": self._stash_access_locked(),
+            "nearby": in_reach,
+            "focused": focused,
+            "container_id": container_id,
+            "loot_count": sum(
+                1 for row in self._item_instances.values()
+                if isinstance(row, dict)
+                and str(row.get("location")) == "CONTAINER"
+                and str(row.get("container_id")) == container_id
+            ) if container_id else 0,
+            "items": [
+                item_state.instance_view(self._item_catalog, row, include_visual=False)
+                for row in rows[:mmo.MAX_STASH_SLOTS]
+                if isinstance(row, dict)
+            ],
+            "error": self._stash_error,
+        }
+
+    def deposit_to_stash(self, instance_id: str, slot_index: int = -1) -> dict[str, Any]:
+        with self._lock:
+            selected = self._item_instance_locked(str(instance_id or ""))
+            error = ""
+            if not self._stash_access_locked():
+                error = self._stash_error or "ACCOUNT_STASH_OUT_OF_REACH"
+            elif not selected or str(selected.get("location")) not in {"INVENTORY", "EQUIPPED"} or str(selected.get("owner_id")) != "player":
+                error = "ACCOUNT_STASH_INVENTORY_ITEM_REQUIRED"
+            elif str(selected.get("kind")) == "CONTAINER":
+                error = "ACCOUNT_STASH_CONTAINER_FORBIDDEN"
+            elif self._item_binding_locked(selected):
+                error = 'ITEM_PENDING_CONFIRMATION'
+            elif selected.get('bound_to') and selected['bound_to']!=str(self._persistence_key):
+                error = 'ITEM_BOUND_TO_ANOTHER_CHARACTER'
+            if error:
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = error
+                return snapshot
+            stored = copy.deepcopy(selected)
+            item_state.transition_instance(stored, "BANK", owner_id=self._account_id)
+            try:
+                result = self._stash_store.deposit(self._account_id, stored, _safe_int(slot_index, -1))
+            except (OSError, ValueError) as exc:
+                self._stash_error = type(exc).__name__ + ":" + str(exc)
+                result = {"error": self._stash_error}
+            if result.get("error"):
+                if isinstance(result.get("items"), list):
+                    self._stash_state = result
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = result["error"]
+                return snapshot
+            self._stash_state = result
+            self._move_item_locked(selected, "BANK", owner_id=self._account_id)
+            self._item_instances.pop(str(selected.get("instance_id")), None)
+            self._last_item_interaction = {"action": "BANK_DEPOSIT", "name": selected.get("name", "")}
+            self._append_event_locked("BANK_DEPOSIT", f"Stored {selected.get('name', 'item')} in the shared chest.")
+            self._sync_saved_player_items_locked()
+            snapshot = self.snapshot_locked()
+            snapshot["item_result"] = dict(self._last_item_interaction)
+            return snapshot
+
+    def withdraw_from_stash(self, instance_id: str, slot_index: int = -1) -> dict[str, Any]:
+        with self._lock:
+            error = ""
+            if not self._stash_access_locked():
+                error = self._stash_error or "ACCOUNT_STASH_OUT_OF_REACH"
+            elif len([
+                row for row in self._item_instances.values()
+                if isinstance(row, dict) and str(row.get("location")) == "INVENTORY"
+                and str(row.get("owner_id")) == "player"
+            ]) >= item_state.MAX_INVENTORY_SLOTS:
+                error = "ITEM_INVENTORY_FULL"
+            elif len(self._item_instances) >= item_state.MAX_WORLD_INSTANCES:
+                error = "ITEM_WORLD_CAPACITY_REACHED"
+            wanted = str(instance_id or "")
+            current = next((row for row in self._stash_state.get("items", [])
+                            if isinstance(row, dict) and row.get("instance_id") == wanted), None)
+            if not error and current is None:
+                error = "ACCOUNT_STASH_ITEM_MISSING"
+            candidate = item_state.normalize_instance(self._item_catalog, current) if current else None
+            if not error and (candidate is None or wanted in self._item_instances):
+                error = "ACCOUNT_STASH_ITEM_INVALID"
+            if not error and candidate.get('bound_to') and candidate['bound_to']!=str(self._persistence_key):
+                error = 'ITEM_BOUND_TO_ANOTHER_CHARACTER'
+            if error:
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = error
+                return snapshot
+            try:
+                result = self._stash_store.withdraw(self._account_id, wanted)
+            except (OSError, ValueError) as exc:
+                self._stash_error = type(exc).__name__ + ":" + str(exc)
+                result = {"error": self._stash_error}
+            if result.get("error"):
+                self._stash_state = result
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = result["error"]
+                return snapshot
+            candidate = item_state.normalize_instance(self._item_catalog, result.get("item"))
+            if candidate is None:
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = "ACCOUNT_STASH_ITEM_INVALID"
+                return snapshot
+            self._stash_state = result
+            self._move_item_locked(candidate, "INVENTORY", owner_id="player")
+            target = _safe_int(slot_index, -1)
+            if 0 <= target < item_state.MAX_INVENTORY_SLOTS:
+                self._ensure_inventory_slots_locked()
+                used = {
+                    int(row.get("slot_index", -1))
+                    for row in self._item_instances.values()
+                    if isinstance(row, dict) and str(row.get("location")) == "INVENTORY"
+                    and str(row.get("owner_id")) == "player"
+                }
+                for row in self._item_instances.values():
+                    if isinstance(row, dict) and str(row.get("location")) == "INVENTORY" and str(row.get("owner_id")) == "player" and int(row.get("slot_index", -1)) == target:
+                        row["slot_index"] = next(
+                            index for index in range(item_state.MAX_INVENTORY_SLOTS)
+                            if index not in used
+                        )
+                        break
+                candidate["slot_index"] = target
+            self._item_instances[wanted] = candidate
+            self._last_item_interaction = {"action": "BANK_WITHDRAW", "name": candidate.get("name", "")}
+            self._append_event_locked("BANK_WITHDRAW", f"Took {candidate.get('name', 'item')} from the shared chest.")
+            self._sync_saved_player_items_locked()
+            snapshot = self.snapshot_locked()
+            snapshot["item_result"] = dict(self._last_item_interaction)
+            return snapshot
+
+    def move_stash_slot(self, instance_id: str, slot_index: int) -> dict[str, Any]:
+        with self._lock:
+            if not self._stash_access_locked():
+                snapshot = self.snapshot_locked()
+                snapshot["error"] = self._stash_error or "ACCOUNT_STASH_OUT_OF_REACH"
+                return snapshot
+            try:
+                result = self._stash_store.move(self._account_id, str(instance_id or ""), _safe_int(slot_index, -1))
+            except (OSError, ValueError) as exc:
+                self._stash_error = type(exc).__name__ + ":" + str(exc)
+                result = {"error": self._stash_error}
+            if isinstance(result.get("items"), list):
+                self._stash_state = result
+            snapshot = self.snapshot_locked()
+            if result.get("error"):
+                snapshot["error"] = result["error"]
+            else:
+                snapshot["item_result"] = {"action": "BANK_MOVE"}
+            return snapshot
 
     def grant_experience(self, amount: int = 25) -> dict[str, Any]:
         with self._lock:
@@ -5922,6 +8814,72 @@ class GameEngineRuntime:
             snapshot = self.snapshot_locked()
             snapshot["editor_result"] = result
             return snapshot
+
+    def _regional_interaction_target_locked(self,npc_id=''):
+        if self._instance_private_locked():return None
+        """Talk targets use the same saved clock and identity as the renderer."""
+        wanted=str(npc_id or '');candidates=[]
+        for identity in self._world_population.active:
+            if wanted and identity!=wanted:continue
+            person=self._world_population.people[identity]
+            if not person['alive']:continue
+            p=self._world_population.position(identity,self._sim_time)
+            distance=math.hypot(p['x']-self._x[0],p['z']-self._z[0])
+            if distance>npc_contract.INTERACTION_RADIUS_M:continue
+            ground=self._terrain_height_locked(p['x'],p['z'])+.65
+            if abs(self._y[0]-ground)>3:continue
+            # Check actual house walls along this short talk segment. The
+            # open doorway is allowed; a conversation through a wall is not.
+            blocked=False
+            for step in range(1,max(2,math.ceil(distance/.2))):
+                fraction=step/max(2,math.ceil(distance/.2))
+                x=self._x[0]+(p['x']-self._x[0])*fraction;z=self._z[0]+(p['z']-self._z[0])*fraction
+                wx,wz=world_places_contract.building_walls(x,z,ground,self._terrain_height_locked)
+                if math.hypot(wx-x,wz-z)>.001:blocked=True;break
+            if not blocked:candidates.append((distance,identity))
+        if not candidates:return None
+        distance,identity=min(candidates)
+        return dict(id=identity,entity_id=identity,name=self._world_population.people[identity]['name'],archetype='WANDERER',state='WANDER',distance_m=round(distance,3))
+
+    def _regional_dialogue_catalog_locked(self,identity=''):
+        selected=identity or self._dialogue_state.get('active',{}).get('npc_id','')
+        if selected not in self._world_population.people:return self._dialogue_catalog
+        return {**self._dialogue_catalog,selected:self._world_population.dialogue_tree(selected)}
+
+    def _talk_regional_locked(self,identity,choice_id=''):
+        target=self._regional_interaction_target_locked(identity)
+        if not target:
+            snapshot=self.snapshot_locked();snapshot['error']='NPC_DIALOGUE_OUT_OF_RANGE'
+            snapshot['dialogue_result']=dict(error=snapshot['error'],npc_id=identity)
+            return snapshot
+        definitions=self._regional_dialogue_catalog_locked(identity)
+        function=dialogue_contract.choose if choice_id else dialogue_contract.start
+        args=(self._dialogue_state,definitions,identity,choice_id,self._sim_time) if choice_id else (self._dialogue_state,definitions,identity,self._sim_time)
+        previous_identity=self._dialogue_state.get('active',{}).get('npc_id','')
+        ok,result=function(*args)
+        if ok:
+            if previous_identity!=identity and previous_identity in self._world_population.people:
+                self._world_population.resume_route(previous_identity,self._sim_time)
+            if result.get('node',{}).get('choices'):self._world_population.pause_for_talk(identity,self._sim_time)
+            else:self._world_population.resume_route(identity,self._sim_time)
+            person=self._world_population.people[identity]
+            person['interaction_count']=person.get('interaction_count',0)+1
+            self._world_population.remember(identity,'TALKED_TO_PLAYER_'+(choice_id or 'GREETING').upper(),self._sim_time)
+            self._npc_last_interaction={**target,'interaction_count':person['interaction_count'],'dialogue':copy.deepcopy(result)}
+            self._append_event_locked('DIALOGUE_CHOICE' if choice_id else 'DIALOGUE_START',
+                'Conversation with '+person['name']+'.',actor_id='player',target_id=identity,payload=copy.deepcopy(result))
+        snapshot=self.snapshot_locked();snapshot['dialogue_result']=result
+        if not ok:snapshot['error']=result.get('error','DIALOGUE_CHOICE_FAILED')
+        return snapshot
+
+    def close_dialogue(self):
+        with self._lock:
+            self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            identity=self._dialogue_state.get('active',{}).get('npc_id','')
+            if identity in self._world_population.people:self._world_population.resume_route(identity,self._sim_time)
+            self._dialogue_state['active']=dict(npc_id='',tree_id='',node_id='',turn=0)
+            self._dialogue_state['revision']=self._dialogue_state.get('revision',0)+1
+            return self.snapshot_locked()
 
     def _conversation_target_locked(
         self,
@@ -6101,7 +9059,13 @@ class GameEngineRuntime:
     ) -> dict[str, Any]:
         """Start or continue a real nearby NPC conversation."""
         with self._lock:
+            if not choice_id:self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            if npc_id in self._world_population.people:
+                return self._talk_regional_locked(npc_id,str(choice_id or ''))
+            regional=self._regional_interaction_target_locked() if not npc_id else None
             index, distance, target_error = self._conversation_target_locked(npc_id)
+            if regional and (index is None or target_error or regional['distance_m']<distance):
+                return self._talk_regional_locked(regional['id'],str(choice_id or ''))
             if index is None or target_error:
                 result = {
                     "error": target_error or "NPC_INTERACTION_TARGET_REQUIRED",
@@ -6202,6 +9166,11 @@ class GameEngineRuntime:
         """Interact with the nearest NPC and open its authored conversation."""
         with self._lock:
             best_index, best_distance, target_error = self._conversation_target_locked()
+            regional=self._regional_interaction_target_locked()
+            if regional and (best_index is None or target_error or regional['distance_m']<best_distance):
+                snapshot=self._talk_regional_locked(regional['id'])
+                snapshot['npc_interaction_result']=copy.deepcopy(self._npc_last_interaction)
+                return snapshot
             radius = npc_contract.INTERACTION_RADIUS_M
             if best_index is None:
                 snapshot = self.snapshot_locked()
@@ -6575,6 +9544,8 @@ class GameEngineRuntime:
         requested_vendor_id: str = "",
     ) -> tuple[bool, dict[str, Any]]:
         """Resolve a configured vendor against a live nearby NPC."""
+        if not self._combat_state.get('actors', {}).get('player', {}).get('alive', True):
+            return False, {"error": "PLAYER_DEFEATED"}
         wanted = str(requested_vendor_id or "").strip()
         resolved = (
             economy_contract.vendor_for(self._vendor_catalog, wanted)
@@ -6595,6 +9566,8 @@ class GameEngineRuntime:
             npc_id = str(vendor.get("npc_id", ""))
             for index in self._npc_indices:
                 if not self._alive[index] or str(self._npc_ids[index]) != npc_id:
+                    continue
+                if not self._combat_state.get('actors', {}).get(npc_id, {}).get('alive', True):
                     continue
                 distance = math.hypot(
                     self._x[index] - self._x[0],
@@ -6637,6 +9610,20 @@ class GameEngineRuntime:
         action: str,
         vendor_id: str = "",
         instance_id: str = "",
+        *, destination_slot: int | None = None,
+        reserve_buyback: bool = False,
+        buyback_price: int | None = None,
+    ) -> dict[str, Any]:
+        """Commit the canonical gold, stock and custody change together."""
+        return self._vendor_durable_locked(lambda:self._vendor_transition_locked(
+            action,vendor_id,instance_id,destination_slot=destination_slot,
+            reserve_buyback=reserve_buyback,buyback_price=buyback_price))
+
+    def _vendor_transition_locked(
+        self,action: str,vendor_id: str = "",instance_id: str = "",*,
+        destination_slot: int | None = None,reserve_buyback: bool = False,
+        buyback_price: int | None = None,
+        quote_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute one atomic gold/item transition against physical stock."""
         normalized_action = str(action or "").upper()
@@ -6700,6 +9687,8 @@ class GameEngineRuntime:
         instance = self._item_instance_locked(wanted_instance_id)
         definition_id = str(instance.get("definition_id", "")) if isinstance(instance, dict) else ""
         definition = item_state.definition(self._item_catalog, definition_id)
+        if isinstance(instance, dict) and instance.get('bound_to') and instance['bound_to'] != str(self._persistence_key):
+            return failure('ITEM_BOUND_TO_ANOTHER_CHARACTER', instance_id=wanted_instance_id)
         if not economy_contract.is_tradeable_definition(definition):
             return failure(
                 "VENDOR_ITEM_NOT_TRADEABLE",
@@ -6707,12 +9696,8 @@ class GameEngineRuntime:
                 definition_id=definition_id,
             )
         stock_count = self._vendor_stock_count_locked(vendor, definition_id)
-        quote = economy_contract.dynamic_prices(
-            vendor,
-            account,
-            definition_id,
-            stock_count,
-        )
+        quote = (dict(quote_override) if quote_override is not None else economy_contract.dynamic_prices(
+            vendor,account,definition_id,stock_count))
         if quote is None:
             return failure(
                 "VENDOR_ITEM_NOT_PRICED",
@@ -6733,6 +9718,10 @@ class GameEngineRuntime:
 
         quantity = max(1, int(instance.get("quantity", 1))) if isinstance(instance, dict) else 0
         total_price = economy_contract.bounded_currency(unit_price * quantity)
+        if buyback_price is not None:
+            if normalized_action != "BUY" or type(buyback_price) is not int or not 0 < buyback_price <= economy_contract.MAX_CURRENCY:
+                return failure("VENDOR_BUYBACK_PRICE_INVALID")
+            total_price = buyback_price
         if total_price <= 0:
             return failure(
                 "VENDOR_PRICE_INVALID",
@@ -6740,6 +9729,12 @@ class GameEngineRuntime:
                 definition_id=definition_id,
             )
         if normalized_action == "BUY":
+            if destination_slot is not None:
+                self._ensure_inventory_slots_locked()
+                if type(destination_slot) is not int or not 0 <= destination_slot < item_state.MAX_INVENTORY_SLOTS:
+                    return failure("VENDOR_TARGET_SLOT_INVALID")
+                if any(row.get("location") == "INVENTORY" and row.get("owner_id") == "player" and row.get("slot_index") == destination_slot for row in self._item_instances.values()):
+                    return failure("VENDOR_TARGET_SLOT_OCCUPIED")
             if not isinstance(instance, dict):
                 return failure("VENDOR_STOCK_INSTANCE_REQUIRED", instance_id=wanted_instance_id)
             if (
@@ -6836,6 +9831,7 @@ class GameEngineRuntime:
                 )
                 if not ok:
                     raise ValueError(str(transition.get("error", "VENDOR_BUY_MOVE_FAILED")))
+                if destination_slot is not None:instance["slot_index"] = destination_slot
                 if not self._npc_remove_inventory_ref_locked(person, definition_id):
                     raise ValueError("VENDOR_STOCK_REFERENCE_REMOVE_FAILED")
                 wallet["gold"] = int(wallet.get("gold", 0)) - total_price
@@ -6857,11 +9853,11 @@ class GameEngineRuntime:
                     raise ValueError(str(transition.get("error", "VENDOR_SELL_MOVE_FAILED")))
                 if not self._npc_add_inventory_ref_locked(person, definition_id):
                     raise ValueError("VENDOR_INVENTORY_REFERENCE_ADD_FAILED")
-                upgraded, npc_gear_decision = self._npc_equip_better_gear_locked(
-                    identity_id,
-                    person,
-                    instance,
-                )
+                upgraded = False
+                if not reserve_buyback:
+                    upgraded, npc_gear_decision = self._npc_equip_better_gear_locked(
+                        identity_id, person, instance,
+                    )
                 if upgraded:
                     npc_gear_decision["gear_upgrade"] = True
                 wallet["gold"] = economy_contract.bounded_currency(
@@ -7273,16 +10269,18 @@ class GameEngineRuntime:
             snapshot["terrain_edit_result"] = result
             return snapshot
 
-    def save_state(self) -> dict[str, Any]:
+    def save_state(self, *, snapshot: bool = True) -> dict[str, Any]:
         with self._lock:
+            from backend import game_engine_benilla_world_state as mounted_world_state
             # Record the transition before serializing so the saved journal
             # contains the save boundary itself without a second revision.
             self._append_event_locked(
                 "SAVE",
-                "Saved local player state in memory.",
+                "Saved local player state.",
                 actor_id="player",
                 subject_id=self._persistence_key,
             )
+            self._instance_checkpoint_world_locked()
             payload = mmo.persistent_payload(
                 player={
                     "x": self._x[0],
@@ -7292,6 +10290,9 @@ class GameEngineRuntime:
                     "vx": self._vx[0],
                     "vy": self._vy[0],
                     "vz": self._vz[0],
+                    "jump_count": self._jump_count,
+                    "double_jump_pose_remaining_s": self._double_jump_pose_remaining_s,
+                    "client_controls": self._client_controls_save_locked(),
                 },
                 movement_mode=self._movement_mode,
                 inventory=self._inventory,
@@ -7313,12 +10314,16 @@ class GameEngineRuntime:
                 dialogue_state=self._dialogue_state,
                 social_state=self._social_state,
                 living_world_state={
+                    "nature": self._nature.save(self._sim_time),
+                    "actions": self._actions.save(),
                     "promoted_ids": sorted(self._promoted_life_ids)[:MAX_POPULATION_PROMOTIONS],
                     "last_promotion_s": self._last_population_promotion_s,
+                    "regional_population": self._world_population.save(),
                 },
                 world_event_state=self._world_event_state,
                 content_state={
                     "active_packs": list(self._active_content_pack_ids),
+                    "mounted_world": mounted_world_state.capture(self),
                 },
                 simulation_state={
                     "tick": self._tick,
@@ -7328,9 +10333,11 @@ class GameEngineRuntime:
             )
             result = self._state_store.save(self._persistence_key, payload)
             self._persistence_revision = int(result["revision"])
-            snapshot = self.snapshot_locked()
-            snapshot["persistence_result"] = result
-            return snapshot
+            if not snapshot:
+                return result
+            view = self.snapshot_locked()
+            view["persistence_result"] = result
+            return view
 
     def load_state(self) -> dict[str, Any]:
         with self._lock:
@@ -7339,6 +10346,20 @@ class GameEngineRuntime:
                 snapshot = self.snapshot_locked()
                 snapshot["error"] = "PERSISTENCE_STATE_MISSING"
                 return snapshot
+            # Reject hidden payloads before changing targets, content packs,
+            # promoted actors, player position or the authoritative registry.
+            for source in ('item_instances','loot_items'):
+                rows=payload.get(source)
+                if isinstance(rows,list) and any(not item_state.saved_gift_payload_valid(row) for row in rows):
+                    result=self.snapshot_locked();result['error']='ITEM_SAVE_GIFT_PAYLOAD_INVALID';return result
+            from backend import game_engine_benilla_world_state as mounted_world_state
+            try:
+                saved_mounted_world = mounted_world_state.read(payload)
+            except (ValueError, TypeError, OSError) as exc:
+                result=self.snapshot_locked();result['error']=str(exc)[:240];return result
+            mounted_world_state.detach_for_load(self)
+            self._instance_prepare_load_locked()
+            self._combat_target_id = ""
             saved_content = payload.get("content_state")
             saved_pack_ids = (
                 saved_content.get("active_packs", [])
@@ -7370,7 +10391,7 @@ class GameEngineRuntime:
             for index in tuple(self._npc_indices):
                 if str(self._npc_ids[index]) in self._promoted_life_ids:
                     self._despawn_entity_locked(index)
-            self._life_spawns = life_contract.spawns_from_content(self._content)
+            self._set_life_spawns_locked(life_contract.spawns_from_content(self._content))
             self._promoted_life_ids = set()
             self._last_population_promotion_s = 0.0
             player = payload.get("player", {})
@@ -7382,6 +10403,14 @@ class GameEngineRuntime:
                 self._vx[0] = _clamp(player.get("vx"), -1000.0, 1000.0)
                 self._vy[0] = _clamp(player.get("vy"), -1000.0, 1000.0)
                 self._vz[0] = _clamp(player.get("vz"), -1000.0, 1000.0)
+                self._jump_count = int(_clamp(player.get("jump_count"), 0.0, 2.0))
+                self._double_jump_pose_remaining_s = _clamp(
+                    player.get("double_jump_pose_remaining_s"),
+                    0.0,
+                    animation_contract.DOUBLE_JUMP_ANIMATION_SECONDS,
+                )
+                self._restore_client_controls_locked(player.get('client_controls'))
+                self._reset_spells_locked()
             self._movement_mode = world.normalize_movement_mode(
                 payload.get("movement_mode"), "GROUND"
             )
@@ -7426,6 +10455,7 @@ class GameEngineRuntime:
                 payload.get("npc_individuals"),
                 self._people_catalog,
             )
+            self._ensure_life_individuals_locked()
             self._faction_state = factions_contract.normalize_state(
                 payload.get("faction_state"),
                 self._people_catalog.values(),
@@ -7437,9 +10467,11 @@ class GameEngineRuntime:
             self._combat_state = combat_contract.normalize_state(
                 payload.get("combat_state")
             )
+            self._lifecycle_loaded_locked()
             self._dialogue_state = dialogue_contract.normalize_state(
                 payload.get("dialogue_state")
             )
+            self._benilla_quest_panel={};self._benilla_gossip_hidden=False
             self._social_state = social_contract.normalize_state(
                 payload.get("social_state")
             )
@@ -7468,7 +10500,12 @@ class GameEngineRuntime:
                 )
             saved_living_world = payload.get("living_world_state")
             saved_promoted_ids: list[str] = []
+            self._world_population = WorldPopulation()
+            self._world_actor_assets = {}
             if isinstance(saved_living_world, dict):
+                self._world_population.restore(saved_living_world.get('regional_population'))
+                self._nature.restore(saved_living_world.get("nature"), self._sim_time)
+                self._actions.restore(saved_living_world.get("actions"),self._content.get("abilities",{}),self._action_definitions_locked())
                 raw_promoted_ids = saved_living_world.get("promoted_ids", [])
                 if isinstance(raw_promoted_ids, list):
                     saved_promoted_ids = list(
@@ -7495,6 +10532,7 @@ class GameEngineRuntime:
             self._materialize_npc_item_instances_locked()
             self._refresh_all_npc_progression_locked()
             self._sync_npc_combat_presence_locked()
+            self._battlefield_loaded_locked()
             self._last_trade = trade_contract.restore(payload.get("trade_state"))
             self._economy_state = economy_contract.restore_state(
                 payload.get("economy_state"),
@@ -7580,14 +10618,16 @@ class GameEngineRuntime:
                         f"e-{slot:04d}",
                     )
                     self._editor_entity_indices[placement_id] = slot
+            self._instance_loaded_locked()
+            mounted_world_state.arm(self, saved_mounted_world, player)
             self._persistence_revision = self._state_store.revision
-            self._append_event_locked("LOAD", "Restored local player state from memory.")
+            self._append_event_locked("LOAD", "Restored local player state.")
             snapshot = self.snapshot_locked()
             snapshot["persistence_result"] = {
                 "schema": mmo.PERSISTENCE_SCHEMA,
                 "key": self._persistence_key,
                 "revision": self._persistence_revision,
-                "mode": "MEMORY_ONLY",
+                "mode": getattr(self._state_store, "mode", "MEMORY_ONLY"),
             }
             return snapshot
 
@@ -7724,6 +10764,9 @@ class GameEngineRuntime:
             "rarity": view.get("rarity", "COMMON"),
             "rarity_color": view.get("rarity_color", ""),
             "craft_quality": view.get("craft_quality", "STANDARD"),
+            "visual_phase": view.get('visual_phase', 0),
+            "visual_visible": view.get('visual_visible', True),
+            "visual_stowed": view.get('visual_stowed', False),
             "attachment": dict(attachment) if isinstance(attachment, dict) else {},
             "visual": dict(visual) if isinstance(visual, dict) else {},
             "asset": dict(asset) if isinstance(asset, dict) else {},
@@ -7774,10 +10817,19 @@ class GameEngineRuntime:
             if isinstance(row.get("item"), dict)
             else None
         )
+        individual = row.get("individual")
+        compact["individual"] = {
+            key: individual[key]
+            for key, maximum in (("id", 128), ("name", 512))
+            if isinstance(individual, dict)
+            and isinstance(individual.get(key), str)
+            and len(individual[key].encode("utf-8")) <= maximum
+        } if isinstance(individual, dict) else None
         return compact
 
     def _render_structure_signature_locked(self) -> tuple[Any, ...]:
-        """Return cheap structural facts that require a full render rebuild."""
+        regional_ids=self._world_population.select(self._sim_time,self._x[0],self._z[0])
+        """Separate scene changes from changes to the environment template."""
         entity_signature = tuple(
             (
                 index,
@@ -7788,8 +10840,7 @@ class GameEngineRuntime:
                 round(self._sz[index], 3),
                 self._color[index],
             )
-            for index in range(MAX_ENTITIES)
-            if self._alive[index]
+            for index in self._active_entity_indices
         )
         item_signature: list[tuple[Any, ...]] = []
         for instance_id in sorted(self._item_instances):
@@ -7822,20 +10873,136 @@ class GameEngineRuntime:
             for row in self._life_spawns
             if isinstance(row, dict)
         )
+        life_signature += tuple(('WORLD_RESIDENT',identity) for identity in regional_ids)
         return (
             entity_signature,
             tuple(item_signature),
             life_signature,
             tuple(sorted(self._promoted_life_ids)),
+            self._render_environment_signature_locked(),
+        )
+
+    def _render_environment_signature_locked(self) -> tuple[Any, ...]:
+        # Movement mode is live pose data, already refreshed by the compact
+        # stream. Changing it does not invalidate terrain or asset metadata.
+        return (
             tuple(self._active_content_pack_ids),
             tuple(sorted(str(key) for key in self._asset_catalog)),
             int(self._terrain_overrides.get("revision", 0)),
-            self._movement_mode,
             self._render_profile,
             self._presentation_mode,
             self._presentation_reason,
             bool(self._stress),
         )
+
+    def _dos_motion_signature_locked(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> tuple[Any, ...]:
+        """Pose facts that change the DOS picture.  Sub-centimetre noise does not."""
+        actors: list[tuple[Any, ...]] = []
+        for row in rows:
+            if str(row.get("kind", "")) not in {"NPC", "ACTOR"}:
+                continue
+            try:
+                actors.append(
+                    (
+                        str(row.get("id", "")),
+                        round(float(row.get("x", 0.0) or 0.0), 2),
+                        round(float(row.get("z", 0.0) or 0.0), 2),
+                        round(float(row.get("yaw", 0.0) or 0.0), 2),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+            if len(actors) >= 24:
+                break
+        return (
+            round(float(self._x[0]), 2),
+            round(float(self._y[0]), 2),
+            round(float(self._z[0]), 2),
+            round(float(self._yaw[0]), 3),
+            tuple(actors),
+        )
+
+    def _live_dos_fallback_locked(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Project the current pose into the cell frame carried on the render stream.
+
+        The full snapshot builds this picture too, but QML movement reads the
+        compact render stream and that stream used to drop ``fallback``.  The
+        canvas then kept the frame from the moment DOS was selected.  Rebuilding
+        here is what makes walking and turning visible while the low-poly view
+        is hidden.
+        """
+        cache = self._render_snapshot_cache or {}
+        shell = cache.get("dos_shell")
+        shell = shell if isinstance(shell, dict) else {}
+        terrain = cache.get("dos_terrain")
+        terrain = terrain if isinstance(terrain, list) else []
+        motion = self._dos_motion_signature_locked(rows)
+        now = time.perf_counter()
+        frame = self._dos_live_frame
+        due = (now - self._dos_live_frame_at) >= DOS_FRAME_INTERVAL_S
+        if frame is None or (due and motion != self._dos_live_motion):
+            frame = fallback_contract.build_cell_frame(
+                rows,
+                terrain,
+                player_x=self._x[0],
+                player_y=self._y[0],
+                player_z=self._z[0],
+                player_yaw=self._yaw[0],
+            )
+            self._dos_live_frame = frame
+            self._dos_live_motion = motion
+            self._dos_live_frame_at = now
+        terminal = shell.get("terminal")
+        terminal = dict(terminal) if isinstance(terminal, dict) else {}
+        lines = [
+            str(line)
+            for line in terminal.get("lines", [])
+            if isinstance(line, (str, int, float))
+        ]
+        position = f"POS {self._x[0]:.1f},{self._z[0]:.1f}"
+        for index, line in enumerate(lines):
+            if line.startswith("POS "):
+                lines[index] = position
+                break
+        else:
+            lines.insert(0, position)
+        terminal["lines"] = lines[: fallback_contract.MAX_TERMINAL_LINES]
+        if "title" not in terminal:
+            terminal["title"] = "GG//DOS FRONTIER"
+        if "prompt" not in terminal:
+            terminal["prompt"] = ">"
+        palette = shell.get("palette")
+        return {
+            "schema": shell.get("schema", fallback_contract.SCHEMA),
+            "version": shell.get("version", 1),
+            "mode": shell.get("mode", fallback_contract.MODE),
+            "renderer": shell.get("renderer", "QTQUICK_CANVAS_TERMINAL"),
+            "palette": dict(palette) if isinstance(palette, dict) else {},
+            "camera": {
+                "center_x": round(float(self._x[0]), 3),
+                "center_y": round(float(self._y[0]), 3),
+                "center_z": round(float(self._z[0]), 3),
+                "yaw": round(float(self._yaw[0]), 4),
+                "radius_m": 18.0,
+            },
+            "frame": frame,
+            "terminal": terminal,
+            "terrain": terrain,
+            "shared_contract": shell.get(
+                "shared_contract",
+                "AUTHORITATIVE_FIXED_STEP_ENTITY_ITEM_NPC_DATA",
+            ),
+            "policy": shell.get(
+                "policy",
+                "BOUNDED_2D_FALLBACK_RENDERER_NO_SIMULATION_MUTATION",
+            ),
+        }
 
     def _remember_render_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
         """Cache a compact render template after a full authoritative snapshot."""
@@ -7852,20 +11019,70 @@ class GameEngineRuntime:
         }
         player = snapshot.get("player")
         player = player if isinstance(player, dict) else {}
+        fallback = render.get("fallback")
+        fallback = fallback if isinstance(fallback, dict) else {}
+        terrain = fallback.get("terrain")
+        palette = fallback.get("palette")
+        terminal = fallback.get("terminal")
+        frame = fallback.get("frame")
+        compact_rows = [
+            self._compact_render_entity_row(row)
+            for row in entities
+            if isinstance(row, dict)
+        ]
         self._render_snapshot_cache = {
             "state": str(snapshot.get("state", "IDLE")),
             "stress": bool(snapshot.get("stress", False)),
             "player": dict(player),
             "render_meta": render_meta,
-            "entities": [
-                self._compact_render_entity_row(row)
-                for row in entities
-                if isinstance(row, dict)
-            ],
+            "entities": compact_rows,
             "particles": [
                 dict(row) for row in particles if isinstance(row, dict)
             ],
+            "dos_terrain": [
+                {
+                    "x": row.get("x", 0.0),
+                    "z": row.get("z", 0.0),
+                    "surface": row.get("surface", "LAND"),
+                    "biome": row.get("biome", ""),
+                }
+                for row in terrain
+                if isinstance(row, dict)
+            ] if isinstance(terrain, list) else [],
+            "dos_shell": {
+                "schema": fallback.get("schema", fallback_contract.SCHEMA),
+                "version": fallback.get("version", 1),
+                "mode": fallback.get("mode", fallback_contract.MODE),
+                "renderer": fallback.get("renderer", "QTQUICK_CANVAS_TERMINAL"),
+                "palette": dict(palette) if isinstance(palette, dict) else {},
+                "terminal": {
+                    "title": (
+                        terminal.get("title", "GG//DOS FRONTIER")
+                        if isinstance(terminal, dict)
+                        else "GG//DOS FRONTIER"
+                    ),
+                    "prompt": (
+                        terminal.get("prompt", ">")
+                        if isinstance(terminal, dict)
+                        else ">"
+                    ),
+                    "lines": (
+                        list(terminal.get("lines", []))
+                        if isinstance(terminal, dict)
+                        and isinstance(terminal.get("lines"), list)
+                        else []
+                    ),
+                },
+                "shared_contract": str(fallback.get("shared_contract", "")),
+                "policy": str(fallback.get("policy", "")),
+            },
         }
+        # The full snapshot just paid for this frame.  Keep it so the next
+        # compact tick does not raycast the same pose again.
+        if isinstance(frame, dict) and frame.get("glyphs"):
+            self._dos_live_frame = frame
+            self._dos_live_frame_at = time.perf_counter()
+            self._dos_live_motion = self._dos_motion_signature_locked(compact_rows)
         self._render_snapshot_signature = self._render_structure_signature_locked()
 
     def _render_snapshot_from_cache_locked(self) -> dict[str, Any]:
@@ -7884,9 +11101,7 @@ class GameEngineRuntime:
             if isinstance(row, dict) and row.get("id")
         }
 
-        for index in range(MAX_ENTITIES):
-            if not self._alive[index]:
-                continue
+        for index in self._active_entity_indices:
             row = by_id.get(f"e-{index:04d}")
             if row is None:
                 continue
@@ -7899,10 +11114,25 @@ class GameEngineRuntime:
                     grounded=(self._grounded if index == 0 else True),
                     sprinting=(self._sprinting if index == 0 else False),
                     vertical_velocity=self._vy[index],
+                    travelled_distance_m=(
+                        self._locomotion_distance_m if index == 0 else None
+                    ),
+                    movement_mode=(self._movement_mode if index == 0 else "GROUND"),
+                    vehicle_kind=(self._vehicle_kind if index == 0 else "NONE"),
+                    jump_stage=(self._jump_count if index == 0 else 0),
+                    double_jump_remaining_s=(
+                        self._double_jump_pose_remaining_s if index == 0 else 0.0
+                    ),
+                    grappling=(self._grapple_anchor is not None if index == 0 else False),
+                    stand_state=(self._stand_state if index == 0 else 0),
                 )
                 if character_like
                 else None
             )
+            action_clip = self._decorate_character_animation_locked(
+                animation_view,
+                "player" if index == 0 else self._npc_ids[index],
+            ) if character_like else ""
             # The compact stream must carry the asset's current clip state as
             # well as the animation pose.  The full snapshot cached the
             # binding at the previous state (normally IDLE); leaving that
@@ -7914,7 +11144,7 @@ class GameEngineRuntime:
             current_asset = row.get("asset")
             if character_like and isinstance(current_asset, dict):
                 new_state = (
-                    str(animation_view.get("state", "IDLE"))
+                    str(animation_view.get("locomotion", animation_view.get("state", "IDLE")))
                     if isinstance(animation_view, dict)
                     else "IDLE"
                 )
@@ -7924,7 +11154,9 @@ class GameEngineRuntime:
                     or row.get("motion_state")
                     or ""
                 )
-                if cached_state != new_state:
+                cached_animation = (cached_row or {}).get("animation")
+                cached_action = str(cached_animation.get("action", "")) if isinstance(cached_animation, dict) else ""
+                if cached_state != new_state or cached_action != action_clip:
                     try:
                         instance_rank = int(current_asset.get("instance_rank", -1))
                     except (TypeError, ValueError):
@@ -7947,10 +11179,16 @@ class GameEngineRuntime:
                                 else "DEFAULT"
                             )
                         ),
+                        clip_override=action_clip,
                     )
+                    if index == 0:
+                        row['asset']=character_creation.binding(self._character_creation,row['asset'],new_state,action_clip)
                     if cached_row is not None:
                         cached_row["asset"] = row["asset"]
                         cached_row["motion_state"] = new_state
+                        # Remember the bound action as well as locomotion so
+                        # expiration can restore Idle/Walk on the compact path.
+                        cached_row["animation"] = dict(animation_view or {})
             distance = math.sqrt(
                 (self._x[index] - self._x[0]) ** 2
                 + (self._y[index] - self._y[0]) ** 2
@@ -7962,9 +11200,16 @@ class GameEngineRuntime:
                     "y": _round(self._y[index]),
                     "z": _round(self._z[index]),
                     "yaw": _round(self._yaw[index], 4),
+                    "pitch": _round(self._pitch[index], 3),
+                    "roll": _round(self._roll[index], 3),
                     "speed": _round(horizontal_speed, 3),
+                    "vehicle": self._vehicle_kind if index == 0 else "NONE",
+                    # Keep the avatar visible in the skiff; its fixed offset
+                    # places the feet inside the hull while the camera still
+                    # follows the same third-person character anchor.
+                    "hidden": False,
                     "motion_state": (
-                        str(animation_view.get("state", "IDLE"))
+                        str(animation_view.get("locomotion", animation_view.get("state", "IDLE")))
                         if isinstance(animation_view, dict)
                         else "STATIC"
                     ),
@@ -8005,7 +11250,7 @@ class GameEngineRuntime:
                     instance_id = str(item_view.get("instance_id", ""))
                     item_view["asset"] = previous_assets.get(instance_id, {})
                     equipment_rows.append(
-                        self._compact_render_item_view(item_view)
+                        self._compact_render_item_view(self._equipment_visual_locked(item_view))
                     )
                     if len(equipment_rows) >= item_state.MAX_EQUIPPED_ITEMS:
                         break
@@ -8017,6 +11262,7 @@ class GameEngineRuntime:
             player_x=self._x[0],
             player_z=self._z[0],
             terrain_height=self._terrain_height_locked,
+            render_radius_m=life_contract.RENDER_RADIUS_M,
         )
         for ambient_row in ambient_rows:
             if not isinstance(ambient_row, dict):
@@ -8031,7 +11277,7 @@ class GameEngineRuntime:
             ambient_id = str(ambient_row.get("id", ""))
             if isinstance(current_asset, dict):
                 new_state = (
-                    str(ambient_animation.get("state", "IDLE"))
+                    str(ambient_animation.get("locomotion", ambient_animation.get("state", "IDLE")))
                     if isinstance(ambient_animation, dict)
                     else "IDLE"
                 )
@@ -8067,6 +11313,7 @@ class GameEngineRuntime:
                     "speed": ambient_row.get("speed", 0.0),
                     "motion_state": ambient_row.get("motion_state", "IDLE"),
                     "animation": ambient_row.get("animation"),
+                    "hidden": ambient_row.get("hidden", False),
                     "cell_key": world.cell_key(
                         world.chunk_coord(x), world.chunk_coord(z)
                     ),
@@ -8079,11 +11326,17 @@ class GameEngineRuntime:
                 }
             )
 
+        for regional_row in self._world_people_rows_locked():
+            row=by_id.get(regional_row['id'])
+            if row is not None:
+                row.update({key:regional_row[key] for key in ('x','y','z','yaw','speed','motion_state','animation','hidden','cell_key','lod','asset')})
+
         for instance_id in sorted(self._item_instances):
             instance = self._item_instances[instance_id]
             if (
                 not isinstance(instance, dict)
                 or str(instance.get("location")) != "GROUND"
+                or not self._instance_item_visible_locked(instance)
             ):
                 continue
             row = by_id.get(f"item-{instance_id}")
@@ -8150,14 +11403,15 @@ class GameEngineRuntime:
             int(render_policy["max_visible_particles"]),
         )
         particles: list[dict[str, Any]] = []
-        for index in range(MAX_PARTICLES):
+        for index in self._active_particle_indices:
             if self._plife[index] <= 0.0:
                 continue
+            point=self._ride_particle_world_locked(index)
             particles.append(
                 {
-                    "x": _round(self._px[index]),
-                    "y": _round(self._py[index]),
-                    "z": _round(self._pz[index]),
+                    "x": _round(point[0]),
+                    "y": _round(point[1]),
+                    "z": _round(point[2]),
                     "life": _round(self._plife[index]),
                     "color": self._pcolor[index],
                 }
@@ -8173,22 +11427,23 @@ class GameEngineRuntime:
         facing = controller.character_basis(self._yaw[0])
         right_x, right_z = facing["right"]
         lateral = abs(right_x * self._vx[0] + right_z * self._vz[0])
-        surface_height = terrain_contract.height_at(
-            self._x[0],
-            self._z[0],
-            WORLD_SEED,
-            overrides=self._terrain_overrides,
+        surface=self._player_surface_locked();surface_height=surface['height_m'];water_depth=surface['water_depth_m'];medium=surface['medium']
+        mobility_view = mobility_contract.build_view(
+            x=self._x[0],
+            z=self._z[0],
+            time_s=self._sim_time,
+            movement_mode=self._movement_mode,
+            vehicle_kind=self._vehicle_kind,
+            water_depth=water_depth,
+            speed=speed,
         )
-        water_depth = max(0.0, terrain_contract.SEA_LEVEL - surface_height)
-        if self._movement_mode == "FLY":
-            medium = "AIR"
-        elif self._movement_mode == "SWIM":
-            medium = "WATER"
-        elif surface_height < terrain_contract.SEA_LEVEL and self._y[0] <= terrain_contract.SEA_LEVEL + 1.5:
-            medium = "WATER"
-        else:
-            medium = "LAND"
+        grapple_view = self._grapple_view_locked()
         player = dict(cache.get("player", {}))
+        player['client_controls']=self._client_controls_view_locked()
+        player['world_map']=self._instance_map_descriptor_locked()
+        player['ride_frame']=self._ride_view_locked()
+        player.pop('benilla_world',None)
+        if getattr(self,'_benilla_world',None) is not None:player['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
         player.update(
             {
                 "x": _round(self._x[0]),
@@ -8199,14 +11454,25 @@ class GameEngineRuntime:
                 "drift": _round(lateral, 2),
                 "boost": bool(self._input.get("boost")),
                 "grounded": self._grounded,
+                "jump_stage": self._jump_count,
+                "grapple": grapple_view,
+                # Unrounded. The sea shader and this pose are one sample;
+                # a rounded clock puts the picture on a later wave.
+                "time_s": self._sim_time,
                 "sprinting": self._sprinting,
                 "movement_mode": self._movement_mode,
+                "vehicle": self._vehicle_kind,
+                "mobility": mobility_view,
                 "cell_key": world.cell_key(
                     world.chunk_coord(self._x[0]),
                     world.chunk_coord(self._z[0]),
                 ),
                 "medium": medium,
                 "surface_height": round(surface_height, 3),
+                "biome": surface['biome'],
+                "last_ability": self._last_ability,
+                "last_ability_time": self._last_ability_time,
+                "xp_visual": self._last_xp_visual,
             }
         )
         render_view = dict(cache.get("render_meta", {}))
@@ -8221,8 +11487,10 @@ class GameEngineRuntime:
         render_view["draw_calls"] = (
             0
             if self._presentation_mode == render_contract.DOS_2D
-            else render_view.get("estimated_draw_calls", 3)
+            else None
         )
+        if self._presentation_mode == render_contract.DOS_2D:
+            render_view["fallback"] = self._live_dos_fallback_locked(rows)
         render_view["update_hz"] = (
             STRESS_RENDER_UPDATE_HZ if self._stress else RENDER_UPDATE_HZ
         )
@@ -8258,44 +11526,112 @@ class GameEngineRuntime:
             "player": player,
             "simulation": simulation_view,
             "render": render_view,
+            "fauna": self._fauna_view_locked(),
+            "ecology": self._ecology_view_locked(),
+            "nature": self._nature_view_locked(),
+            "targeting": self._target_view_locked(),
+            "actions": self._action_view_locked(),
+            "firearms":self._firearms_view_locked(),
+            "combat_live": {"resource":self._resource,"resource_capacity":100,"cooldowns":dict(self._ability_cooldowns),
+                "profile":self._player_combat_profile_locked(),
+                "player":dict(self._combat_state.get("actors",{}).get("player",{}))},
         }
 
     def render_snapshot_locked(self) -> dict[str, Any]:
-        """Return the bounded 30 Hz render stream without rebuilding UI state."""
+        """Return the bounded 60 Hz render stream without rebuilding UI state."""
         signature = self._render_structure_signature_locked()
         if (
             self._render_snapshot_cache is None
-            or signature != self._render_snapshot_signature
+            or self._render_snapshot_signature is None
+            or signature[-1] != self._render_snapshot_signature[-1]
         ):
-            # Structural changes (new loot, promoted life, terrain edit, pack
-            # activation, profile changes) take the authoritative full path
-            # once, then resume the compact stream.
+            # Initial/environment changes still refresh the complete terrain
+            # contract. Ordinary entity/item changes never pay that cost.
             self.snapshot_locked()
+        elif signature != self._render_snapshot_signature:
+            self._refresh_render_entities_locked(signature)
         return self._render_snapshot_from_cache_locked()
 
-    def snapshot_locked(self) -> dict[str, Any]:
-        snapshot_started = time.perf_counter()
-        self._ensure_combat_actors_locked()
-        self._sync_npc_combat_presence_locked()
-        render_policy = render_contract.PROFILES.get(
-            self._render_profile,
-            render_contract.PROFILES["BALANCED"],
+    def _refresh_render_entities_locked(self, signature: tuple[Any, ...]) -> None:
+        """Replace only scene templates after loot or population changes."""
+        previous_signature = self._render_snapshot_signature
+        items_changed = signature[1] != previous_signature[1]
+        identities_changed = (
+            tuple(row[:3] for row in signature[0])
+            != tuple(row[:3] for row in previous_signature[0])
         )
-        entity_render_limit = min(
-            RENDER_ENTITY_LIMIT,
-            int(render_policy["max_visible_instances"]),
-        )
-        particle_render_limit = min(
-            RENDER_PARTICLE_LIMIT,
-            int(render_policy["max_visible_particles"]),
-        )
-        if self._running:
-            state = "RUNNING"
-        elif self._tick > 0:
-            state = "PAUSED"
-        else:
-            state = "IDLE"
+        if items_changed:
+            self._ensure_inventory_slots_locked()
+        if items_changed or identities_changed:
+            # Preserve the state preparation previously done by a full
+            # snapshot, without constructing its terrain/navigation views.
+            self._ensure_combat_actors_locked()
+            self._sync_npc_combat_presence_locked()
+        rows, item_views, ambient_rows, item_rank = self._render_entity_rows_locked(include_identity=False)
+        cache = dict(self._render_snapshot_cache)
+        cache["entities"] = [self._compact_render_entity_row(row) for row in rows]
+        counts = {key: 0 for key in ("ground", "containers", "inventory", "equipment")}
+        for item in self._instance_visible_item_rows_locked():
+            if not isinstance(item, dict):
+                continue
+            if item.get("location") == "GROUND":
+                counts["ground"] += 1
+                counts["containers"] += item.get("kind") == "CONTAINER"
+            elif item.get("owner_id") == "player":
+                if item.get("location") == "INVENTORY":
+                    counts["inventory"] += 1
+                elif item.get("location") == "EQUIPPED":
+                    counts["equipment"] += 1
+        counts["inventory"] = min(counts["inventory"], item_state.MAX_INVENTORY_SLOTS)
+        counts["equipment"] = min(counts["equipment"], item_state.MAX_EQUIPPED_ITEMS)
+        meta = dict(cache["render_meta"])
+        meta.update(self._render_instance_metadata_locked(rows, item_views, item_rank, counts))
+        cache["render_meta"] = meta
+        self._render_snapshot_cache = cache
+        self._render_snapshot_signature = signature
+        if self._ui_snapshot_base is not None:
+            # Population promotion happens on the simulator, without a user
+            # command/full snapshot. Keep its small inspector summary current.
+            ui = dict(self._ui_snapshot_base)
+            if items_changed:
+                items = item_state.build_state_view(
+                    self._item_catalog, self._instance_visible_item_rows_locked(),
+                    player_x=self._x[0], player_z=self._z[0], sim_time=self._sim_time,
+                    last_interaction=self._last_item_interaction,
+                )
+                ui["items"] = self._ui_status_from_snapshot({"items": items})["items"]
+            if signature[2:4] != previous_signature[2:4]:
+                living = dict(ui.get("living_world", {}))
+                living.update(promoted_ids=sorted(self._promoted_life_ids),
+                              promoted_count=len(self._promoted_life_ids),
+                              ambient_count=len(self._life_spawns),
+                              last_promotion_s=round(self._last_population_promotion_s, 3))
+                ui["living_world"] = living
+                life = life_contract.build_view(ambient_rows, self._sim_time)
+                ui["life"] = self._ui_status_from_snapshot({"life": life})["life"]
+            if identities_changed:
+                npc = dict(ui.get("npc", {}))
+                active_npcs = [i for i in self._npc_indices if self._alive[i]]
+                npc["active"] = len(active_npcs)
+                npc["agents"] = [self._compact_ui_npc_row({
+                    "id": self._npc_ids[i], "entity_id": f"e-{i:04d}",
+                    "archetype": self._npc_archetype[i], "state": self._npc_state[i],
+                    "x": _round(self._x[i]), "y": _round(self._y[i]), "z": _round(self._z[i]),
+                    "yaw": _round(self._yaw[i], 4), "speed": _round(math.hypot(self._vx[i], self._vz[i]), 2),
+                    "stimulus": self._npc_stimulus[i], "line_of_sight": self._npc_line_of_sight[i],
+                    "path_status": self._npc_path_status[i], "path_nodes": len(self._npc_path[i]),
+                    "path_index": self._npc_path_index[i],
+                    "combat": copy.deepcopy(self._combat_state.get("actors", {}).get(self._npc_ids[i], {})),
+                    "individual": identity_contract.view(self._individual_state, self._npc_ids[i]),
+                }) for i in active_npcs[:4]]
+                ui["npc"] = npc
+            self._ui_snapshot_base = ui
 
+    def _render_entity_rows_locked(self, *, include_identity: bool = True):
+        """Build scene rows without terrain, navigation or inspector catalogues."""
+        self._world_population.select(self._sim_time,self._x[0],self._z[0])
+        policy = render_contract.PROFILES.get(self._render_profile, render_contract.PROFILES["BALANCED"])
+        entity_render_limit = min(RENDER_ENTITY_LIMIT, int(policy["max_visible_instances"]))
         entity_rows: list[dict[str, Any]] = []
         item_render_views: list[dict[str, Any]] = []
         authored_item_rank = 0
@@ -8310,6 +11646,7 @@ class GameEngineRuntime:
                 asset_id,
                 authored_item_rank,
                 view.get("kind", "ITEM"),
+                appearance_index=item_state.item_appearance_index(view.get('instance_id',view.get('id',asset_id))),
             )
             view["asset"] = binding
             item_render_views.append(view)
@@ -8318,9 +11655,7 @@ class GameEngineRuntime:
             return view
 
         authored_instance_rank = 0
-        for index in range(MAX_ENTITIES):
-            if not self._alive[index]:
-                continue
+        for index in self._active_entity_indices:
             distance = math.sqrt(
                 (self._x[index] - self._x[0]) ** 2
                 + (self._y[index] - self._y[0]) ** 2
@@ -8338,14 +11673,32 @@ class GameEngineRuntime:
                     grounded=(self._grounded if index == 0 else True),
                     sprinting=(self._sprinting if index == 0 else False),
                     vertical_velocity=self._vy[index],
+                    travelled_distance_m=(
+                        self._locomotion_distance_m if index == 0 else None
+                    ),
+                    movement_mode=(self._movement_mode if index == 0 else "GROUND"),
+                    vehicle_kind=(self._vehicle_kind if index == 0 else "NONE"),
+                    jump_stage=(self._jump_count if index == 0 else 0),
+                    double_jump_remaining_s=(
+                        self._double_jump_pose_remaining_s if index == 0 else 0.0
+                    ),
+                    grappling=(self._grapple_anchor is not None if index == 0 else False),
+                    stand_state=(self._stand_state if index == 0 else 0),
                 )
                 if character_like
                 else None
             )
+            action_clip = self._decorate_character_animation_locked(
+                animation_view,
+                "player" if index == 0 else self._npc_ids[index],
+            ) if character_like else ""
             asset_view = (
                 assets_contract.entity_binding(
                     self._asset_catalog,
-                    animation_view.get("state", "IDLE"),
+                    animation_view.get(
+                        "locomotion",
+                        animation_view.get("state", "IDLE"),
+                    ),
                     animation_view.get("phase", 0.0),
                     authored_instance_rank,
                     asset_role=(
@@ -8359,10 +11712,14 @@ class GameEngineRuntime:
                             else "DEFAULT"
                         )
                     ),
+                    clip_override=action_clip,
                 )
                 if isinstance(animation_view, dict)
                 else None
             )
+            if index == 0 and isinstance(asset_view,dict):
+                asset_view=character_creation.binding(self._character_creation,asset_view,
+                    animation_view.get('locomotion',animation_view.get('state','IDLE')),action_clip)
             if character_like:
                 authored_instance_rank += 1
             world_asset_view = (
@@ -8383,16 +11740,26 @@ class GameEngineRuntime:
                     ):
                         continue
                     equipment_rows.append(
-                        bind_item_render_view(
+                        self._equipment_visual_locked(bind_item_render_view(
                             item_state.instance_view(
                                 self._item_catalog,
                                 item,
                                 sim_time=self._sim_time,
                             )
-                        )
+                        ))
                     )
                     if len(equipment_rows) >= item_state.MAX_EQUIPPED_ITEMS:
                         break
+            individual = None
+            if self._kind[index] == "NPC":
+                if include_identity:
+                    individual = identity_contract.view(self._individual_state, self._npc_ids[index])
+                else:
+                    person = self._individual_state.get("individuals", {}).get(self._npc_ids[index])
+                    if isinstance(person, dict):
+                        individual = {"id": self._npc_ids[index]}
+                        if isinstance(person.get("name"), str):
+                            individual["name"] = person["name"]
             entity_rows.append(
                 {
                     "id": f"e-{index:04d}",
@@ -8406,27 +11773,24 @@ class GameEngineRuntime:
                     "y": _round(self._y[index]),
                     "z": _round(self._z[index]),
                     "yaw": _round(self._yaw[index], 4),
+                    "pitch": _round(self._pitch[index], 3),
+                    "roll": _round(self._roll[index], 3),
                     "sx": _round(self._sx[index]),
                     "sy": _round(self._sy[index]),
                     "sz": _round(self._sz[index]),
                     "color": self._color[index],
                     "speed": _round(horizontal_speed, 3),
+                    "vehicle": self._vehicle_kind if index == 0 else "NONE",
+                    "hidden": False,
                     "motion_state": (
-                        str(animation_view.get("state", "IDLE"))
+                        str(animation_view.get("locomotion", animation_view.get("state", "IDLE")))
                         if isinstance(animation_view, dict)
                         else "STATIC"
                     ),
                     "animation": animation_view,
                     "asset": asset_view if character_like else world_asset_view,
                     "equipment": equipment_rows,
-                    "individual": (
-                        identity_contract.view(
-                            self._individual_state,
-                            self._npc_ids[index],
-                        )
-                        if self._kind[index] == "NPC"
-                        else None
-                    ),
+                    "individual": individual,
                     "item": None,
                     "cell_key": world.cell_key(entity_cell_x, entity_cell_z),
                     "lod": world.lod_tier_for_screen_error(projected_error),
@@ -8435,11 +11799,12 @@ class GameEngineRuntime:
             if len(entity_rows) >= entity_render_limit:
                 break
 
+        self._append_corpse_render_locked(entity_rows,entity_render_limit)
         # World items are visual instances, not physics actors.  They stay out
         # of the entity pool so adding loot cannot change the stable movement,
         # collision or NPC capacities.  Their item state remains authoritative
         # in the same snapshot and the QML delegate renders the 3D binding.
-        ambient_life_rows = self._ambient_life_rows_locked()
+        ambient_life_rows = self._ambient_life_rows_locked(include_identity=include_identity)
         for ambient_row in ambient_life_rows:
             if len(entity_rows) >= entity_render_limit:
                 break
@@ -8447,30 +11812,37 @@ class GameEngineRuntime:
                 not isinstance(ambient_row, dict)
             ):
                 continue
+            if not include_identity:
+                person = self._individual_state.get("individuals", {}).get(ambient_row.get("id"))
+                if isinstance(person, dict):
+                    ambient_row["individual"] = {"id": ambient_row["id"]}
+                    if isinstance(person.get("name"), str):
+                        ambient_row["individual"]["name"] = person["name"]
             ambient_animation = ambient_row.get("animation")
-            if (
-                str(ambient_row.get("kind", "")) == "ACTOR"
-                and isinstance(ambient_animation, dict)
-            ):
+            if str(ambient_row.get("kind", "")) == "ACTOR":
                 # Ambient residents use the same bounded character asset seam
                 # as pooled actors.  Their life simulation remains a proxy,
                 # but their visible model is still the one authored low-poly
                 # model instead of a second detailed preview body.
                 ambient_row["asset"] = assets_contract.entity_binding(
                     self._asset_catalog,
-                    ambient_animation.get("state", "IDLE"),
-                    ambient_animation.get("phase", 0.0),
+                    (ambient_animation or {}).get("locomotion", (ambient_animation or {}).get("state", "IDLE")),
+                    (ambient_animation or {}).get("phase", 0.0),
                     authored_instance_rank,
                     asset_role="CROWD",
                 )
                 authored_instance_rank += 1
             entity_rows.append(ambient_row)
 
+        for row in self._world_people_rows_locked():
+            if len(entity_rows)>=entity_render_limit:break
+            entity_rows.append(row)
+
         for instance_id in sorted(self._item_instances):
             if len(entity_rows) >= entity_render_limit:
                 break
             instance = self._item_instances[instance_id]
-            if not isinstance(instance, dict) or str(instance.get("location")) != "GROUND":
+            if not isinstance(instance, dict) or str(instance.get("location")) != "GROUND" or not self._instance_item_visible_locked(instance):
                 continue
             position = instance.get("position", {})
             try:
@@ -8518,20 +11890,139 @@ class GameEngineRuntime:
                 }
             )
 
+        return entity_rows, item_render_views, ambient_life_rows, authored_item_rank
+
+    def _render_instance_metadata_locked(self, entity_rows, item_render_views, authored_item_rank, item_counts):
+        """The same bounded scene counters for full and compact publications."""
+        return {
+            "asset_instances": {
+                "authored_requested": sum(
+                    1
+                    for row in entity_rows
+                    if str(row.get("kind", "")) in {
+                        "PLAYER", "NPC", "ACTOR"
+                    }
+                    if isinstance(row.get("asset"), dict)
+                    and row["asset"].get("mode") in {
+                        "AUTHORED_SKINNED",
+                        "AUTHORED_NODE_ANIMATED",
+                    }
+                ),
+                "procedural_requested": sum(
+                    1
+                    for row in entity_rows
+                    if str(row.get("kind", "")) in {
+                        "PLAYER", "NPC", "ACTOR"
+                    }
+                    if isinstance(row.get("asset"), dict)
+                    and row["asset"].get("mode")
+                    == assets_contract.PROCEDURAL_CHARACTER_MODE
+                ),
+                "preview_fallback": sum(
+                    1
+                    for row in entity_rows
+                    if str(row.get("kind", "")) in {
+                        "PLAYER", "NPC", "ACTOR"
+                    }
+                    if isinstance(row.get("asset"), dict)
+                    and row["asset"].get("mode") not in {
+                        "AUTHORED_SKINNED",
+                        "AUTHORED_NODE_ANIMATED",
+                        assets_contract.PROCEDURAL_CHARACTER_MODE,
+                    }
+                ),
+                "budget": assets_contract.MAX_AUTHORED_INSTANCES,
+            },
+            "item_instances": {
+                "ground": item_counts["ground"],
+                "containers": item_counts["containers"],
+                "inventory": item_counts["inventory"],
+                "equipped": item_counts["equipment"],
+                "budget": item_state.MAX_WORLD_INSTANCES,
+            },
+            "item_asset_instances": {
+                "authored_requested": authored_item_rank,
+                "procedural_requested": sum(
+                    1
+                    for view in item_render_views
+                    if isinstance(view.get("asset"), dict)
+                    and view["asset"].get("mode")
+                    == assets_contract.PROCEDURAL_ASSET_MODE
+                ),
+                "primitive_fallback": sum(
+                    1
+                    for view in item_render_views
+                    if isinstance(view.get("asset"), dict)
+                    and view["asset"].get("mode") not in {
+                        "AUTHORED_STATIC",
+                        assets_contract.PROCEDURAL_ASSET_MODE,
+                    }
+                ),
+                "budget": assets_contract.MAX_AUTHORED_ITEM_INSTANCES,
+            },
+            "world_asset_instances": {
+                "native_requested": sum(
+                    1
+                    for row in entity_rows
+                    if str(row.get("kind", "")) not in {
+                        "PLAYER",
+                        "NPC",
+                        "ACTOR",
+                        "GROUND_ITEM",
+                        "CHEST",
+                    }
+                ),
+                "primitive_fallback": 0,
+                "budget": assets_contract.PROCEDURAL_ASSET_MAX_FAMILIES,
+            },
+            "ambient_life": {
+                "visible": sum(
+                    1
+                    for row in entity_rows
+                    if str(row.get("id", "")).startswith("ambient-")
+                ),
+                "budget": life_contract.MAX_PROXIES,
+                "simulation": "RENDER_ONLY_DETERMINISTIC_SCHEDULES",
+            },
+        }
+
+    def snapshot_locked(self) -> dict[str, Any]:
+        self._ensure_inventory_slots_locked()
+        snapshot_started = time.perf_counter()
+        self._ensure_combat_actors_locked()
+        self._sync_npc_combat_presence_locked()
+        render_policy = render_contract.PROFILES.get(
+            self._render_profile,
+            render_contract.PROFILES["BALANCED"],
+        )
+        particle_render_limit = min(
+            RENDER_PARTICLE_LIMIT,
+            int(render_policy["max_visible_particles"]),
+        )
+        if self._running:
+            state = "RUNNING"
+        elif self._tick > 0:
+            state = "PAUSED"
+        else:
+            state = "IDLE"
+
+        entity_rows, item_render_views, ambient_life_rows, authored_item_rank = self._render_entity_rows_locked()
+
         entity_lod_counts: dict[str, int] = {}
         for row in entity_rows:
             tier = str(row.get("lod", "ORBIT"))
             entity_lod_counts[tier] = entity_lod_counts.get(tier, 0) + 1
 
         particle_rows: list[dict[str, Any]] = []
-        for index in range(MAX_PARTICLES):
+        for index in self._active_particle_indices:
             if self._plife[index] <= 0.0:
                 continue
+            point=self._ride_particle_world_locked(index)
             particle_rows.append(
                 {
-                    "x": _round(self._px[index]),
-                    "y": _round(self._py[index]),
-                    "z": _round(self._pz[index]),
+                    "x": _round(point[0]),
+                    "y": _round(point[1]),
+                    "z": _round(point[2]),
                     "life": _round(self._plife[index]),
                     "color": self._pcolor[index],
                 }
@@ -8554,6 +12045,17 @@ class GameEngineRuntime:
             active_particles=self._particle_count,
             resource=self._resource,
         )
+        render_policy = render_contract.PROFILES.get(
+            self._render_profile,
+            render_contract.PROFILES["PS2_CLASSIC"],
+        )
+        # Keep the ordinary third-person preview to a PS2-scale nearby scene.
+        # Extend the ring only when the editor camera zooms out; the gameplay
+        # interest set, simulation and island surface remain untouched.
+        render_radius = min(
+            int(render_policy.get("max_render_radius", world.DEFAULT_RENDER_RADIUS)),
+            max(4, int(math.ceil(self._camera_distance / CHUNK_SIZE)) + 2),
+        )
         world_view = world.build_world_view(
             (self._x[0], self._y[0], self._z[0]),
             movement_mode=self._movement_mode,
@@ -8561,6 +12063,7 @@ class GameEngineRuntime:
             camera_pitch=self._camera_pitch,
             camera_distance=self._camera_distance,
             interest_radius=world.DEFAULT_INTEREST_RADIUS,
+            render_radius=render_radius,
         )
         streaming_view = world_view["streaming"]
         chunks = list(streaming_view["loaded_cells"][:MAX_CHUNKS])
@@ -8575,27 +12078,14 @@ class GameEngineRuntime:
             overrides=self._terrain_overrides,
             cell_cache=self._terrain_cell_cache,
         )
-        navigation_key = (
-            tuple(
-                sorted(
-                    (int(row.get("x", 0)), int(row.get("z", 0)))
-                    for row in chunks
-                    if isinstance(row, dict)
-                )
-            ),
+        if getattr(self,'_benilla_world',None) is not None:
+            terrain_view['player_surface']={**terrain_view['player_surface'],**self._player_surface_locked()}
+        navigation_tiles = self._navigation_tiles_for_cells_locked(
+            chunks,
             self._movement_mode,
-            int(self._terrain_overrides.get("revision", 0)),
         )
-        if navigation_key != self._navigation_cache_key:
-            self._navigation_tiles = nav_contract.build_nav_tiles(
-                chunks,
-                world_seed=WORLD_SEED,
-                overrides=self._terrain_overrides,
-                movement_mode=self._movement_mode,
-            )
-            self._navigation_cache_key = navigation_key
         navigation_view = nav_contract.navmesh_view_from_tiles(
-            self._navigation_tiles,
+            navigation_tiles,
             chunks,
             (self._x[0], self._y[0], self._z[0]),
             self._movement_mode,
@@ -8652,6 +12142,9 @@ class GameEngineRuntime:
             self._x[0],
             self._z[0],
         )
+        regional_target=self._regional_interaction_target_locked()
+        if regional_target and (not interaction_target or regional_target['distance_m']<interaction_target['distance_m']):
+            interaction_target=regional_target
         npc_view = npc_contract.build_view(
             npc_rows,
             interaction=interaction_target,
@@ -8659,12 +12152,13 @@ class GameEngineRuntime:
         )
         item_view = item_state.build_state_view(
             self._item_catalog,
-            self._item_instances.values(),
+            self._instance_visible_item_rows_locked(),
             player_x=self._x[0],
             player_z=self._z[0],
             sim_time=self._sim_time,
             last_interaction=self._last_item_interaction,
         )
+        item_view['equipment']=[self._tabard_equipment_visual_locked(row) for row in item_view['equipment']]
         ambient_life_view = life_contract.build_view(
             ambient_life_rows,
             self._sim_time,
@@ -8685,8 +12179,10 @@ class GameEngineRuntime:
         )
         dialogue_view = dialogue_contract.view(
             self._dialogue_state,
-            self._dialogue_catalog,
+            self._regional_dialogue_catalog_locked(),
         )
+        dialogue_view['accessible']=self._quest_contact_locked(dialogue_view.get('active',{}).get('npc_id',''))
+        dialogue_view['gossip_hidden']=bool(getattr(self,'_benilla_gossip_hidden',False))
         social_view = social_contract.view(
             self._social_state,
             active_people_ids,
@@ -8704,7 +12200,10 @@ class GameEngineRuntime:
             "promotion_budget": MAX_POPULATION_PROMOTIONS,
             "last_promotion_s": round(self._last_population_promotion_s, 3),
             "policy": "AMBIENT_PROXY_TO_REAL_NPC_POOL_WITH_PERSISTED_BOUNDARY",
+            "regional_population": self._world_population.view(),
         }
+        fauna_view = self._fauna_view_locked()
+        ecology_view = self._ecology_view_locked()
         snapshot_build_ms = (time.perf_counter() - snapshot_started) * 1000.0
         render_view = render_contract.build_render_view(
             self._render_profile,
@@ -8760,6 +12259,8 @@ class GameEngineRuntime:
                 "available": bool(
                     distance <= economy_contract.INTERACTION_RADIUS_M
                     and line_of_sight
+                    and self._combat_state.get('actors', {}).get(npc_id, {}).get('alive', True)
+                    and self._combat_state.get('actors', {}).get('player', {}).get('alive', True)
                 ),
                 "radius_m": economy_contract.INTERACTION_RADIUS_M,
             }
@@ -8783,7 +12284,9 @@ class GameEngineRuntime:
             entity_rows,
             terrain_view.get("cells", []),
             player_x=self._x[0],
+            player_y=self._y[0],
             player_z=self._z[0],
+            player_yaw=self._yaw[0],
             state=state,
             tick=self._tick,
             active_entities=self._entity_count,
@@ -8807,7 +12310,7 @@ class GameEngineRuntime:
                 "draw_calls": (
                     0
                     if self._presentation_mode == render_contract.DOS_2D
-                    else render_view["estimated_draw_calls"]
+                    else None
                 ),
                 # The scene is now native geometry first.  The authored path
                 # is reported separately, while the bounded primitive path is
@@ -8816,95 +12319,10 @@ class GameEngineRuntime:
                 "authored_asset_renderer": (
                     "QTQUICK3D_RUNTIME_LOADER_PLUS_PROCEDURAL_GEOMETRY"
                 ),
-                "asset_instances": {
-                    "authored_requested": sum(
-                        1
-                        for row in entity_rows
-                        if str(row.get("kind", "")) in {
-                            "PLAYER", "NPC", "ACTOR"
-                        }
-                        if isinstance(row.get("asset"), dict)
-                        and row["asset"].get("mode") in {
-                            "AUTHORED_SKINNED",
-                            "AUTHORED_NODE_ANIMATED",
-                        }
-                    ),
-                    "procedural_requested": sum(
-                        1
-                        for row in entity_rows
-                        if str(row.get("kind", "")) in {
-                            "PLAYER", "NPC", "ACTOR"
-                        }
-                        if isinstance(row.get("asset"), dict)
-                        and row["asset"].get("mode")
-                        == assets_contract.PROCEDURAL_CHARACTER_MODE
-                    ),
-                    "preview_fallback": sum(
-                        1
-                        for row in entity_rows
-                        if str(row.get("kind", "")) in {
-                            "PLAYER", "NPC", "ACTOR"
-                        }
-                        if isinstance(row.get("asset"), dict)
-                        and row["asset"].get("mode") not in {
-                            "AUTHORED_SKINNED",
-                            "AUTHORED_NODE_ANIMATED",
-                            assets_contract.PROCEDURAL_CHARACTER_MODE,
-                        }
-                    ),
-                    "budget": assets_contract.MAX_AUTHORED_INSTANCES,
-                },
-                "item_instances": {
-                    "ground": len(item_view["ground"]),
-                    "containers": len(item_view["containers"]),
-                    "inventory": len(item_view["inventory"]),
-                    "equipped": len(item_view["equipment"]),
-                    "budget": item_state.MAX_WORLD_INSTANCES,
-                },
-                "item_asset_instances": {
-                    "authored_requested": authored_item_rank,
-                    "procedural_requested": sum(
-                        1
-                        for view in item_render_views
-                        if isinstance(view.get("asset"), dict)
-                        and view["asset"].get("mode")
-                        == assets_contract.PROCEDURAL_ASSET_MODE
-                    ),
-                    "primitive_fallback": sum(
-                        1
-                        for view in item_render_views
-                        if isinstance(view.get("asset"), dict)
-                        and view["asset"].get("mode") not in {
-                            "AUTHORED_STATIC",
-                            assets_contract.PROCEDURAL_ASSET_MODE,
-                        }
-                    ),
-                    "budget": assets_contract.MAX_AUTHORED_ITEM_INSTANCES,
-                },
-                "world_asset_instances": {
-                    "native_requested": sum(
-                        1
-                        for row in entity_rows
-                        if str(row.get("kind", "")) not in {
-                            "PLAYER",
-                            "NPC",
-                            "ACTOR",
-                            "GROUND_ITEM",
-                            "CHEST",
-                        }
-                    ),
-                    "primitive_fallback": 0,
-                    "budget": assets_contract.PROCEDURAL_ASSET_MAX_FAMILIES,
-                },
-                "ambient_life": {
-                    "visible": sum(
-                        1
-                        for row in entity_rows
-                        if str(row.get("id", "")).startswith("ambient-")
-                    ),
-                    "budget": life_contract.MAX_PROXIES,
-                    "simulation": "RENDER_ONLY_DETERMINISTIC_SCHEDULES",
-                },
+                **self._render_instance_metadata_locked(
+                    entity_rows, item_render_views, authored_item_rank,
+                    {key: len(item_view[key]) for key in ("ground", "containers", "inventory", "equipment")},
+                ),
                 "update_hz": (
                     STRESS_RENDER_UPDATE_HZ
                     if self._stress
@@ -8918,12 +12336,14 @@ class GameEngineRuntime:
             sequence=self._network_seq,
             active_entities=self._entity_count,
             persistence_revision=self._persistence_revision,
+            persistence_mode=getattr(self._state_store, 'mode', 'MEMORY_ONLY'),
         )
         cinematic_view = cinematic.build_view(
             self._cinematic_preset,
             movement_mode=self._movement_mode,
             camera_distance=self._camera_distance,
         )
+        cinematic_view.update(self._opening_cinematic_view_locked())
         combat_view = combat_contract.view(self._combat_state)
         combat_view.update(
             {
@@ -8949,9 +12369,20 @@ class GameEngineRuntime:
             "mode": "LOCAL_PLAYGROUND",
             "stress": self._stress,
             "assets": self._asset_catalog,
+            "character_creation": character_creation.view(self._character_creation),
             "items": item_view,
             "life": ambient_life_view,
             "living_world": living_world_view,
+            "regional_population": self._world_population.view(),
+            "fauna": fauna_view,
+            "ecology": ecology_view,
+            "nature": self._nature_view_locked(),
+            "targeting": self._target_view_locked(),
+            "actions": self._action_view_locked(),
+            "firearms":self._firearms_view_locked(),
+            "combat_live": {"resource":self._resource,"resource_capacity":100,"cooldowns":dict(self._ability_cooldowns),
+                "profile":self._player_combat_profile_locked(),
+                "player":dict(self._combat_state.get("actors",{}).get("player",{}))},
             "simulation": {
                 "fixed_hz": FIXED_HZ,
                 "dt_ms": round(FIXED_DT * 1000.0, 4),
@@ -8970,6 +12401,10 @@ class GameEngineRuntime:
                 "allocation_policy": "BOUNDED_POOLS_NO_PER_TICK_GROWTH",
             },
             "player": {
+                "name": getattr(self, '_local_character_name', 'Gold Goblin'),
+                "client_controls": self._client_controls_view_locked(),
+                "world_map": self._instance_map_descriptor_locked(),
+                "ride_frame": self._ride_view_locked(),
                 "x": _round(self._x[0]),
                 "y": _round(self._y[0]),
                 "z": _round(self._z[0]),
@@ -8978,11 +12413,28 @@ class GameEngineRuntime:
                 "drift": _round(lateral, 2),
                 "boost": bool(self._input.get("boost")),
                 "grounded": self._grounded,
+                "jump_stage": self._jump_count,
+                "grapple": self._grapple_view_locked(),
+                "time_s": self._sim_time,
                 "sprinting": self._sprinting,
                 "movement_mode": self._movement_mode,
+                "vehicle": self._vehicle_kind,
+                "mobility": mobility_contract.build_view(
+                    x=self._x[0],
+                    z=self._z[0],
+                    time_s=self._sim_time,
+                    movement_mode=self._movement_mode,
+                    vehicle_kind=self._vehicle_kind,
+                    water_depth=self._water_depth_locked(self._x[0], self._z[0]),
+                    speed=speed,
+                ),
                 "cell_key": world_view["player_cell"]["key"],
                 "medium": terrain_view["player_surface"]["medium"],
                 "surface_height": terrain_view["player_surface"]["height_m"],
+                "biome": planet_contract.biome_at(self._x[0], self._z[0], WORLD_SEED),
+                "last_ability": self._last_ability,
+                "last_ability_time": self._last_ability_time,
+                "xp_visual": self._last_xp_visual,
             },
             "input": dict(self._input),
             "keybindings": input_contract.summary(self._keybindings),
@@ -9023,6 +12475,7 @@ class GameEngineRuntime:
             "factions": factions_contract.view(self._faction_state),
             "quests": quests_contract.view(self._quest_state, self._quest_catalog),
             "dialogue": dialogue_view,
+            "quest_dialog": self._quest_dialog_view_locked(),
             "social": social_view,
             "world_events": world_events_view,
             "content_packs": content_catalog.content_pack_summary(
@@ -9033,17 +12486,32 @@ class GameEngineRuntime:
                 "counts": dict(self._inventory),
                 "loot_items": list(self._loot_items[-12:]),
             },
+            "bank": self._stash_view_locked(),
+            "merchant": self._merchant_view_locked(),
+            "loot": self._loot_view_locked(),
             "crafting": {
-                "recipes": list(self._content.get("recipes", {}).keys()),
-                "gear_recipes": list(
-                    self._gear_tables.get("recipes", {}).keys()
-                )[: gear_contract.MAX_RECIPE_OUTPUTS * 2],
-                "workstations": gear_contract.world_stations(self._gear_tables),
+                "book": self._craft_book_view_locked(),
+                "ammunition_recipes": [dict(id=recipe['id'],name=ammo['name'],ammo_id=ammo['id'],
+                    inputs=dict(recipe['inputs']),quantity=recipe['output'][ammo['id']],
+                    can_craft=self._profession_known_locked(recipe.get('profession','SURVIVAL')) and
+                    all(int(self._inventory.get(k,0))>=v for k,v in recipe['inputs'].items()))
+                    for slug,ammo in firearms_contract.AMMO.items()
+                    for recipe in [self._gear_tables['recipes']['recipe.ammo_'+slug]]],
+                "recipes": [key for key in self._content.get("recipes", {})
+                            if self._profession_known_locked('SURVIVAL')],
+                "gear_recipes": [key for key,recipe in self._gear_tables.get("recipes", {}).items()
+                                 if self._profession_known_locked(recipe.get('profession','SURVIVAL'))
+                                ][: gear_contract.MAX_RECIPE_OUTPUTS * 2],
+                "workstations": [dict(station, y=self._terrain_height_locked(station['x'], station['z']))
+                                 for station in gear_contract.world_stations(self._gear_tables)],
                 "professions": copy.deepcopy(self._profession_state),
                 "last_result": dict(self._last_crafting),
             },
             "trade": trade_contract.view(self._last_trade),
-            "progression": progression.summary(self._progression),
+            "progression": dict(progression.summary(self._progression), talent_definitions=[
+                {'id':key,'name':str(row.get('name',key))}
+                for key,row in self._content.get('talents',{}).items()
+                if key in self._progression.get('talents',{}) and isinstance(row,dict)][:32]),
             "editor": editor_contract.summary(self._editor_document),
             "cinematic": cinematic_view,
             "events": list(reversed(self._events[-12:])),
@@ -9149,7 +12617,9 @@ class GameEngineRuntime:
                 "PERSISTED_WORLD_TRANSITION_AUDIT",
             ],
         }
+        if getattr(self,'_benilla_world',None) is not None:snapshot['player']['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
         self._remember_render_snapshot_locked(snapshot)
+        self._ui_snapshot_base=self._ui_status_from_snapshot(snapshot)
         return snapshot
 
     def snapshot(self) -> dict[str, Any]:
@@ -9171,8 +12641,24 @@ class GameEngineRuntime:
                 "definition_id",
                 "name",
                 "quantity",
+                "stack_limit",
+                "slot_index",
+                "kind",
+                "rarity",
+                "rarity_color",
                 "location",
                 "equipped_slot",
+                "equip_slot",
+                "scroll_enchant_id",
+                "scroll_description",
+                "equip_slots",
+                "firearm",
+                "magazine",
+                "wielding_reference",
+                "weapon_subtype",
+                "appearance_index",
+                "icon",
+                "condition",
             )
             if key in source
         }
@@ -9269,10 +12755,15 @@ class GameEngineRuntime:
             "gear",
             "physics",
             "economy",
+            "merchant",
+            "loot",
             "combat",
+            "combat_live",
+            "actions",
             "factions",
             "quests",
             "dialogue",
+            "quest_dialog",
             "social",
             "living_world",
             "world_events",
@@ -9373,6 +12864,18 @@ class GameEngineRuntime:
                         cls._compact_ui_item_row(row) for row in rows
                     ]
 
+        bank = snapshot.get("bank")
+        if isinstance(bank, dict):
+            ui["bank"] = {
+                key: bank.get(key)
+                for key in ("schema", "capacity", "revision", "accessible", "nearby", "focused", "container_id", "loot_count", "error")
+            }
+            ui["bank"]["items"] = [
+                cls._compact_ui_item_row(row)
+                for row in bank.get("items", [])[:mmo.MAX_STASH_SLOTS]
+                if isinstance(row, dict)
+            ]
+
         terrain = snapshot.get("terrain")
         if isinstance(terrain, dict):
             # Keep the cell/heightfield catalogue on the full stream, but the
@@ -9410,8 +12913,43 @@ class GameEngineRuntime:
         return ui
 
     def ui_snapshot_locked(self) -> dict[str, Any]:
-        """Return the bounded inspector delta from authoritative state."""
-        return self._ui_status_from_snapshot(self.snapshot_locked())
+        """Refresh dynamic inspector state without rebuilding catalogs or terrain."""
+        if not getattr(self,"_ui_snapshot_base",None):self.snapshot_locked()
+        ui=dict(self._ui_snapshot_base)
+        player=dict(ui.get("player",{}))
+        player['client_controls']=self._client_controls_view_locked()
+        player['world_map']=self._instance_map_descriptor_locked()
+        player['ride_frame']=self._ride_view_locked()
+        player.pop('benilla_world',None)
+        if getattr(self,'_benilla_world',None) is not None:player['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
+        player.update(x=self._x[0],y=self._y[0],z=self._z[0],yaw=self._yaw[0],
+            time_s=self._sim_time,movement_mode=self._movement_mode,vehicle=self._vehicle_kind,
+            grounded=self._grounded,jump_stage=self._jump_count,sprinting=self._sprinting,
+            speed=math.sqrt(self._vx[0]**2+self._vy[0]**2+self._vz[0]**2))
+        surface=self._player_surface_locked();player.update(medium=surface['medium'],surface_height=surface['height_m'],biome=surface['biome'])
+        ui['terrain_surface']={**ui.get('terrain_surface',{}),**surface}
+        ui.update(state="RUNNING" if self._running else "PAUSED",player=player)
+        # Contact-bound panels must close on ordinary movement too; the
+        # retained catalogue snapshot alone cannot decide current reach.
+        ui['loot'] = self._loot_view_locked()
+        ui['crafting'] = dict(ui.get('crafting', {}), book=self._craft_book_view_locked())
+        combat=combat_contract.view(self._combat_state)
+        combat.update(resource=self._resource,resource_capacity=100,cooldowns=dict(self._ability_cooldowns))
+        ui["combat"]=combat
+        ui['actions']=self._action_view_locked()
+        ui['combat_live']={'resource':self._resource,'resource_capacity':100,
+            'cooldowns':dict(self._ability_cooldowns),'profile':self._player_combat_profile_locked(),
+            'player':dict(self._combat_state.get('actors',{}).get('player',{}))}
+        npcs=dict(ui.get("npcs",{}))
+        rows=[{"id":self._npc_ids[i],"x":self._x[i],"z":self._z[i],"alive":self._alive[i],
+               "archetype":self._npc_archetype[i],"state":"DEAD" if not self._combat_state.get('actors',{}).get(self._npc_ids[i],{}).get('alive',True) else self._npc_state[i]}
+              for i in self._npc_indices if self._alive[i]]
+        target=npc_contract.nearest_interaction_target(rows,self._x[0],self._z[0])
+        regional=self._regional_interaction_target_locked()
+        if regional and (not target or regional['distance_m']<target['distance_m']):target=regional
+        npcs["interaction"]=npc_contract.build_interaction_view(target,self._npc_last_interaction)
+        ui["npcs"]=npcs
+        return ui
 
     def ui_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -9435,7 +12973,19 @@ def status_payload() -> dict[str, Any]:
     return _RUNTIME.snapshot()
 
 
+def character_create(request: Any) -> dict[str, Any]:
+    return _RUNTIME.character_create(request)
+
+
 def render_status_payload() -> dict[str, Any]:
+    return _RUNTIME.render_snapshot()
+
+
+def presentation_payload() -> dict[str, Any]:
+    """Nonblocking consumer of the fixed 60 Hz presentation producer."""
+    frame = getattr(_RUNTIME, '_published_frame', None)
+    if frame is not None and _RUNTIME._running:
+        return frame
     return _RUNTIME.render_snapshot()
 
 
@@ -9447,8 +12997,24 @@ def start() -> dict[str, Any]:
     return _RUNTIME.start()
 
 
+def cycle_target(reverse: bool = False) -> dict[str, Any]:
+    return _RUNTIME.cycle_target(reverse)
+
+
+def clear_target() -> dict[str, Any]:
+    return _RUNTIME.clear_target()
+
+
+def start_render() -> dict[str, Any]:
+    return _RUNTIME.start_render()
+
+
 def pause() -> dict[str, Any]:
     return _RUNTIME.pause()
+
+
+def pause_render() -> dict[str, Any]:
+    return _RUNTIME.pause_render()
 
 
 def reset() -> dict[str, Any]:
@@ -9463,8 +13029,24 @@ def set_movement_mode(mode: str) -> dict[str, Any]:
     return _RUNTIME.set_movement_mode(mode)
 
 
+def explore_region(region_id: str) -> dict[str, Any]:
+    return _RUNTIME.explore_region(region_id)
+
+
+def mobility_action(action: str) -> dict[str, Any]:
+    return _RUNTIME.mobility_action(action)
+
+
+def mobility_water_clock() -> dict[str, Any]:
+    return _RUNTIME.mobility_water_clock()
+
+
 def activate_ability(ability_id: str = "ability.surge") -> dict[str, Any]:
     return _RUNTIME.activate_ability(ability_id)
+
+
+def reload_firearms() -> dict[str, Any]:
+    return _RUNTIME.reload_firearms()
 
 
 def attack(target_id: str = "", action_id: str = "basic_attack") -> dict[str, Any]:
@@ -9524,12 +13106,38 @@ def loot_container(instance_id: str = "") -> dict[str, Any]:
     return _RUNTIME.loot_container(instance_id)
 
 
-def equip_item(instance_id: str = "") -> dict[str, Any]:
-    return _RUNTIME.equip_item(instance_id)
+def equip_item(instance_id: str = "", slot: str = "") -> dict[str, Any]:
+    return _RUNTIME.equip_item(instance_id,slot)
+
+
+def unequip_item(instance_id: str) -> dict[str, Any]:
+    return _RUNTIME.unequip_item(instance_id)
+
+
+def move_inventory_slot(instance_id: str, slot_index: int) -> dict[str, Any]:
+    return _RUNTIME.move_inventory_slot(instance_id, slot_index)
+
+def move_equipment_to_inventory(instance_id: str, slot_index: int) -> dict[str, Any]:
+    return _RUNTIME.move_equipment_to_inventory(instance_id, slot_index)
+
+def transfer_inventory_stack(instance_id: str, slot_index: int, count: int) -> dict[str, Any]:
+    return _RUNTIME.transfer_inventory_stack(instance_id, slot_index, count)
 
 
 def drop_item(instance_id: str = "") -> dict[str, Any]:
     return _RUNTIME.drop_item(instance_id)
+
+
+def deposit_to_stash(instance_id: str, slot_index: int = -1) -> dict[str, Any]:
+    return _RUNTIME.deposit_to_stash(instance_id, slot_index)
+
+
+def withdraw_from_stash(instance_id: str, slot_index: int = -1) -> dict[str, Any]:
+    return _RUNTIME.withdraw_from_stash(instance_id, slot_index)
+
+
+def move_stash_slot(instance_id: str, slot_index: int) -> dict[str, Any]:
+    return _RUNTIME.move_stash_slot(instance_id, slot_index)
 
 
 def interact_item() -> dict[str, Any]:
@@ -9652,6 +13260,14 @@ def set_cinematic_preset(preset: str) -> dict[str, Any]:
 
 def set_input(raw: str) -> dict[str, Any]:
     return _RUNTIME.set_input(raw)
+
+
+def client_control(raw: str) -> dict[str, Any]:
+    return _RUNTIME.client_control(raw)
+
+
+def client_controls_batch(raw: str) -> dict[str, Any]:
+    return _RUNTIME.client_controls_batch(raw)
 
 
 def set_input_render(raw: str) -> dict[str, Any]:

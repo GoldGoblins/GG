@@ -401,10 +401,16 @@ def catalog_summary(vendors: Any) -> dict[str, Any]:
     }
 
 
+def _copper_fields(row: dict[str, Any]) -> dict[str, int]:
+    copper = max(0, min(9999, _safe_int(row.get('copper'))))
+    return {'copper': copper} if copper else {}
+
+
 def _normalize_wallet(raw: Any) -> dict[str, int]:
     row = raw if isinstance(raw, dict) else {}
     return {
         "gold": _bounded_currency(row.get("gold"), STARTER_PLAYER_GOLD),
+        **_copper_fields(row),
         "earned": _bounded_currency(row.get("earned")),
         "spent": _bounded_currency(row.get("spent")),
         "revision": max(0, _safe_int(row.get("revision"))),
@@ -422,6 +428,7 @@ def _normalize_vendor_account(
             row.get("gold"),
             _bounded_currency(vendor_row.get("starting_gold"), STARTER_VENDOR_GOLD),
         ),
+        **_copper_fields(row),
         "transactions": max(0, _safe_int(row.get("transactions"))),
         "revision": max(0, _safe_int(row.get("revision"))),
         "market": _normalize_market(row.get("market")),
@@ -464,6 +471,7 @@ def new_state(vendors: dict[str, dict[str, Any]] | None = None) -> dict[str, Any
         "vendors": accounts,
         "last": {},
         "history": [],
+        "buybacks": {},
     }
 
 
@@ -549,6 +557,17 @@ def restore_state(raw: Any, vendors: dict[str, dict[str, Any]] | None = None) ->
     if not isinstance(raw, dict):
         return base
     base["wallet"] = _normalize_wallet(raw.get("wallet"))
+    buybacks=raw.get("buybacks")
+    if isinstance(buybacks,dict):
+        for vendor_id,rows in list(buybacks.items())[:MAX_VENDORS]:
+            if vendor_id not in base['vendors'] or not isinstance(rows,list):continue
+            kept=[];seen=set()
+            for row in rows[-12:]:
+                if not isinstance(row,dict):continue
+                instance=_text(row.get('instance_id'),limit=64);price=_bounded_currency(row.get('price'))
+                if not instance or instance in seen or price<=0:continue
+                seen.add(instance);kept.append({'instance_id':instance,'price':price})
+            base['buybacks'][vendor_id]=kept
     source_accounts = raw.get("vendors")
     if isinstance(source_accounts, dict):
         for vendor_id, account in list(source_accounts.items())[:MAX_VENDORS]:

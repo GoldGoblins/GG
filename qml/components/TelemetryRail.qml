@@ -8,6 +8,10 @@ Item {
     property string engineTarget: "GROK_TUI"
     property string grokWalletJson: "{}"
     property string gptWalletJson: "{}"
+    property string liveVisionStatusJson: '{"state":"off"}'
+    readonly property var eyes: {
+        try { return JSON.parse(root.liveVisionStatusJson) } catch (err) { return {state: "off"} }
+    }
     property string bridgeState: "CONNECTED"
     property bool compactMode: true
     property var snippetModel: null
@@ -146,6 +150,25 @@ Item {
                     spacing: 2
                     visible: root.engineTarget === "GROK_TUI" || root.engineTarget === "GPT_TUI"
                     objectName: "grokWallet"
+
+                    Text {
+                        width: parent.width
+                        visible: root.eyes.state !== "off"
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 11
+                        color: root.eyes.state === "live" && root.eyes.frame_age_ms <= 2000 ? "#9ed5a4" : "#e4c06a"
+                        text: {
+                            if (root.eyes.state === "live") {
+                                var delivered = root.eyes.last_delivered_age_ms
+                                return "ÖGON · " + (root.eyes.received_fps || 0) + " fps\n"
+                                    + (delivered === null || delivered === undefined
+                                       ? "Ingen bild hämtad av AI ännu"
+                                       : "Bild hämtad " + Math.round(delivered / 1000) + " s sedan")
+                                    + "\nRAM " + ((root.eyes.buffer_bytes || 0) / 1048576).toFixed(1) + " MiB"
+                            }
+                            return "ÖGON · " + (root.eyes.reason || "Väntar på skärmdelning")
+                        }
+                    }
 
                     Text {
                         width: parent.width

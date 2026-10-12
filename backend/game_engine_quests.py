@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 from typing import Any
+from backend import game_engine_world as world_scale
 
 
 SCHEMA = "gg.game-engine.quests.v1"
@@ -93,6 +94,71 @@ def catalog() -> dict[str, dict[str, Any]]:
                 "faction": {"SHOREWARDENS": 15, "WAYFARERS": 3},
             },
         },
+        "quest.windmill-watch": {
+            "id": "quest.windmill-watch",
+            "name": "The West Wind",
+            "description": "Follow the ridge path to the old windmill and read the coast from above.",
+            "giver_id": "npc-guardian-01",
+            "objective": {
+                "kind": "VISIT",
+                "target_id": "landmark.west-windmill",
+                "location": {"x": -11.0 * world_scale.ISLAND_LAYOUT_SCALE, "z": -10.0 * world_scale.ISLAND_LAYOUT_SCALE},
+                "radius_m": 3.0,
+                "required_mode": "GROUND",
+                "required": 1,
+                "label": "Reach the west windmill overlook",
+            },
+            "rewards": {
+                "xp": 80,
+                "gold": 18,
+                "items": ["item.field_ration"],
+                "faction": {"WAYFARERS": 8},
+            },
+        },
+        "quest.waterwheel-current": {
+            "id": "quest.waterwheel-current",
+            "name": "Where the Current Turns",
+            "description": "Trace the south trail to the cove waterwheel and see where fresh water reaches the sea.",
+            "giver_id": "npc-wanderer-01",
+            "objective": {
+                "kind": "VISIT",
+                "target_id": "landmark.cove-waterwheel",
+                "location": {"x": 9.0 * world_scale.ISLAND_LAYOUT_SCALE, "z": -13.0 * world_scale.ISLAND_LAYOUT_SCALE},
+                "radius_m": 3.0,
+                "required_mode": "GROUND",
+                "required": 1,
+                "label": "Reach the cove waterwheel",
+            },
+            "rewards": {
+                "xp": 95,
+                "gold": 22,
+                "items": ["item.moon_shard"],
+                "faction": {"WAYFARERS": 10, "SHOREWARDENS": 4},
+            },
+            "unlocks": ["quest.tide-beacon"],
+        },
+        "quest.tide-beacon": {
+            "id": "quest.tide-beacon",
+            "name": "The Tide Beacon",
+            "description": "Continue along the south coast to the beacon above the tide pools.",
+            "giver_id": "npc-wanderer-01",
+            "prerequisites": ["quest.waterwheel-current"],
+            "objective": {
+                "kind": "VISIT",
+                "target_id": "landmark.south-tide-beacon",
+                "location": {"x": 4.0 * world_scale.ISLAND_LAYOUT_SCALE, "z": -22.0 * world_scale.ISLAND_LAYOUT_SCALE},
+                "radius_m": 3.0,
+                "required_mode": "GROUND",
+                "required": 1,
+                "label": "Reach the tide beacon on the south point",
+            },
+            "rewards": {
+                "xp": 140,
+                "gold": 35,
+                "items": ["item.field_ration", "item.moon_shard"],
+                "faction": {"WAYFARERS": 12, "FREEBOOTERS": 5},
+            },
+        },
     }
 
 
@@ -100,18 +166,30 @@ def _quest_definition(raw: Any, quest_id: str) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     objective = raw.get("objective", {}) if isinstance(raw.get("objective"), dict) else {}
+    location = objective.get("location", {}) if isinstance(objective.get("location"), dict) else {}
+    has_location = "x" in location and "z" in location
+    required_mode = _text(objective.get("required_mode"), limit=16).upper()
+    if required_mode not in {"GROUND", "SWIM", "FLY"}:
+        required_mode = ""
     rewards = raw.get("rewards", {}) if isinstance(raw.get("rewards"), dict) else {}
     return {
         "id": _text(raw.get("id"), quest_id, 64),
         "name": _text(raw.get("name"), quest_id, 96),
         "description": _text(raw.get("description"), limit=160),
         "giver_id": _text(raw.get("giver_id"), limit=64),
+        "shareable": raw.get("shareable", True) is True,
         "objective": {
             "kind": _text(objective.get("kind"), "DEFEAT", 32).upper(),
             "target_id": _text(objective.get("target_id"), limit=96),
             "definition_id": _text(objective.get("definition_id"), limit=96),
             "choice_id": _text(objective.get("choice_id"), limit=48),
             "rarity_at_least": _text(objective.get("rarity_at_least"), "COMMON", 16).upper(),
+            "location": {
+                "x": max(-100000.0, min(100000.0, _safe_float(location.get("x")))),
+                "z": max(-100000.0, min(100000.0, _safe_float(location.get("z")))),
+            } if has_location else {},
+            "radius_m": max(1.0, min(64.0, _safe_float(objective.get("radius_m"), 3.0))),
+            "required_mode": required_mode,
             "required": max(1, min(1_000_000, _safe_int(objective.get("required"), 1))),
             "label": _text(objective.get("label"), "Complete objective", 128),
         },
@@ -276,6 +354,14 @@ def _event_matches(objective: dict[str, Any], event: dict[str, Any]) -> bool:
             not objective.get("definition_id")
             or str(objective.get("definition_id")) == str(event.get("definition_id"))
         )
+    if kind == "VISIT":
+        if event_kind != "VISIT" or (
+            objective.get("target_id")
+            and str(objective.get("target_id")) != str(event.get("target_id"))
+        ):
+            return False
+        required_mode = str(objective.get("required_mode") or "").upper()
+        return not required_mode or required_mode == str(event.get("movement_mode") or "").upper()
     return False
 
 

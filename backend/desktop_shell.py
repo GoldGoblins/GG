@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QWindow
 
 XPROP = Path("/usr/bin/xprop")
 WMCTRL = Path("/usr/bin/wmctrl")
@@ -15,10 +15,32 @@ def apply_desktop_shell_window(window: object, enabled: bool) -> None:
     if window is None:
         return
     on = bool(enabled)
-    flags = getattr(window, "setFlag", None)
-    if callable(flags):
-        flags(Qt.WindowType.FramelessWindowHint, on)
-        flags(Qt.WindowType.WindowStaysOnBottomHint, on)
+    changed = False
+    state_key = "_ggDesktopShellApplied"
+    property_reader = getattr(window, "property", None)
+    property_writer = getattr(window, "setProperty", None)
+    previous_state = (
+        property_reader(state_key) if callable(property_reader) else None
+    )
+    set_flag = getattr(window, "setFlag", None)
+    current_flags = getattr(window, "flags", None)
+    if callable(set_flag):
+        if callable(current_flags):
+            try:
+                current = current_flags()
+                for flag in (
+                    Qt.WindowType.FramelessWindowHint,
+                    Qt.WindowType.WindowStaysOnBottomHint,
+                ):
+                    if bool(current & flag) != on:
+                        set_flag(flag, on)
+                        changed = True
+            except RuntimeError:
+                return
+        else:
+            set_flag(Qt.WindowType.FramelessWindowHint, on)
+            set_flag(Qt.WindowType.WindowStaysOnBottomHint, on)
+            changed = True
     screen = None
     getter = getattr(window, "screen", None)
     if callable(getter):
@@ -31,16 +53,39 @@ def apply_desktop_shell_window(window: object, enabled: bool) -> None:
     if on and screen is not None:
         geo = screen.availableGeometry()
         setter = getattr(window, "setGeometry", None)
-        if callable(setter):
+        geometry = getattr(window, "geometry", None)
+        if callable(setter) and (not callable(geometry) or geometry() != geo):
             setter(geo)
+            changed = True
+        is_visible = getattr(window, "isVisible", None)
         show = getattr(window, "show", None)
-        if callable(show):
+        if callable(show) and (not callable(is_visible) or not is_visible()):
             show()
+            changed = True
     elif not on:
         maximize = getattr(window, "showMaximized", None)
-        if callable(maximize):
+        visibility = getattr(window, "visibility", None)
+        try:
+            is_maximized = (
+                callable(visibility)
+                and visibility() == QWindow.Visibility.Maximized
+            )
+        except RuntimeError:
+            return
+        if callable(maximize) and not is_maximized:
             maximize()
-    _apply_x11_stack(window, on)
+            changed = True
+    stack_state_changed = (
+        (previous_state is None and on)
+        or (
+            previous_state is not None
+            and bool(previous_state) != on
+        )
+    )
+    if changed or stack_state_changed:
+        _apply_x11_stack(window, on)
+        if callable(property_writer):
+            property_writer(state_key, on)
 
 
 def _window_xid(window: object) -> int:

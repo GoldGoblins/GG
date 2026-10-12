@@ -5,6 +5,7 @@ import QtQuick.Layouts
 Item {
     id: root
     objectName: "workspaceOsintPane"
+    signal researchRequested(string section)
 
     property var surfaceHost: null
     property color frameBorder: "#4a4a4a"
@@ -24,6 +25,12 @@ Item {
     property string page: "OVERVIEW"
     property bool sidebarCollapsed: false
     property bool fetchBusy: false
+    property string streamMode: "NEWS"
+    property bool nearbyEnabled: false
+    property var nearbyPayload: ({status: "PAUSED", rows: [], sources: []})
+    readonly property bool nearbyActive: root.nearbyEnabled && root.visible && overviewGlobe.visible && overviewGlobe.mapReady
+        && ((root.navMode && overviewGlobe.savedRoute.length > 0)
+            || (overviewGlobe.savedView && Number(overviewGlobe.savedView.zoom) >= 15))
     property var payload: ({})
     property var selectedEvent: null
     property bool navMode: false
@@ -32,6 +39,7 @@ Item {
     property string navMeta: ""
     property real lastViewportQueryAt: 0
     property string lastViewportKey: ""
+    property string evidenceNotice: ""
 
     readonly property var nav: [
         "OVERVIEW",
@@ -54,7 +62,8 @@ Item {
             var parsed = JSON.parse(String(raw))
             root.statusJson = String(raw)
             root.payload = parsed
-            root.fetchBusy = false
+            if (parsed.fetching !== undefined)
+                root.fetchBusy = !!parsed.fetching
             if (root.selectedEvent && root.selectedEvent.id) {
                 var rebound = root.findById(String(root.selectedEvent.id))
                 if (rebound)
@@ -171,7 +180,7 @@ Item {
         if (!s)
             return "—"
         if (s.indexOf("T") >= 0)
-            return s.replace("T", " ").replace("Z", "").slice(0, 19)
+            return s.replace("T", " ").replace("Z", "").slice(0, 16) + (s.endsWith("Z") ? " UTC" : "")
         return s.slice(0, 24)
     }
 
@@ -243,6 +252,7 @@ Item {
                     summary: String(item.summary || item.category || item.zone || item.city || ""),
                     place: String(item.place || item.city || ""),
                     source: String(item.source || kind),
+                    location_precision: String(item.location_precision || ""),
                     url: String(item.url || ""),
                     photo: String(item.photo || item.media_url || item.feed_url || ""),
                     city: String(item.city || ""),
@@ -264,10 +274,12 @@ Item {
     }
 
     function streamRows() {
-        var values = root.payload.stream
-        if (values && values.length)
-            return values
-        return root.rows("news").slice(0, 7)
+        if (root.streamMode === "SIGNALS")
+            return root.payload.stream || []
+        var values = root.payload.news_stream || root.rows("news")
+        if (root.streamMode === "SVENSKA")
+            return values.filter(function(row) { return row.language === "sv" })
+        return values
     }
 
     function mergeKeep(base, next) {
@@ -297,7 +309,7 @@ Item {
             "title": title,
             "callsign": String(item.callsign || ""),
             "country": String(item.country || ""),
-            "summary": String(item.summary || item.category || item.zone || ""),
+            "summary": String(item.summary || item.description || item.category || item.zone || ""),
             "source": String(item.source || k).toUpperCase(),
             "time": String(item.time || item.published || item.last_contact || ""),
             "url": String(item.url || ""),
@@ -421,6 +433,10 @@ Item {
         if (!item)
             return []
         var lines = []
+        if (item.location_precision === "PLACE_NAME_ESTIMATE")
+            lines.push("ESTIMATED PLACE FROM HEADLINE · NOT EXACT EVENT COORDINATES")
+        if (item.kind === "conflicts")
+            lines.push("REFERENCE LOCATION · NOT A VERIFIED LIVE INCIDENT")
         if (item.kind === "aircraft") {
             lines.push((item.on_ground ? "GROUND" : "AIRBORNE")
                 + (item.country ? " · " + item.country : ""))
@@ -483,7 +499,8 @@ Item {
             "route": route,
             "selected": root.selectedEvent,
             "view": overviewGlobe.savedView,
-            "sidebarCollapsed": root.sidebarCollapsed
+            "sidebarCollapsed": root.sidebarCollapsed,
+            "streamMode": root.streamMode
         })
     }
 
@@ -503,7 +520,7 @@ Item {
         }
         if (!parsed || typeof parsed !== "object")
             return
-        if (parsed.page)
+        if (root.nav.indexOf(String(parsed.page || "")) >= 0)
             root.page = String(parsed.page)
         if (parsed.navPlaces && parsed.navPlaces.length !== undefined)
             root.navPlaces = parsed.navPlaces
@@ -513,6 +530,8 @@ Item {
             root.navMeta = String(parsed.navMeta || "")
         if (parsed.sidebarCollapsed !== undefined)
             root.sidebarCollapsed = Boolean(parsed.sidebarCollapsed)
+        if (["NEWS", "SVENSKA", "SIGNALS"].indexOf(parsed.streamMode) >= 0)
+            root.streamMode = parsed.streamMode
         if (parsed.view)
             overviewGlobe.savedView = parsed.view
         if (parsed.route) {
@@ -582,8 +601,14 @@ Item {
         }
         var places = root.navPlaces
         var gps = null
-        if (String(places[0]).toLowerCase() === "gps" && overviewGlobe.gpsFix)
+        if (String(places[0]).toLowerCase() === "gps") {
+            if (!overviewGlobe.positionState.fresh || !overviewGlobe.gpsFix) {
+                root.navMeta = "Aktivera POSITION och invänta en aktuell position."
+                overviewGlobe.locateGps()
+                return
+            }
             gps = overviewGlobe.gpsFix
+        }
         root.navMeta = "ROUTING…"
         var raw = "{}"
         if (root.surfaceHost && root.surfaceHost.osintPlanRoute)
@@ -681,6 +706,79 @@ Item {
             root.surfaceHost.osintCopy(String(value || ""))
     }
 
+    function saveEvidence() {
+        if (!root.selectedEvent || !root.surfaceHost || !root.surfaceHost.osintRecordEvidence)
+            return
+        try {
+            var result = JSON.parse(root.surfaceHost.osintRecordEvidence(
+                String(root.selectedEvent.kind || ""), String(root.selectedEvent.id || "")))
+            if (result.status === "EVIDENCE_RECORDED") {
+                root.evidenceNotice = "Saved in Research · source report, awaiting corroboration"
+                root.researchRequested("EVIDENCE")
+            } else {
+                root.evidenceNotice = result.status === "OBSERVATION_NOT_FOUND"
+                    ? "Observation no longer in cache. Refresh and select it again."
+                    : "Could not save observation. Try again."
+            }
+        } catch (err) {
+            root.evidenceNotice = "Could not save observation. Try again."
+        }
+    }
+
+    function sourceHealthText(source) {
+        var age = source.age_seconds
+        var ageText = age === undefined || age === null ? "age unknown"
+            : (Number(age) < 60 ? Math.round(Number(age)) + "s old"
+                : Math.floor(Number(age) / 60) + "m old")
+        return String(source.status || "IDLE") + " · " + String(source.count || 0)
+            + " rows · " + (source.status === "REFERENCE" ? "reference layer" : ageText)
+    }
+
+    onNearbyActiveChanged: {
+        if (root.surfaceHost && root.surfaceHost.osintSetNearbyActive)
+            root.surfaceHost.osintSetNearbyActive(root.nearbyActive)
+        if (!root.nearbyActive)
+            root.nearbyPayload = {status: "PAUSED", rows: [], sources: []}
+    }
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.nearbyActive
+        onTriggered: {
+            if (root.surfaceHost && root.surfaceHost.osintNearbySnapshot) {
+                try { root.nearbyPayload = JSON.parse(root.surfaceHost.osintNearbySnapshot()) } catch (err) { }
+            }
+        }
+    }
+    function positionLabel() {
+        var state = overviewGlobe.positionState || {}
+        var fix = state.fix
+        return String(state.status || "POSITION OFF")
+            + (fix ? " · ±" + Math.round(Number(fix.accuracy_m)) + " m" : "")
+            + (fix && !state.fresh ? " · SENASTE POSITION" : "")
+    }
+    function navigationLabel() {
+        var progress = overviewGlobe.positionState.progress
+        if (!progress)
+            return root.positionLabel()
+        if (progress.approximate)
+            return "Positionen är för ungefärlig för svänganvisningar"
+        if (progress.off_route)
+            return "Utanför rutten · välj ROUTE för att planera om"
+        if (progress.arrived)
+            return "Framme vid målet"
+        var next = progress.next_step
+        var modifiers = {left: "vänster", right: "höger", "slight left": "svagt vänster", "slight right": "svagt höger", "sharp left": "skarpt vänster", "sharp right": "skarpt höger", straight: "rakt fram", uturn: "vänd"}
+        var instruction = next ? (next.type === "arrive" ? "Framme"
+            : next.type === "roundabout" || next.type === "rotary" ? "Rondell · avfart " + String(next.exit || "—")
+            : next.modifier === "uturn" ? "Vänd"
+            : next.type === "turn" || next.type === "end of road" ? "Sväng " + String(modifiers[next.modifier] || next.modifier || "")
+            : "Fortsätt " + String(modifiers[next.modifier] || next.modifier || "rakt fram")) : "Följ rutten"
+        return instruction + (next ? " om " + Math.round(progress.next_step_m) + " m" + (next.name ? " · " + next.name : "") : "")
+            + "\n" + (Number(progress.remaining_m) / 1000).toFixed(1) + " km kvar · ca " + Math.round(Number(progress.eta_s) / 60) + " min"
+    }
+    onStreamModeChanged: root.saveUi()
+
     onPageChanged: {
         if (root.visible)
             root.refresh()
@@ -697,6 +795,11 @@ Item {
     Connections {
         target: root.surfaceHost
         ignoreUnknownSignals: true
+        function onOsintNearbyUpdated(raw) {
+            if (!root.nearbyActive)
+                return
+            try { root.nearbyPayload = JSON.parse(String(raw)) } catch (err) { }
+        }
         function onOsintUpdated(raw) {
             root.applyRaw(raw)
         }
@@ -722,10 +825,7 @@ Item {
             if (overviewGlobe.routeMeta)
                 root.navMeta = overviewGlobe.routeMeta
         }
-        function onGpsFixChanged() {
-            if (overviewGlobe.gpsFix)
-                root.navMeta = overviewGlobe.routeMeta
-        }
+
         function onMapReadyChanged() {
             if (!overviewGlobe.mapReady)
                 return
@@ -747,10 +847,15 @@ Item {
         root.restoreUi()
         root.refresh()
     }
-    Component.onDestruction: root.saveUi()
+    Component.onDestruction: {
+        if (root.surfaceHost && root.surfaceHost.osintSetNearbyActive)
+            root.surfaceHost.osintSetNearbyActive(false)
+        root.saveUi()
+    }
 
     OsintGlobe {
         id: overviewGlobe
+        visible: true
         anchors.fill: parent
         z: 0
         points: root.mapPoints()
@@ -769,21 +874,30 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: root.sidebarCollapsed ? 44 : 168
-        color: "transparent"
+        color: "#e605070c"
         border.width: 0
 
         Behavior on width {
             NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
         }
 
-        Column {
-            id: navColumn
+        Flickable {
+            id: navScroll
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.bottom: sidebarFooter.top
             anchors.margins: 10
-            spacing: 3
+            clip: true
+            contentWidth: width
+            contentHeight: navColumn.height
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: GgScrollBar { }
+
+            Column {
+                id: navColumn
+                width: navScroll.width
+                spacing: 3
 
             Item {
                 width: navColumn.width
@@ -856,6 +970,7 @@ Item {
                         onClicked: root.page = modelData
                     }
                 }
+            }
             }
         }
 
@@ -961,6 +1076,48 @@ Item {
             }
         }
 
+        Rectangle {
+            id: nearbyCard
+            visible: root.nearbyEnabled && (root.page === "OVERVIEW" || root.page === "MAP")
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.topMargin: 76
+            width: Math.min(270, parent.width - intelCard.width - 12)
+            height: Math.min(230, parent.height * 0.38)
+            radius: 5
+            color: "#ed05070c"
+            border.color: root.frameBorder
+            Column {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 5
+                Text { text: "NEARBY · Wi-Fi / Bluetooth"; color: root.ledgerGold; font.family: "monospace"; font.pixelSize: 10 }
+                Text {
+                    width: parent.width
+                    text: !root.nearbyActive ? "Pausad · aktiveras vid NAV-rutt eller zoom ≥15"
+                        : root.nearbyPayload.status === "UNAVAILABLE" ? "Sensorkällor är inte tillgängliga"
+                        : "Systemets observationer · cache med okänd ålder"
+                    color: root.muted; font.pixelSize: 10; wrapMode: Text.WordWrap
+                }
+                ListView {
+                    objectName: "osintNearbyList"
+                    width: parent.width
+                    height: Math.max(0, nearbyCard.height - 78)
+                    clip: true
+                    model: root.nearbyPayload.rows || []
+                    delegate: Text {
+                        required property var modelData
+                        width: ListView.view.width
+                        height: 34
+                        textFormat: Text.PlainText
+                        text: String(modelData.name) + "\n" + String(modelData.kind).toUpperCase()
+                            + " · " + modelData.signal + " " + modelData.signal_unit + (modelData.connected ? " · ANSLUTEN" : "")
+                        color: root.text; font.family: "monospace"; font.pixelSize: 10
+                        elide: Text.ElideRight
+                    }
+                }
+            }
+        }
         Item {
             id: intelCard
             visible: root.page === "OVERVIEW" || root.page === "MAP"
@@ -971,6 +1128,12 @@ Item {
             anchors.bottomMargin: detailCard.visible ? 8 : 0
             width: Math.min(300, parent.width * 0.28)
 
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -4
+                color: "#ed05070c"
+                radius: 5
+            }
             Item {
                 id: intelHeader
                 anchors.left: parent.left
@@ -1008,11 +1171,50 @@ Item {
                 }
             }
 
+            Row {
+                id: streamFilters
+                anchors.top: intelHeader.bottom
+                anchors.topMargin: 4
+                spacing: 6
+                Repeater {
+                    model: ["NEWS", "SVENSKA", "SIGNALS"]
+                    delegate: Rectangle {
+                        required property string modelData
+                        width: filterLabel.implicitWidth + 16
+                        height: 24
+                        radius: 3
+                        color: root.streamMode === modelData ? root.selectedPanel : "#181818cc"
+                        border.color: root.streamMode === modelData ? root.ledgerGold : root.frameBorder
+                        Text {
+                            id: filterLabel
+                            anchors.centerIn: parent
+                            text: modelData
+                            color: root.streamMode === modelData ? root.ledgerGold : root.muted
+                            font.family: "monospace"
+                            font.pixelSize: 10
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.streamMode = modelData
+                        }
+                    }
+                }
+            }
+            Text {
+                anchors.top: streamFilters.bottom
+                anchors.topMargin: 16
+                visible: overviewNewsList.count === 0
+                text: root.fetchBusy ? "Hämtar nyheter…" : "Inga artiklar i detta flöde"
+                color: root.muted
+                font.pixelSize: 11
+            }
             ListView {
                 id: overviewNewsList
+                objectName: "overviewNewsList"
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: intelHeader.bottom
+                anchors.top: streamFilters.bottom
                 anchors.topMargin: 4
                 anchors.bottom: parent.bottom
                 clip: true
@@ -1021,7 +1223,7 @@ Item {
                 delegate: Item {
                     required property var modelData
                     width: overviewNewsList.width
-                    height: 40
+                    height: 68
                     Rectangle {
                         anchors.fill: parent
                         radius: 3
@@ -1036,6 +1238,10 @@ Item {
                         anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         anchors.topMargin: 5
+                        height: 40
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
                         text: String(modelData.title || "UNTITLED")
                         color: root.selectedEvent && root.selectedEvent.id === modelData.id
                             ? root.ink : root.text
@@ -1051,9 +1257,14 @@ Item {
                         anchors.bottom: parent.bottom
                         anchors.leftMargin: 8
                         anchors.bottomMargin: 4
-                        text: String(modelData.kind || "news").toUpperCase()
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                        text: String(modelData.source || modelData.kind || "news").toUpperCase()
                             + " · "
                             + root.shortTime(modelData.time || modelData.published)
+                            + (modelData.feed_stale ? " · CACHE" : "")
                         color: Number(modelData.risk_score || 0) >= 7 ? root.signalRed : root.muted
                         font.family: "monospace"
                         font.pixelSize: 9
@@ -1079,12 +1290,12 @@ Item {
             anchors.bottom: parent.bottom
             width: Math.min(300, parent.width * 0.28)
             height: root.navMode
-                ? Math.min(360, parent.height * 0.58)
+                ? Math.min(470, parent.height * 0.68)
                 : Math.min(Math.max(168, detailColumn.height + 28), parent.height * 0.48)
             Rectangle {
                 anchors.fill: parent
                 color: root.navMode ? "#1a1a1a" : "#181818"
-                opacity: 0
+                opacity: 0.96
             }
             Item {
                 id: detailPane
@@ -1103,6 +1314,19 @@ Item {
                         wrapMode: Text.WordWrap
                         font.family: "monospace"
                         font.pixelSize: 9
+                    }
+                    Text {
+                        width: parent.width
+                        text: root.navigationLabel()
+                        color: overviewGlobe.positionState.fresh ? root.signalBlue : root.muted
+                        font.pixelSize: 11
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                    }
+                    GgButton {
+                        objectName: "osintFollowPositionButton"
+                        text: overviewGlobe.positionState.following ? "STOP FOLLOWING" : "FOLLOW POSITION"
+                        onClicked: overviewGlobe.setFollowing(!overviewGlobe.positionState.following)
                     }
                     ListView {
                         id: navPlaceList
@@ -1272,7 +1496,7 @@ Item {
                             styleColor: "#05070c"
                         }
                         Image {
-                            visible: root.selectedEvent && (root.selectedEvent.photo || root.selectedEvent.media_url)
+                            visible: !!(root.selectedEvent && (root.selectedEvent.photo || root.selectedEvent.media_url))
                             width: parent.width
                             height: visible ? 132 : 0
                             source: root.selectedEvent
@@ -1305,6 +1529,28 @@ Item {
                             font.family: "monospace"
                             font.pixelSize: 10
                         }
+                        GgButton {
+                            objectName: "osintCopyArticleButton"
+                            visible: root.selectedEvent && root.selectedEvent.kind === "news" && !!root.selectedEvent.url
+                            text: "COPY ARTICLE URL"
+                            onClicked: root.copyText(root.selectedEvent.url)
+                        }
+                        GgButton {
+                            objectName: "osintSaveEvidenceButton"
+                            text: "SAVE TO RESEARCH"
+                            enabled: root.selectedEvent && !root.selectedEvent.cluster
+                                && root.surfaceHost && !!root.surfaceHost.osintRecordEvidence
+                            onClicked: root.saveEvidence()
+                        }
+                        Text {
+                            width: parent.width
+                            visible: root.evidenceNotice.length > 0
+                            text: root.evidenceNotice
+                            color: root.ledgerGold
+                            wrapMode: Text.WordWrap
+                            font.family: "monospace"
+                            font.pixelSize: 10
+                        }
                     }
                 }
             }
@@ -1315,8 +1561,8 @@ Item {
             visible: root.page === "OVERVIEW" || root.page === "MAP"
             anchors.left: parent.left
             anchors.bottom: parent.bottom
-            width: 280
-            height: 52
+            width: Math.min(470, parent.width - intelCard.width - 16)
+            height: 92
             Column {
                 spacing: 4
                 Row {
@@ -1325,8 +1571,12 @@ Item {
                         model: [
                             {label: "3D", mode: "globe"},
                             {label: "2D", mode: "mercator"},
+                            {label: "TERRAIN", mode: "terrain"},
+                            {label: "BUILDINGS", mode: "buildings"},
                             {label: "RESET", mode: "reset"},
-                            {label: "NAV", mode: "nav"}
+                            {label: "NAV", mode: "nav"},
+                            {label: "POS", mode: "position"},
+                            {label: "NEARBY", mode: "nearby"}
                         ]
                         delegate: Rectangle {
                             required property var modelData
@@ -1337,6 +1587,10 @@ Item {
                                 (modelData.mode === "globe" && !(overviewGlobe.savedView && overviewGlobe.savedView.projection === "mercator"))
                                 || (modelData.mode === "mercator" && overviewGlobe.savedView && overviewGlobe.savedView.projection === "mercator")
                                 || (modelData.mode === "nav" && root.navMode)
+                                || (modelData.mode === "position" && overviewGlobe.positionEnabled)
+                                || (modelData.mode === "nearby" && root.nearbyEnabled)
+                                || (modelData.mode === "terrain" && overviewGlobe.savedView && overviewGlobe.savedView.terrainEnabled)
+                                || (modelData.mode === "buildings" && overviewGlobe.savedView && overviewGlobe.savedView.buildingsEnabled)
                             ) ? root.ledgerGold : root.frameBorder
                             border.width: 1
                             radius: 4
@@ -1359,12 +1613,35 @@ Item {
                                         overviewGlobe.resetView()
                                     else if (modelData.mode === "nav")
                                         root.openNav()
+                                    else if (modelData.mode === "position")
+                                        overviewGlobe.setPositionEnabled(!overviewGlobe.positionEnabled)
+                                    else if (modelData.mode === "nearby")
+                                        root.nearbyEnabled = !root.nearbyEnabled
+                                    else if (modelData.mode === "terrain")
+                                        overviewGlobe.setTerrain(!(overviewGlobe.savedView && overviewGlobe.savedView.terrainEnabled))
+                                    else if (modelData.mode === "buildings")
+                                        overviewGlobe.setBuildings(!(overviewGlobe.savedView && overviewGlobe.savedView.buildingsEnabled))
                                     else
                                         overviewGlobe.setProjection(modelData.mode)
                                 }
                             }
                         }
                     }
+                }
+                Text {
+                    width: parent.width
+                    text: root.positionLabel()
+                    color: overviewGlobe.positionState.fresh ? root.signalBlue : root.muted
+                    font.family: "monospace"
+                    font.pixelSize: 10
+                    elide: Text.ElideRight
+                }
+                Text {
+                    text: (overviewGlobe.savedView ? overviewGlobe.savedView.terrainStatus : "TERRAIN OFF")
+                        + (overviewGlobe.savedView && overviewGlobe.savedView.buildingsEnabled ? " · BUILDINGS ≥14" : "")
+                    color: root.muted
+                    font.family: "monospace"
+                    font.pixelSize: 10
                 }
                 Text {
                     text: (
@@ -2180,15 +2457,23 @@ Item {
                     rightLegend: String(root.payload.generated_at || "NOT FETCHED")
                     borderColor: root.frameBorder
                     fill: root.panel
-                    Column {
+                    Flickable {
                         anchors.fill: parent
-                        spacing: 5
-                        Repeater {
-                            model: root.rows("sources")
+                        contentWidth: width
+                        contentHeight: sourceColumn.height
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: GgScrollBar { }
+                        Column {
+                            id: sourceColumn
+                            width: parent.width
+                            spacing: 5
+                            Repeater {
+                                model: root.rows("sources")
                             delegate: Item {
                                 required property var modelData
                                 width: parent.width
-                                height: 44
+                                height: Math.max(88, sourceDetail.implicitHeight + 48)
                                 Rectangle {
                                     anchors.fill: parent
                                     color: sourceHit.containsMouse ? "#20262d" : "transparent"
@@ -2205,7 +2490,8 @@ Item {
                                         ? root.ledgerGreen
                                         : (String(modelData.status || "") === "REFERENCE"
                                             ? root.signalViolet
-                                            : (String(modelData.status || "") === "ERROR" ? root.signalRed : root.muted))
+                                            : (String(modelData.status || "") === "ERROR" ? root.signalRed
+                                                : (String(modelData.status || "") === "IDLE" ? root.muted : root.ledgerGold)))
                                 }
                                 Text {
                                     anchors.left: parent.left
@@ -2220,10 +2506,27 @@ Item {
                                 Text {
                                     anchors.left: parent.left
                                     anchors.leftMargin: 24
-                                    anchors.bottom: parent.bottom
-                                    anchors.bottomMargin: 6
-                                    text: String(modelData.status || "IDLE") + " · " + String(modelData.count || 0) + " rows"
+                                    anchors.top: parent.top
+                                    anchors.topMargin: 25
+                                    text: root.sourceHealthText(modelData)
                                     color: root.muted
+                                    font.family: "monospace"
+                                    font.pixelSize: 9
+                                }
+                                Text {
+                                    id: sourceDetail
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 24
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 76
+                                    anchors.top: parent.top
+                                    anchors.topMargin: 42
+                                    text: "Success: " + String(modelData.last_success_at || "never")
+                                        + " · Attempt: " + String(modelData.last_attempt_at || "never")
+                                        + (modelData.feeds && modelData.feeds.length ? "\n" + modelData.feeds.map(function(feed) { return feed.provider + ": " + feed.status + " · " + feed.count }).join(" | ") : "")
+                                        + (modelData.error ? "\n" + String(modelData.error) : "")
+                                    color: modelData.error ? root.signalRed : root.muted
+                                    wrapMode: Text.WordWrap
                                     font.family: "monospace"
                                     font.pixelSize: 9
                                 }
@@ -2244,6 +2547,7 @@ Item {
                                     onClicked: root.copyText(modelData.url)
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -2325,7 +2629,7 @@ Item {
                             }
                             Text {
                                 width: parent.width
-                                text: "No user-supplied target, URL or credential is accepted by this surface."
+                                text: "Public feeds accept no user-supplied target, URL or credential. Save observations to the shared RESEARCH workspace to investigate and corroborate them."
                                 color: root.ledgerGold
                                 wrapMode: Text.WordWrap
                                 font.family: "monospace"
@@ -2335,6 +2639,7 @@ Item {
                     }
                 }
             }
+
         }
     }
 }

@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 import math
 import time
 from typing import Any
+from backend import crypto_backtest
 
 
 SCHEMA = "gg.crypto.strategy-factory.v1"
 MAX_WORKERS = 2
-FEE_BPS = 12
-SLIPPAGE_BPS = 5
+FEE_BPS = crypto_backtest.FEE_BPS
+SLIPPAGE_BPS = crypto_backtest.SLIPPAGE_BPS
 MIN_BARS = 120
 
 
@@ -130,7 +131,7 @@ def _signal(candidate: dict[str, Any], prices: list[float], index: int) -> int:
         lookback = int(params.get("lookback") or 20)
         if len(history) <= lookback:
             return 0
-        window = history[-lookback:]
+        window = history[-lookback - 1:-1]
         buffer_bps = float(params.get("buffer_bps") or 0.0) / 10_000.0
         if last > max(window) * (1.0 + buffer_bps):
             return 1
@@ -204,6 +205,7 @@ def _trade_report(
     prices: list[float],
     start: int,
     end: int,
+    bar_seconds: int = 3600,
 ) -> dict[str, Any]:
     warmup = int(candidate.get("warmup") or 0)
     first = max(warmup, int(start))
@@ -230,13 +232,13 @@ def _trade_report(
         price = prices[index]
         target = _signal(candidate, prices, index)
         if target == 1 and units <= 0:
-            units = cash / (price * (1.0 + friction))
+            units = cash * (1.0 - friction) / price
             cash = 0.0
             entry_price = price
         elif target == 0 and units > 0:
             cash = units * price * (1.0 - friction)
             if entry_price > 0:
-                trades.append((price / entry_price - 1.0 - friction) * 100.0)
+                trades.append((price / entry_price * (1.0 - friction)**2 - 1.0) * 100.0)
             units = 0.0
             entry_price = 0.0
         equity_curve.append(cash + units * price)
@@ -245,7 +247,7 @@ def _trade_report(
         price = prices[last - 1]
         cash = units * price * (1.0 - friction)
         if entry_price > 0:
-            trades.append((price / entry_price - 1.0 - friction) * 100.0)
+            trades.append((price / entry_price * (1.0 - friction)**2 - 1.0) * 100.0)
         equity_curve[-1] = cash
 
     if not equity_curve:
@@ -259,7 +261,7 @@ def _trade_report(
             "sharpe_proxy": 0.0,
         }
 
-    peak = equity_curve[0]
+    peak = 1.0
     max_drawdown = 0.0
     for value in equity_curve:
         peak = max(peak, value)
@@ -277,7 +279,7 @@ def _trade_report(
         if returns
         else 0.0
     )
-    sharpe_proxy = (mean / sigma) * math.sqrt(24.0 * 365.0) if sigma > 1e-12 else 0.0
+    sharpe_proxy = (mean / sigma) * math.sqrt(365.0 * 86400 / bar_seconds) if sigma > 1e-12 else 0.0
     wins = sum(1 for value in trades if value > 0)
     return {
         "state": "PASS",
@@ -296,15 +298,24 @@ def _candidate_report(
     candidate: dict[str, Any],
     prices: list[float],
     split: dict[str, int],
+    bar_seconds: int = 3600,
 ) -> dict[str, Any]:
-    train = _trade_report(candidate, prices, 0, split["train_end"])
+    train = _trade_report(candidate, prices, 0, split["train_end"], bar_seconds)
     validation = _trade_report(
         candidate,
         prices,
         split["train_end"],
         split["validation_end"],
+        bar_seconds,
     )
-    test = _trade_report(candidate, prices, split["validation_end"], len(prices))
+    test = _trade_report(candidate, prices, split["validation_end"], len(prices), bar_seconds)
+    test_start = split["validation_end"]
+    buy_hold = 0.0
+    if test_start < len(prices) and prices[test_start] > 0:
+        friction = (FEE_BPS + SLIPPAGE_BPS) / 10_000.0
+        buy_hold = (prices[-1] / prices[test_start] * (1-friction)**2 - 1.0) * 100.0
+    round_trip_pct = 2.0 * (FEE_BPS + SLIPPAGE_BPS) / 100.0
+    avg_trade = float(test.get("avg_trade_pct") or 0.0)
     if len(prices) < MIN_BARS:
         verdict = "INSUFFICIENT_DATA"
         reason = f"Need at least {MIN_BARS} bars for three honest splits."
@@ -314,17 +325,22 @@ def _candidate_report(
     elif test["max_drawdown_pct"] > 35.0 or test["return_pct"] < -5.0:
         verdict = "REJECT"
         reason = "Out-of-sample drawdown or return breached the review gate."
-    elif test["return_pct"] > 0.0 and validation["return_pct"] > -2.0:
+    elif (
+        test["return_pct"] > 0.0
+        and validation["return_pct"] > -2.0
+        and test["return_pct"] > buy_hold
+        and avg_trade > 0.0
+    ):
         verdict = "PASS"
-        reason = "Positive test return after friction with stable validation."
+        reason = (
+            "Test beat buy-and-hold after fees, and the average trade cleared the round trip."
+        )
+    elif test["return_pct"] > 0.0 and validation["return_pct"] > -2.0:
+        verdict = "WATCH"
+        reason = "Positive test, but it did not beat buy-and-hold after fees."
     else:
         verdict = "WATCH"
         reason = "Mixed validation/test evidence; human review required."
-
-    test_start = split["validation_end"]
-    buy_hold = 0.0
-    if test_start < len(prices) and prices[test_start] > 0:
-        buy_hold = (prices[-1] / prices[test_start] - 1.0) * 100.0
     return {
         "id": str(candidate.get("id") or ""),
         "label": str(candidate.get("label") or ""),
@@ -335,6 +351,7 @@ def _candidate_report(
         "gate_reason": reason,
         "train": train,
         "validation": validation,
+        "validation_folds": _validation_folds(candidate, prices, split, bar_seconds),
         "test": test,
         "buy_hold_test_pct": round(buy_hold, 4),
     }
@@ -352,6 +369,20 @@ def _choose_frame(frames: dict[str, Any]) -> tuple[str, list[float], list[int]]:
         if closes:
             return interval, closes, times
     return "", [], []
+
+
+def _validation_folds(candidate, prices, split, bar_seconds):
+    """Two expanding-history folds, both strictly before the final holdout."""
+    first, end = split["train_end"], split["validation_end"]
+    middle = (first + end) // 2
+    return [{"train_end": start, "from_index": start, "to_index": stop,
+             **_trade_report(candidate, prices, start, stop, bar_seconds)}
+            for start, stop in ((first, middle), (middle, end))]
+
+
+def _validation_score(candidate, prices, split, bar_seconds):
+    folds = _validation_folds(candidate, prices, split, bar_seconds)
+    return sum(float(row.get("sharpe_proxy") or 0) for row in folds) / len(folds)
 
 
 def _timestamp_label(value: int) -> str:
@@ -395,7 +426,7 @@ def orchestration_snapshot(state: str) -> dict[str, Any]:
         "gates": [
             "NO_LOOKAHEAD",
             "COSTS_AND_SLIPPAGE",
-            "WALK_FORWARD_SPLITS",
+            "CHRONOLOGICAL_HOLDOUT",
             "PAPER_ONLY",
             "HUMAN_REVIEW_BEFORE_ACTION",
             "NEGATIVE_RESULTS_KEPT",
@@ -415,7 +446,8 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
         }
 
     n = len(prices)
-    train_end = max(1, int(n * 0.60))
+    bar_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "8h": 28800, "1d": 86400}.get(interval, 3600)
+    train_end = max(1, int(n * 0.40))
     validation_end = max(train_end + 1, int(n * 0.80))
     split = {
         "train_end": min(train_end, n),
@@ -423,7 +455,7 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
     }
     with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="gg-strategy") as pool:
         futures = [
-            pool.submit(_candidate_report, candidate, prices, split)
+            pool.submit(_candidate_report, candidate, prices, split, bar_seconds)
             for candidate in CANDIDATE_CATALOG
         ]
         candidates = [future.result() for future in futures]
@@ -440,15 +472,16 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
     ]
 
     base = dict(CANDIDATE_CATALOG[0])
-    base_report = _candidate_report(base, prices, split)
-    best_sharpe = float((base_report.get("test") or {}).get("sharpe_proxy") or 0.0)
+    # Parameter choice never reads the final holdout. Only the frozen winner
+    # is evaluated on that period after all validation decisions are made.
+    best_sharpe = _validation_score(base, prices, split, bar_seconds)
     best_buffer = int((base.get("parameters") or {}).get("buffer_bps") or 10)
     autoresearch: list[dict[str, Any]] = [
         {
             "step": 0,
             "mutation": "BASE",
             "buffer_bps": best_buffer,
-            "test_sharpe": round(best_sharpe, 4),
+            "validation_sharpe": round(best_sharpe, 4),
             "decision": "KEEP",
         }
     ]
@@ -458,8 +491,7 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
             "id": f"MOMENTUM_20_60_B{buffer}",
             "parameters": {**(base.get("parameters") or {}), "buffer_bps": buffer},
         }
-        report = _candidate_report(mutated, prices, split)
-        sharpe = float((report.get("test") or {}).get("sharpe_proxy") or 0.0)
+        sharpe = _validation_score(mutated, prices, split, bar_seconds)
         keep = sharpe > best_sharpe
         if keep:
             best_sharpe = sharpe
@@ -469,7 +501,7 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
                 "step": step,
                 "mutation": f"buffer_bps={buffer}",
                 "buffer_bps": buffer,
-                "test_sharpe": round(sharpe, 4),
+                "validation_sharpe": round(sharpe, 4),
                 "decision": "KEEP" if keep else "REVERT",
             }
         )
@@ -491,8 +523,8 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
             "slippage_bps": SLIPPAGE_BPS,
         },
         "split": {
-            "train_pct": 60,
-            "validation_pct": 20,
+            "train_pct": 40,
+            "validation_pct": 40,
             "test_pct": 20,
             "train_end": split["train_end"],
             "validation_end": split["validation_end"],
@@ -502,7 +534,17 @@ def run_factory(frames: dict[str, Any]) -> dict[str, Any]:
         "autoresearch": {
             "pattern": "KEEP_OR_REVERT",
             "best_buffer_bps": best_buffer,
-            "best_test_sharpe": round(best_sharpe, 4),
+            "best_validation_sharpe": round(best_sharpe, 4),
+            "selection_period": "validation",
+            "trial_count": len(candidates) + len(autoresearch) - 1,
+            "selection_method": "Mean Sharpe of two expanding-history validation folds",
+            "trial_registry": [row["id"] for row in CANDIDATE_CATALOG] + [f"MOMENTUM_20_60_B{x}" for x in (5, 15, 25)],
+            "validation_folds": _validation_folds({**base, "parameters": {**base["parameters"], "buffer_bps": best_buffer}}, prices, split, bar_seconds),
+            "interpretation": "Exploratory trials; final holdout is shown once per frozen choice, not an automatic winner or statistical proof.",
+            "final_test": _trade_report(
+                {**base, "parameters": {**base["parameters"], "buffer_bps": best_buffer}},
+                prices, split["validation_end"], n, bar_seconds,
+            ),
             "steps": autoresearch,
         },
         "orchestration": orchestration_snapshot("DONE"),

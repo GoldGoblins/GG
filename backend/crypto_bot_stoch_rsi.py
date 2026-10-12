@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend import crypto_backtest
+
 from backend.crypto_indicators import ema, rsi, stoch_kd
 from backend.crypto_trader import (
     FEE_BPS,
@@ -80,7 +82,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     volumes = list(src.get("volumes") or [1.0] * len(closes))
     times = [int(x) for x in (src.get("times") or [])]
     n = min(len(highs), len(lows), len(closes), len(times) or len(closes))
-    if n < 60:
+    if n < 96:
         raise RuntimeError("CRYPTO_HISTORY")
     highs, lows, closes, volumes = highs[:n], lows[:n], closes[:n], volumes[:n]
     if len(times) < n:
@@ -90,14 +92,16 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rsi_s = rsi(closes, RSI_PERIOD)
     k_s, d_s = stoch_kd(highs, lows, closes, STOCH_K, STOCH_SMOOTH, STOCH_SMOOTH)
     tema_s = _tema(closes, TEMA_PERIOD)
-    first_px = _price_atoms(closes[0])
+    begin = crypto_backtest.start_index(src)
+    resume = crypto_backtest.restored("stoch_rsi")
+    first_px = _price_atoms(closes[begin])
     start_sol = START_USD * SOL_SCALE // first_px if first_px else START_SOL
     state = default_state()
     state["armed"] = True
     state["seeded"] = True
     state["seed_style"] = "long"
     state["book"] = "stoch_rsi"
-    state["sol"] = start_sol
+    state["sol"] = _apply_fee(start_sol)
     state["usd"] = 0
     state["start_sol"] = start_sol
     state["cost_px"] = first_px
@@ -105,14 +109,25 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
     lots: list[dict[str, Any]] = []
     in_pos = True
     entry_px = first_px
-    entry_ts = int(times[0])
+    entry_ts = int(times[begin])
+    entry_cost_usd = int(START_USD)
     tape = _fresh_tape()
     buys = 0
     sells = 0
     day_hist: list[int] = []
     prev_day = ""
     prev_count = 0
-    start = 50
+    if resume:
+        state = resume["state"]
+        start_sol = int(state["start_sol"])
+        in_pos = resume["in_pos"]
+        entry_px = resume["entry_px"]
+        entry_ts = resume["entry_ts"]
+        entry_cost_usd = resume["entry_cost_usd"]
+        prev_day = resume["prev_day"]
+        prev_count = resume["prev_count"]
+    event_start = len(lots)
+    start = n - 1 if resume else begin
     for i in range(start, n):
         ts = int(times[i])
         day_now = _utc_day(ts)
@@ -152,6 +167,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
                     in_pos = True
                     entry_px = px
                     entry_ts = ts
+                    entry_cost_usd = usd_in
                     lots.append(
                         {
                             "id": "stoch-buy-" + str(ts),
@@ -176,19 +192,21 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         if hold <= 0 or entry_px <= 0:
             continue
         frac = (px - entry_px) / float(entry_px)
+        net_proceeds = _apply_fee(hold * px // SOL_SCALE)
+        net_frac = (net_proceeds - entry_cost_usd) / float(max(1, entry_cost_usd))
         hold_min = max(0, (ts - entry_ts) // 60)
-        roi = frac >= _roi_need(hold_min)
+        roi = net_frac >= _roi_need(hold_min)
         stop = frac <= STOPLOSS
         tema_hit = now_t is not None and closes[i] < float(now_t) and vol > 0
         want = stop or roi or tema_hit
-        if tema_hit and (not stop) and (not roi) and frac < SELL_PROFIT_OFFSET:
+        if tema_hit and (not stop) and (not roi) and net_frac < SELL_PROFIT_OFFSET:
             want = False
         if not want:
             continue
         usd_net = _apply_fee(hold * px // SOL_SCALE)
         if usd_net <= 0:
             continue
-        cost = hold * entry_px // SOL_SCALE
+        cost = entry_cost_usd
         profit = usd_net - cost
         state["sol"] = 0
         state["float_usd"] = usd_net
@@ -248,5 +266,7 @@ def run_backtest(frames: dict[str, dict[str, Any]]) -> dict[str, Any]:
         ),
     }
     report.update(stats)
+    report["accounting"] = tape.get("accounting", [])
+    crypto_backtest.checkpoint(report, "stoch_rsi", {"state": state, "in_pos": in_pos, "entry_px": entry_px, "entry_ts": entry_ts, "entry_cost_usd": entry_cost_usd, "prev_day": prev_day, "prev_count": prev_count}, lots[event_start:], banked + held, usd)
     save_backtest(report)
     return report

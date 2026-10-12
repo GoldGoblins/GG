@@ -1,0 +1,20 @@
+[package]
+name = "gg-benilla-assets"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+serde_json = "1"
+anyhow = "1"
+benilla-blp = { path = "../benilla-blp" }
+benilla-m2 = { path = "../benilla-m2" }
+benilla-wmo = { path = "../benilla-wmo" }
+benilla-adt = { path = "../benilla-adt" }
+benilla-wdt = { path = "../benilla-wdt" }
+benilla-dbc = { path = "../benilla-dbc" }
+benilla-mpq = { path = "../benilla-mpq" }
+benilla-formats = { path = "../benilla-formats", default-features = false }
+benilla-bytes = { path = "../benilla-bytes" }
+glam = "0.31"

@@ -33,6 +33,11 @@ ApplicationWindow {
     readonly property var workspace: workspaceLoader.item
     property string grokWalletJson: "{}"
     property string gptWalletJson: "{}"
+    readonly property string liveVisionStatusJson: root.surfaceHost && root.surfaceHost.liveVisionStatus !== undefined
+                                                 ? root.surfaceHost.liveVisionStatus : '{"state":"off"}'
+    readonly property var liveEyes: {
+        try { return JSON.parse(root.liveVisionStatusJson) } catch (err) { return {state: "off"} }
+    }
     property string cryptoStatusJson: "{}"
     property bool walletOpen: false
     property real walletX: -1
@@ -81,20 +86,50 @@ ApplicationWindow {
     property string chatSessionsJson: "[]"
     property string activeChatSession: ""
     property bool shellLoading: true
-    property string shellLoadLabel: "LOADING..."
+    property string shellLoadLabel: "STARTING DESKTOP..."
     property int shellLoadPercent: 0
-    property string shellLoadCurrent: ""
+    property string shellLoadCurrent: "Loading desktop modules and local services"
     property string shellLoadLog: ""
+    property int startupServiceProgress: 0
+    property int startupStepNumber: 0
+    property int startupStepCount: 0
+    property bool startupStepBusy: false
+    property bool startupFailed: false
+    property bool _initialStartupComplete: false
     property string shellLoadQueueJson: "[]"
+    property bool startupModulesReady: false
+    property bool _startupShellLoadRequested: false
+    property bool startupReady: false
+    property bool workspaceLoadFailed: false
     property var _shellQueue: []
     property int _shellQueueIndex: 0
     property var _shellComp: null
+    property bool _workspaceLoaderReady: false
+    property bool _utilityLoaderReady: false
     readonly property int alphaBottomStripMargin: 8
 
     property int shellNonce: 0
     property bool _shellHydrated: false
     property bool _utilityBound: false
     property bool _workspaceBound: false
+
+    onStartupReadyChanged: {
+        if (root.startupReady) {
+            root.updateShellProgress()
+            root.finishShellLoad()
+        }
+    }
+
+    onStartupServiceProgressChanged: root.updateShellProgress()
+
+    onStartupModulesReadyChanged: root.requestStartupShellLoad()
+
+    function requestStartupShellLoad() {
+        if (!root.startupModulesReady || root._startupShellLoadRequested)
+            return
+        root._startupShellLoadRequested = true
+        root.beginShellLoad("LOADING...")
+    }
     property real deskX: 420
     property real deskY: 240
     property string deskShape: "default"
@@ -147,6 +182,9 @@ ApplicationWindow {
         root._shellQueue = []
         root._shellQueueIndex = 0
         root._shellComp = null
+        root._workspaceLoaderReady = false
+        root._utilityLoaderReady = false
+        root.workspaceLoadFailed = false
         root._shellHydrated = false
         root._utilityBound = false
         root._workspaceBound = false
@@ -186,19 +224,54 @@ ApplicationWindow {
         root.shellLoadLog = lines.join("\n")
     }
 
+    function updateShellProgress() {
+        if (!root._initialStartupComplete) {
+            var assetTotal = Math.max(1, root._shellQueue.length + 2)
+            var assetsComplete = Math.min(
+                root._shellQueueIndex,
+                root._shellQueue.length
+            )
+            if (root._workspaceLoaderReady)
+                assetsComplete += 1
+            if (root._utilityLoaderReady)
+                assetsComplete += 1
+            var assetProgress = assetsComplete / assetTotal
+            var serviceProgress = Math.max(
+                0,
+                Math.min(100, root.startupServiceProgress)
+            ) / 100
+            root.shellLoadPercent = Math.round(
+                (assetProgress * 0.9 + serviceProgress * 0.1) * 100
+            )
+            return
+        }
+
+        // Later manual reloads only recreate QML surfaces; local services are
+        // already connected, so show the existing surface-load progress.
+        var reloadTotal = Math.max(1, root._shellQueue.length + 2)
+        var reloadComplete = Math.min(
+            root._shellQueueIndex,
+            root._shellQueue.length
+        )
+        if (root._workspaceLoaderReady)
+            reloadComplete += 1
+        if (root._utilityLoaderReady)
+            reloadComplete += 1
+        root.shellLoadPercent = Math.round(
+            reloadComplete * 100 / reloadTotal
+        )
+    }
+
     function loadNextShellFile() {
         if (root._shellQueueIndex >= root._shellQueue.length) {
-            root.shellLoadPercent = 100
+            root.updateShellProgress()
             root.loadDesktopShell()
             return
         }
         var rel = String(root._shellQueue[root._shellQueueIndex] || "")
         root.shellLoadCurrent = rel
         root.appendShellLog(rel)
-        var total = root._shellQueue.length
-        root.shellLoadPercent = Math.round(
-            root._shellQueueIndex * 100 / Math.max(1, total)
-        )
+        root.updateShellProgress()
         var comp = Qt.createComponent(
             root.shellUrl(rel),
             Component.Asynchronous
@@ -229,10 +302,7 @@ ApplicationWindow {
         }
         root._shellComp = null
         root._shellQueueIndex += 1
-        var total = Math.max(1, root._shellQueue.length)
-        root.shellLoadPercent = Math.round(
-            root._shellQueueIndex * 100 / total
-        )
+        root.updateShellProgress()
         Qt.callLater(root.loadNextShellFile)
     }
 
@@ -406,6 +476,8 @@ ApplicationWindow {
     function finishShellLoad() {
         if (root._shellHydrated)
             return
+        if (!root.startupReady)
+            return
         if (workspaceLoader.status !== Loader.Ready || !workspaceLoader.item)
             return
         if (
@@ -423,6 +495,13 @@ ApplicationWindow {
             root.appendShellLog("shell bind · " + String(err))
         }
         root._shellHydrated = true
+        root.startupServiceProgress = 100
+        root.startupStepBusy = false
+        root.startupStepNumber = 0
+        root.startupStepCount = 0
+        root.startupFailed = false
+        root._initialStartupComplete = true
+        root.updateShellProgress()
         root.shellLoading = false
         // The visual shell is ready now. Run the optional wallet/session
         // refresh after the first paint so a slow scan cannot strand the
@@ -484,9 +563,7 @@ ApplicationWindow {
         }
     }
 
-    Component.onCompleted: Qt.callLater(function() {
-        root.beginShellLoad("LOADING...")
-    })
+    Component.onCompleted: Qt.callLater(root.requestStartupShellLoad)
 
     readonly property bool narrowLayout: width < 1050
     readonly property bool compactTelemetry: width < 1450
@@ -1698,8 +1775,8 @@ ApplicationWindow {
     }
 
     title: "GG AI Desktop · Alpha"
-    width: 1920
-    height: 1080
+    width: 1280
+    height: 800
     minimumWidth: 820
     minimumHeight: 620
     flags: root.desktopShell && !root.appFullscreen
@@ -2514,6 +2591,30 @@ ApplicationWindow {
                 spacing: 16
 
                 Text {
+                    visible: root.liveEyes.state !== "off"
+                    text: root.liveEyes.state === "live"
+                          ? "ÖGON · " + (root.liveEyes.received_fps || 0) + " fps"
+                          : "ÖGON · " + (root.liveEyes.state === "error" ? "FEL" : "VÄNTAR")
+                    color: root.liveEyes.state === "live" && root.liveEyes.frame_age_ms <= 2000
+                           ? root.green : root.amber
+                    font.family: "monospace"
+                    font.pixelSize: 13
+                    ToolTip.visible: eyesStopArea.containsMouse
+                    ToolTip.text: (root.liveEyes.reason || "Skärmfångst aktiv")
+                                  + "\nKlicka för att stoppa skärmdelningen."
+                    MouseArea {
+                        id: eyesStopArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (root.surfaceHost && root.surfaceHost.liveVisionStop)
+                                root.surfaceHost.liveVisionStop()
+                        }
+                    }
+                }
+
+                Text {
                     text: "LOCAL · ALPHA"
                     color: root.cyan
                     font.family: "monospace"
@@ -3278,11 +3379,19 @@ ApplicationWindow {
                     anchors.top: parent.top
                     anchors.bottom: utilitySurface.top
                     anchors.bottomMargin: 8
-                    onLoaded: root.finishShellLoad()
+                    onLoaded: {
+                        root._workspaceLoaderReady = true
+                        root.updateShellProgress()
+                        root.finishShellLoad()
+                    }
                     onStatusChanged: {
-                        if (status === Loader.Ready)
+                        if (status === Loader.Ready) {
+                            root._workspaceLoaderReady = true
+                            root.updateShellProgress()
                             root.finishShellLoad()
+                        }
                         if (status === Loader.Error) {
+                            root.workspaceLoadFailed = true
                             root.shellLoadCurrent = "LOAD FAILED"
                             root.appendShellLog(String(errorString() || "workspace"))
                         }
@@ -3312,6 +3421,8 @@ ApplicationWindow {
                     anchors.bottom: parent.bottom
                     height: utilitySurface.implicitHeight
                     onLoaded: {
+                        root._utilityLoaderReady = true
+                        root.updateShellProgress()
                         root.bindUtility(utilitySurface.item)
                         root.finishShellLoad()
                     }
@@ -3319,8 +3430,11 @@ ApplicationWindow {
                         if (
                             status === Loader.Ready
                             || status === Loader.Error
-                        )
+                        ) {
+                            root._utilityLoaderReady = true
+                            root.updateShellProgress()
                             root.finishShellLoad()
+                        }
                     }
                 }
             }
@@ -3348,6 +3462,7 @@ ApplicationWindow {
                 engineTarget: root.engineTarget
                 grokWalletJson: root.grokWalletJson
                 gptWalletJson: root.gptWalletJson
+                liveVisionStatusJson: root.liveVisionStatusJson
                 bridgeState: root.bridgeBusy ? "BUSY" : "CONNECTED"
                 frameBorder: root.frameBorder
                 frameRadius: root.frameRadius
@@ -3440,6 +3555,7 @@ ApplicationWindow {
             }
 
             Rectangle {
+                id: shellLoadTrack
                 width: parent.width
                 height: 8
                 color: "#161616"
@@ -3457,6 +3573,27 @@ ApplicationWindow {
                     )
                     color: "#c8a97e"
                 }
+
+                Rectangle {
+                    id: startupActivity
+                    visible: root.startupStepBusy
+                    width: 24
+                    height: parent.height - 2
+                    y: 1
+                    color: "#f0d6ad"
+
+                    XAnimator {
+                        target: startupActivity
+                        from: 2
+                        to: Math.max(
+                            2,
+                            shellLoadTrack.width - startupActivity.width - 2
+                        )
+                        duration: 750
+                        loops: Animation.Infinite
+                        running: root.startupStepBusy
+                    }
+                }
             }
 
             Text {
@@ -3466,6 +3603,22 @@ ApplicationWindow {
                 color: root.textMuted
                 font.family: "monospace"
                 font.pixelSize: 12
+            }
+
+            Text {
+                width: parent.width
+                visible: root.startupStepNumber > 0
+                horizontalAlignment: Text.AlignHCenter
+                text: "LOCAL SERVICES · STEP "
+                    + String(root.startupStepNumber)
+                    + "/"
+                    + String(root.startupStepCount)
+                    + (root.startupStepBusy
+                        ? " · WORKING"
+                        : (root.startupFailed ? " · FAILED" : " · STEP DONE"))
+                color: root.textMuted
+                font.family: "monospace"
+                font.pixelSize: 10
             }
 
             BufferMark {

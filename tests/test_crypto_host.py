@@ -58,8 +58,8 @@ def main() -> int:
         raise AssertionError("1m/5m history page cap too small")
     if '"8h": 20' not in host_src or '"1d": 10' not in host_src:
         raise AssertionError("8h/1d history page cap missing")
-    if "crypto_bots.run_backtest" not in host_src:
-        raise AssertionError("flow backtest not wired")
+    if "crypto_bots.compare_books" not in host_src:
+        raise AssertionError("six-book comparison not wired")
     if "crypto_bots" not in host_src or "def set_trader_book" not in host_src:
         raise AssertionError("book switch missing")
     if crypto_contract.human_error("LAB_OFF") != crypto_contract.ERROR_HINTS["LAB_OFF"]:
@@ -184,10 +184,10 @@ def main() -> int:
         raise AssertionError("async UI backtest missing")
     if "sorted(frames.keys())" in host_src:
         raise AssertionError("backtest TF label still lexicographic")
-    if "_UI_BACKTEST_TF = crypto_trader.TIMEFRAMES" not in host_src:
-        raise AssertionError("UI backtest must walk 1m through 1d")
-    if 'tf not in ("1m", "5m")' not in host_src:
-        raise AssertionError("UI backtest still slurps 1m/5m JSON")
+    if "_UI_BACKTEST_TF = crypto_market.TIMEFRAMES" not in host_src:
+        raise AssertionError("UI backtest must use actual market timeframes")
+    if "crypto_market.history(pair, tf, start)" not in host_src:
+        raise AssertionError("common hourly comparison data missing")
     if "pnl_sol" not in qml or "bt.pnl_usd" not in qml:
         raise AssertionError("backtest PnL currency fields missing")
     if "bt.weeks" not in qml:
@@ -243,7 +243,7 @@ def main() -> int:
     crypto_host._backtest_job["note"] = ""
     fired = {"n": 0}
 
-    def fake_bt(tfs=None):
+    def fake_bt(tfs=None, **kwargs):
         fired["n"] += 1
         time.sleep(0.05)
         return {"fills": 1, "chart": {"closes": [1.0, 2.0], "times": [1, 2]}}

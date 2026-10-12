@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import urllib.error
@@ -18,6 +19,8 @@ from backend import crypto_strategy004
 from backend import crypto_bots, crypto_flash_arb, crypto_trader
 from backend import crypto_strategy_factory
 from backend import crypto_desk
+from backend import crypto_data, crypto_market, crypto_paper
+from backend import crypto_portfolio
 from backend import polymarket_research
 from backend import kaspa_covenant
 from backend.crypto_lab import (
@@ -230,6 +233,19 @@ def set_network(network: str) -> dict[str, Any]:
 
 def rpc_call(method: str, params: list[Any], network: str | None = None) -> dict[str, Any] | None:
     chain = network or load_network()
+    if chain not in RPC_ALLOWLIST:
+        return {"error": {"code": -32602, "message": "CRYPTO_NETWORK"}}
+    # The policy lives at the common RPC boundary, including idle Trader ticks.
+    read_methods = {
+        "getBalance", "getTokenAccountsByOwner", "getAccountInfo",
+        "getLatestBlockhash", "getSignatureStatuses", "getTransaction",
+        "getSlot", "getBlockHeight", "getHealth", "getVersion",
+        "getFeeForMessage", "isBlockhashValid", "simulateTransaction",
+    }
+    if method not in read_methods and (chain != "testnet" or load_network() != "testnet"):
+        return {"error": {"code": -32001, "message": "MAINNET_OBSERVE_ONLY"}}
+    if method not in read_methods | {"requestAirdrop", "sendTransaction"}:
+        return {"error": {"code": -32601, "message": "CRYPTO_RPC_METHOD"}}
     url = _rpc_url(chain)
     host = urlparse(url).hostname or ""
     allowed = {urlparse(item).hostname for item in RPC_ALLOWLIST.values()}
@@ -260,6 +276,13 @@ def rpc_call(method: str, params: list[Any], network: str | None = None) -> dict
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _lab_rpc(method: str, params: list[Any]) -> dict[str, Any] | None:
+    """Bind every lab transaction to localnet and fail on a network switch."""
+    if load_network() != "testnet":
+        raise RuntimeError("MAINNET_OBSERVE_ONLY")
+    return rpc_call(method, params, "testnet")
 
 
 def create_test_wallet() -> dict[str, Any]:
@@ -389,7 +412,7 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     pubkey = str(wallet.get("pubkey") or "")
     row: dict[str, Any] = {
         "ts": int(time.time()),
-        "mode": "OBSERVE" if live else "TESTNET",
+        "mode": "OBSERVE" if live else "LOCALNET_DIAGNOSTIC",
         "network": chain,
         "side": signal["side"],
         "size_sol": signal["size_sol"],
@@ -427,7 +450,7 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     if pyusd:
         row["symbol"] = "PYUSD"
         row["size_display"] = str(pyusd.get("display") or pyusd.get("amount") or "")
-    if lamports < 5000:
+    if lamports <= 5000:
         row["error"] = "NEED_FEE_SOL"
         row["txid"] = "NONE"
         row["hint"] = human_error("NEED_FEE_SOL")
@@ -437,12 +460,13 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     if send_lamports > lamports - 5000:
         send_lamports = 1
     try:
-        sent = send_self_transfer(rpc_call, send_lamports)
+        sent = send_self_transfer(_lab_rpc, send_lamports)
         row["txid"] = sent["txid"]
+        row["status"] = sent["status"]
         row["size_sol"] = send_lamports / 1_000_000_000
         row["source"] = "onchain-self-transfer"
         row["hint"] = (
-            "Signed lab fill. Self-transfer "
+            "Confirmed localnet self-transfer "
             + format_sol(send_lamports)
             + " SOL."
         )
@@ -456,7 +480,8 @@ def ingest_paper_signal(raw: str) -> dict[str, Any]:
     except Exception as exc:
         row["error"] = short_error(str(exc)[:240]) or "CRYPTO_RPC"
         row["hint"] = human_error(str(exc)[:240])
-        row["txid"] = "NONE"
+        row["txid"] = str(getattr(exc, "txid", "NONE"))
+        row["status"] = str(getattr(exc, "status", "failed"))
     append_ledger(row)
     return decorate_ledger_row(row)
 
@@ -486,36 +511,22 @@ def _factory_frames() -> dict[str, dict[str, Any]]:
             1000,
             timeout=8.0,
         )
-        return {
+        frame = {
             "1h": {
                 "highs": highs,
                 "lows": lows,
                 "closes": closes,
                 "volumes": volumes,
                 "times": list(_kline_times.get("1h", [])),
+                "source": "binance", "symbol": "SOLUSDT", "closed_only": True,
             }
         }
-    except (
-        OSError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        urllib.error.URLError,
-        json.JSONDecodeError,
-    ):
-        chart = chart_snapshot()
-        closes: list[float] = []
-        for raw in chart.get("closes") or []:
-            try:
-                closes.append(float(raw))
-            except (TypeError, ValueError):
-                continue
-        return {
-            "15m": {
-                "closes": closes,
-                "times": list(chart.get("times") or []),
-            }
-        }
+        frame["1h"] = crypto_data.validate_frame(frame["1h"], "1h", min_bars=120)
+        if frame["1h"]["gaps"]:
+            return {}
+        return frame
+    except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+        return {}
 
 
 def _run_strategy_factory_job() -> None:
@@ -646,6 +657,33 @@ def reset_desk() -> dict[str, Any]:
     return status_payload()
 
 
+def paper_pair() -> str:
+    return "KASUSDT" if portfolio_asset() == "KAS" else "SOLUSDT"
+
+
+def paper_snapshot() -> dict[str, Any]:
+    try:
+        return crypto_paper.snapshot(paper_pair())
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"mode": "PAPER_ONLY", "accounts": [], "events": [],
+                "error": "Paper state unavailable: " + type(exc).__name__}
+
+
+def trader_snapshot(paper: dict[str, Any]) -> dict[str, Any]:
+    result = dict(crypto_trader.snapshot(), books=crypto_bots.catalog())
+    chosen = crypto_bots.selected()
+    row = next((r for r in paper.get("accounts", []) if r["book"] == chosen), {})
+    for key in ("backtest", "backtest_prev"):
+        report = result.get(key) or {}
+        if (report.get("data") or {}).get("symbol") != paper_pair():
+            result[key] = {}
+    result.update(book=chosen, armed=bool(row.get("enabled")), mode="PAPER_ONLY",
+                  tokens=row.get("tokens", 0), usd=row.get("quote", 200),
+                  last={"action": "paper", "note": row.get("error") or row.get("halt_reason") or row.get("status", "IDLE")},
+                  paper_account=row)
+    return result
+
+
 def status_payload(rail: bool = False) -> dict[str, Any]:
     wallet = load_wallet()
     pubkey = str(wallet.get("pubkey") or "")
@@ -664,7 +702,7 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
     if pyusd:
         wallet["pyusd"] = pyusd.get("display")
         wallet["pyusd_decimals"] = pyusd.get("decimals")
-    legend = "OBSERVE" if chain == "mainnet" else "TESTNET"
+    legend = "OBSERVE" if chain == "mainnet" else "LOCALNET"
     rpc = str(RPC_ALLOWLIST.get(chain) or "")
     holdings: list[dict[str, Any]] = []
     if pubkey:
@@ -700,6 +738,7 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
                 "label": "LAB STARTING" if pid is not None else "LAB OFF",
             },
         }
+    paper = paper_snapshot()
     ledger = [decorate_ledger_row(item) for item in read_ledger(16)]
     for lot in crypto_trader.read_lots(16):
         side = str(lot.get("side") or "")
@@ -718,11 +757,20 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
                     "txid": str(lot.get("id") or "LOT"),
                     "hint": hint,
                     "source": "trader-80-20",
-                    "mode": "TESTNET",
+                    "mode": "PAPER",
+                    "status": "simulated",
                     "error": None,
                 }
             )
         )
+    for event in paper.get("events", []):
+        ledger.append(decorate_ledger_row({"ts": event.get("ts"), "side": event.get("side"),
+            "txid": "PAPER", "source": "paper-" + str(event.get("book")),
+            "mode": "PAPER", "status": "simulated", "error": None,
+            "hint": str(event.get("book", "")) + " · " + str(event.get("pair", ""))
+                + " · " + str(event.get("side", "")) + " " + format_units(event.get("sol"), 9)
+                + " " + str(paper.get("base_asset", ""))
+                + (" · historical recovery" if event.get("recovery_replay") else "")}))
     ledger.sort(key=lambda item: int(item.get("ts") or 0))
     if chain != "mainnet":
         ledger = [
@@ -744,6 +792,16 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
     if holdings and quote.get("usd"):
         holdings[0]["usd"] = quote.get("usd")
         holdings[0]["sek"] = quote.get("sek")
+    kaspa = kaspa_covenant.snapshot()
+    kas_chart = kas_chart_snapshot()
+    portfolio = {
+        "asset": portfolio_asset(),
+        "sol": crypto_portfolio.summarize(holdings, chart, usd_sek=quote.get("usd_sek")),
+        # This is the covenant's simulation balance, not an imported live wallet.
+        "kas": crypto_portfolio.summarize([
+            {"symbol": "KAS", "mint": "native", "display": kaspa.get("value_kas")}
+        ], kas_chart, native_symbol="KAS", usd_sek=quote.get("usd_sek")),
+    }
     return {
         "wallet": wallet,
         "legend": legend,
@@ -760,8 +818,10 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
         "chart": chart,
         "quote": quote,
         "arb": crypto_flash_arb.pool_status(),
-        "trader": dict(crypto_trader.snapshot(), books=crypto_bots.catalog()),
+        "trader": trader_snapshot(paper),
+        "paper_engine": paper,
         "backtest_job": backtest_job(),
+        "paper_jobs": paper_tick_status(),
         "polymarket": polymarket_research.snapshot(),
         "strategy_factory": strategy_factory_status().get(
             "result",
@@ -770,12 +830,14 @@ def status_payload(rail: bool = False) -> dict[str, Any]:
         "strategy_factory_job": strategy_factory_status(),
         "desk": desk_status().get("result", crypto_desk.empty_snapshot()),
         "desk_job": desk_status(),
-        "kaspa": kaspa_covenant.snapshot(),
+        "kaspa": kaspa,
+        "kas_chart": kas_chart,
+        "portfolio": portfolio,
         "proven": load_proven(),
         "bots": [
             {
                 "id": "signal-swap-1",
-                "title": "signal → swap",
+                "title": "signal → localnet diagnostic",
                 "state": "TESTNET",
             },
             {
@@ -862,7 +924,10 @@ def run_flash_arb(usd_units: str | None = None) -> dict[str, Any]:
         payload["arb_last"] = decorate_ledger_row(row)
         return payload
     try:
-        borrow = int(usd_units) if usd_units not in (None, "") else 10 * 1_000_000
+        if usd_units not in (None, ""):
+            borrow = int(usd_units)
+        else:
+            borrow = crypto_flash_arb.optimal_borrow() or 10 * 1_000_000
     except (TypeError, ValueError):
         borrow = 10 * 1_000_000
     if borrow <= 0 or borrow > 1_000_000 * 1_000_000:
@@ -892,16 +957,21 @@ def run_flash_arb(usd_units: str | None = None) -> dict[str, Any]:
     lab = lab_status()
     if lab.get("healthy") and has_signer():
         try:
-            sent = send_self_transfer(rpc_call, 10_000)
+            sent = send_self_transfer(_lab_rpc, 10_000)
             row["txid"] = sent["txid"]
-            row["hint"] = "Arb committed. 10000 lamports settlement on lab."
+            row["chain_status"] = sent["status"]
+            row["hint"] = "Simulated CPMM result; confirmed localnet self-transfer diagnostic."
             invalidate_rpc_cache()
         except Exception as exc:
-            row["txid"] = "POOLS_ONLY"
-            row["hint"] = "Pools committed. Settlement: " + human_error(str(exc)[:160])
+            row["txid"] = getattr(exc, "txid", "POOLS_ONLY")
+            row["chain_status"] = getattr(exc, "status", "failed")
+            row["error"] = str(exc)[:160]
+            row["hint"] = "Simulated CPMM result; chain diagnostic: " + human_error(str(exc)[:160])
     else:
         row["txid"] = "POOLS_ONLY"
-        row["hint"] = "Pools committed on lab CPMM. Chain settlement needs LAB ON."
+        row["hint"] = "Simulated CPMM result. No on-chain swap or settlement."
+    row["mode"] = "PAPER"
+    row["status"] = "simulated"
     append_ledger(row)
     payload = status_payload()
     payload["arb_last"] = decorate_ledger_row(row)
@@ -950,6 +1020,7 @@ def reset_polymarket_query() -> dict[str, Any]:
 
 
 _KLINE_HOSTS = {"api.binance.com"}
+_KLINE_SYMBOLS = ("SOLUSDT", "KASUSDT")
 _CHART_HOSTS = frozenset(
     {"api.binance.com", "api.coingecko.com", "api.frankfurter.app"}
 )
@@ -964,6 +1035,16 @@ _chart_cache: dict[str, Any] = {
     "usd_sek": 0.0,
 }
 _kline_times: dict[str, list[int]] = {}
+_kas_kline_times: dict[str, list[int]] = {}
+_kas_chart_cache: dict[str, Any] = {
+    "ts": 0.0,
+    "closes": [],
+    "times": [],
+    "price": "",
+    "source": "",
+    "interval": "15m",
+    "error": "",
+}
 _BOT_NAME = "bot.json"
 
 
@@ -1011,15 +1092,28 @@ def fetch_klines(
     limit: int,
     timeout: float = 12.0,
     start_time: int | None = None,
+    end_time: int | None = None,
+    symbol: str = "SOLUSDT",
+    closed_only: bool = True,
 ) -> tuple[list[float], list[float], list[float], list[float]]:
+    sym = str(symbol or "SOLUSDT").upper()
+    step = crypto_data.BAR_SECONDS.get(interval)
+    if not step:
+        raise RuntimeError("CRYPTO_KLINE_INTERVAL")
+    if sym not in _KLINE_SYMBOLS:
+        raise RuntimeError("CRYPTO_KLINE_SYMBOL")
     url = (
-        "https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval="
+        "https://api.binance.com/api/v3/klines?symbol="
+        + sym
+        + "&interval="
         + str(interval)
         + "&limit="
         + str(int(limit))
     )
     if start_time is not None:
         url += "&startTime=" + str(int(start_time))
+    if end_time is not None:
+        url += "&endTime=" + str(int(end_time))
     host = urlparse(url).hostname or ""
     if host not in _KLINE_HOSTS:
         raise RuntimeError("CRYPTO_KLINE_HOST")
@@ -1030,7 +1124,7 @@ def fetch_klines(
     )
     with urllib.request.urlopen(request, timeout=float(timeout)) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    if start_time is not None:
+    if start_time is not None or end_time is not None:
         need = 1
     else:
         need = min(40, max(8, int(limit)))
@@ -1042,12 +1136,24 @@ def fetch_klines(
     volumes: list[float] = []
     times: list[int] = []
     for row in payload:
+        if closed_only and int(row[0]) / 1000 + step > time.time():
+            continue
         highs.append(float(row[2]))
         lows.append(float(row[3]))
         closes.append(float(row[4]))
         volumes.append(float(row[5]))
         times.append(int(row[0]) // 1000)
-    _kline_times[str(interval)] = times
+    if len(closes) < need:
+        raise RuntimeError("CRYPTO_CANDLES")
+    checked = crypto_data.validate_frame({"highs": highs, "lows": lows, "closes": closes,
+        "volumes": volumes, "times": times, "source": "binance", "symbol": sym},
+        interval, min_bars=need, require_closed=closed_only)
+    if checked["gaps"]:
+        raise RuntimeError("CRYPTO_DATA_GAPS")
+    if sym == "KASUSDT":
+        _kas_kline_times[str(interval)] = times
+    else:
+        _kline_times[str(interval)] = times
     return highs, lows, closes, volumes
 
 
@@ -1067,23 +1173,42 @@ def fetch_klines_history(
     start_ms: int = SOL_LISTED_MS,
     timeout: float = 12.0,
 ) -> tuple[list[float], list[float], list[float], list[float], list[int]]:
+    if interval not in crypto_data.BAR_SECONDS:
+        raise ValueError("CRYPTO_KLINE_INTERVAL")
     path = _history_path(interval)
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
         cached = {}
+    if cached.get("data_version") != crypto_data.HISTORY_VERSION:
+        cached = {}
     if str(cached.get("interval") or interval) != str(interval):
         cached = {}
+    if cached:
+        try:
+            valid = crypto_data.validate_frame(cached, interval, min_bars=1)
+            if valid["gaps"]:
+                cached = {}
+        except (ValueError, TypeError, KeyError, OverflowError):
+            cached = {}
     highs = [float(x) for x in (cached.get("highs") or [])]
     lows = [float(x) for x in (cached.get("lows") or [])]
     closes = [float(x) for x in (cached.get("closes") or [])]
     volumes = [float(x) for x in (cached.get("volumes") or [])]
     times = [int(x) for x in (cached.get("times") or [])]
+    # Re-fetch the tail; legacy/current partial bars must never be append-only.
+    if times:
+        highs.pop(); lows.pop(); closes.pop(); volumes.pop(); tail = times.pop()
+    else:
+        tail = None
     cursor = start_ms
     if times:
         cursor = max(cursor, times[-1] * 1000 + 1)
+    if tail is not None:
+        cursor = max(start_ms, tail * 1000)
     now_ms = int(time.time() * 1000)
     pages = 0
+    rate_limit_retries = 0
     # Full SOLUSDT listing: ~6y. 1m ≈ 3150 pages, 5m ≈ 640.
     page_cap = {
         "1m": 3400,
@@ -1099,8 +1224,15 @@ def fetch_klines_history(
     def _persist() -> None:
         if not closes:
             return
+        checked = crypto_data.validate_frame({"highs": highs, "lows": lows, "closes": closes,
+            "volumes": volumes, "times": times}, interval, min_bars=1)
+        if checked["gaps"]:
+            raise RuntimeError("CRYPTO_DATA_GAPS")
         blob = json.dumps(
             {
+                "data_version": crypto_data.HISTORY_VERSION,
+                "source": "binance", "symbol": "SOLUSDT", "closed_only": True,
+                "fetched_at": time.time(),
                 "interval": interval,
                 "highs": highs,
                 "lows": lows,
@@ -1136,17 +1268,21 @@ def fetch_klines_history(
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if int(getattr(exc, "code", 0) or 0) in (418, 429):
-                time.sleep(20.0)
-                continue
-            break
+                rate_limit_retries += 1
+                if rate_limit_retries <= 2:
+                    time.sleep(2.0 * rate_limit_retries)
+                    continue
+            raise RuntimeError("CRYPTO_HISTORY_REFRESH") from exc
         except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError):
-            break
+            raise RuntimeError("CRYPTO_HISTORY_REFRESH")
         if not isinstance(payload, list) or not payload:
             break
         last_open = None
         for row in payload:
             try:
                 open_ms = int(row[0])
+                if open_ms / 1000 + crypto_data.BAR_SECONDS[interval] > time.time():
+                    continue
                 high = float(row[2])
                 low = float(row[3])
                 close = float(row[4])
@@ -1179,6 +1315,35 @@ def fetch_sol_ohlcv() -> tuple[list[float], list[float], list[float], list[float
     return fetch_klines("5m", 200)
 
 
+def _price_rows(rows: Any, precision: int) -> tuple[list[float], list[int]]:
+    if not isinstance(rows, list) or len(rows) < 8:
+        raise RuntimeError("CRYPTO_CHART")
+    closes: list[float] = []
+    times: list[int] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            raise RuntimeError("CRYPTO_CHART")
+        try:
+            stamp = int(float(row[0]) / 1000.0)
+            price = round(float(row[1]), precision)
+        except (TypeError, ValueError, IndexError, OverflowError) as exc:
+            raise RuntimeError("CRYPTO_CHART") from exc
+        if stamp <= 0 or not math.isfinite(price) or price <= 0 or (times and stamp <= times[-1]):
+            raise RuntimeError("CRYPTO_CHART")
+        times.append(stamp)
+        closes.append(price)
+    return closes, times
+
+
+def _source_chart_interval(times: list[int]) -> str:
+    deltas = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+    if not deltas:
+        return "unknown"
+    observed = deltas[len(deltas) // 2]
+    return next((tf for tf in _CHART_TFS
+                 if crypto_data.BAR_SECONDS[tf] >= observed * .9), f"{observed}s")
+
+
 def _coingecko_sol_chart() -> tuple[list[float], list[int]]:
     url = (
         "https://api.coingecko.com/api/v3/coins/solana/market_chart"
@@ -1195,20 +1360,7 @@ def _coingecko_sol_chart() -> tuple[list[float], list[int]]:
     with urllib.request.urlopen(request, timeout=3.0) as response:
         payload = json.loads(response.read().decode("utf-8"))
     rows = payload.get("prices") if isinstance(payload, dict) else None
-    if not isinstance(rows, list) or len(rows) < 8:
-        raise RuntimeError("CRYPTO_CHART")
-    closes: list[float] = []
-    times: list[int] = []
-    for row in rows:
-        if not isinstance(row, list) or len(row) < 2:
-            continue
-        try:
-            times.append(int(float(row[0]) / 1000.0))
-            closes.append(round(float(row[1]), 4))
-        except (TypeError, ValueError):
-            continue
-    if len(closes) < 8:
-        raise RuntimeError("CRYPTO_CHART")
+    closes, times = _price_rows(rows, 4)
     return closes[-80:], times[-80:]
 
 
@@ -1275,6 +1427,9 @@ def quote_for_wallet(wallet: dict[str, Any]) -> dict[str, Any]:
     sek = usd * usd_sek if usd_sek > 0 else 0.0
     return {
         "sol_usd": px,
+        "stale": snap.get("stale", True),
+        "age_seconds": snap.get("age_seconds"),
+        "valuation_mode": "LOCALNET_SIMULATED" if load_network() == "testnet" else "OBSERVE_MARK_TO_MARKET",
         "usd_sek": usd_sek,
         "sol": sol,
         "value_usd": round(usd, 2),
@@ -1307,7 +1462,7 @@ def _load_chart_disk() -> None:
         stamps = [0] * len(rows)
     closes: list[float] = []
     times: list[int] = []
-    for item, stamp in list(zip(rows, stamps))[-80:]:
+    for item, stamp in list(zip(rows, stamps))[-5000:]:
         try:
             closes.append(float(item))
             times.append(int(stamp or 0))
@@ -1322,6 +1477,8 @@ def _load_chart_disk() -> None:
     _chart_cache["price"] = str(payload.get("price") or closes[-1])
     _chart_cache["source"] = str(payload.get("source") or "")
     _chart_cache["interval"] = str(payload.get("interval") or "")
+    _chart_cache.setdefault("requested_interval", str(payload.get("requested_interval") or payload.get("interval") or "15m"))
+    _chart_cache["fetched_at"] = float(payload.get("fetched_at") or 0)
     try:
         _chart_cache["usd_sek"] = float(payload.get("usd_sek") or 0)
     except (TypeError, ValueError):
@@ -1338,7 +1495,9 @@ def _save_chart_disk() -> None:
             "price": _chart_cache.get("price") or "",
             "source": _chart_cache.get("source") or "",
             "interval": _chart_cache.get("interval") or "",
+            "requested_interval": _chart_cache.get("requested_interval") or _chart_cache.get("interval") or "15m",
             "usd_sek": _chart_cache.get("usd_sek") or 0,
+            "fetched_at": _chart_cache.get("fetched_at") or 0,
         },
         separators=(",", ":"),
     )
@@ -1353,6 +1512,7 @@ def chart_snapshot() -> dict[str, Any]:
     if not _chart_cache.get("closes"):
         _load_chart_disk()
     return {
+        **crypto_data.freshness(_chart_cache, _CHART_TTL),
         "closes": list(_chart_cache.get("closes") or []),
         "times": list(_chart_cache.get("times") or []),
         "price": str(_chart_cache.get("price") or ""),
@@ -1371,14 +1531,16 @@ def _set_live_chart(
 ) -> None:
     if len(closes) < 2:
         return
-    out = [round(float(item), 4) for item in closes[-80:]]
+    out = [round(float(item), 4) for item in closes[-5000:]]
+    if any(not math.isfinite(price) or price <= 0 for price in out):
+        raise RuntimeError("CRYPTO_CHART")
     stamps = [int(item) for item in times[-len(out):]] if times else []
     if stamps and len(stamps) != len(out):
         stamps = []
     if live is not None:
         try:
             px = round(float(live), 4)
-            if px > 0:
+            if math.isfinite(px) and px > 0:
                 out[-1] = px
         except (TypeError, ValueError):
             pass
@@ -1387,7 +1549,10 @@ def _set_live_chart(
     _chart_cache["price"] = str(out[-1])
     _chart_cache["source"] = source
     _chart_cache["interval"] = interval
+    _chart_cache["history_end"] = False
     _chart_cache["ts"] = time.monotonic()
+    _chart_cache["fetched_at"] = time.time()
+    _chart_cache["error"] = ""
     _save_chart_disk()
 
 
@@ -1403,6 +1568,27 @@ def _ingest_spark(
         stamps = [int(item) for item in (_kline_times.get(tf) or [])[-len(closes):]]
         _set_live_chart(closes, stamps, "binance", interval=tf, live=live)
         return
+
+
+_CHART_TFS = ("1m", "5m", "15m", "1h", "4h", "1d")
+
+
+def chart_interval() -> str:
+    tf = str(_chart_cache.get("requested_interval") or _chart_cache.get("interval") or "15m")
+    if tf not in _CHART_TFS:
+        return "15m"
+    return tf
+
+
+def set_chart_interval(interval: str) -> dict[str, Any]:
+    """Switch the live SOL tape. Paper chart only. No order."""
+    tf = str(interval or "").strip()
+    if tf not in _CHART_TFS:
+        tf = "15m"
+    _chart_cache["requested_interval"] = tf
+    _chart_cache["ts"] = 0.0
+    request_chart_refresh("SOL")
+    return status_payload()
 
 
 def cached_sol_chart() -> dict[str, Any]:
@@ -1422,22 +1608,27 @@ def cached_sol_chart() -> dict[str, Any]:
     closes: list[float] = []
     times: list[int] = []
     source = ""
-    interval = "15m"
+    interval = chart_interval()
     try:
-        _highs, _lows, raw, _vols = fetch_klines("15m", 80, timeout=3.0)
-        closes = [round(float(item), 4) for item in raw[-80:]]
-        times = [int(item) for item in (_kline_times.get("15m") or [])[-len(closes):]]
+        _highs, _lows, raw, _vols = fetch_klines(interval, 1000, timeout=8.0, closed_only=False)
+        closes = [round(float(item), 4) for item in raw[-1000:]]
+        times = [int(item) for item in (_kline_times.get(interval) or [])[-len(closes):]]
         source = "binance"
     except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
         try:
-            closes, times = _coingecko_sol_chart()
-            source = "coingecko"
-            interval = "cg"
+            _highs, _lows, raw, _vols = fetch_klines("15m", 80, timeout=3.0)
+            closes = [round(float(item), 4) for item in raw[-80:]]
+            times = [int(item) for item in (_kline_times.get("15m") or [])[-len(closes):]]
+            source = "binance"
+            interval = "15m"
         except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
-            closes = list(cached) if isinstance(cached, list) else []
-            times = list(_chart_cache.get("times") or [])
-            source = str(_chart_cache.get("source") or "")
-            interval = str(_chart_cache.get("interval") or "")
+            try:
+                closes, times = _coingecko_sol_chart()
+                source = "coingecko"
+                interval = _source_chart_interval(times)
+            except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+                _chart_cache["error"] = "NO_MARKET_DATA"
+                return chart_snapshot()
     if closes:
         _set_live_chart(closes, times, source, interval=interval)
         try:
@@ -1450,16 +1641,388 @@ def cached_sol_chart() -> dict[str, Any]:
     return chart_snapshot()
 
 
+_chart_refresh_lock = threading.RLock()
+_chart_refresh_running: set[str] = set()
+_chart_refresh_pending: set[str] = set()
+
+
+def request_chart_refresh(asset: str = "SOL") -> None:
+    """One worker per asset; UI refresh never blocks on public market requests."""
+    asset = "KAS" if asset == "KAS" else "SOL"
+    with _chart_refresh_lock:
+        if asset in _chart_refresh_running:
+            _chart_refresh_pending.add(asset)
+            return
+        _chart_refresh_running.add(asset)
+    def run():
+        try:
+            while True:
+                (cached_kas_chart if asset == "KAS" else cached_sol_chart)()
+                with _chart_refresh_lock:
+                    if asset not in _chart_refresh_pending:
+                        break
+                    _chart_refresh_pending.discard(asset)
+        finally:
+            with _chart_refresh_lock:
+                _chart_refresh_running.discard(asset)
+    threading.Thread(target=run, name="crypto-chart-" + asset, daemon=True).start()
+
+
+def _merge_bars(
+    old_closes: list[float],
+    old_times: list[int],
+    new_closes: list[float],
+    new_times: list[int],
+    cap: int = 5000,
+) -> tuple[list[float], list[int]]:
+    by_time: dict[int, float] = {}
+    order: list[int] = []
+    for stamp, price in zip(old_times, old_closes):
+        try:
+            key = int(stamp)
+            value = float(price)
+        except (TypeError, ValueError):
+            continue
+        if key not in by_time:
+            order.append(key)
+        by_time[key] = value
+    for stamp, price in zip(new_times, new_closes):
+        try:
+            key = int(stamp)
+            value = float(price)
+        except (TypeError, ValueError):
+            continue
+        if key not in by_time:
+            order.append(key)
+        by_time[key] = value
+    order.sort()
+    if len(order) > cap:
+        order = order[-cap:]
+    return [by_time[key] for key in order], order
+
+
+def extend_sol_chart() -> dict[str, Any]:
+    """Page Binance backward from the oldest loaded SOL bar. No order."""
+    times = [int(item) for item in (_chart_cache.get("times") or [])]
+    closes = [float(item) for item in (_chart_cache.get("closes") or [])]
+    if len(times) < 2 or len(times) != len(closes) or _chart_cache.get("history_end"):
+        return status_payload()
+    interval = chart_interval()
+    if interval not in _CHART_TFS:
+        return status_payload()
+    end_ms = int(times[0]) * 1000 - 1
+    try:
+        _highs, _lows, raw, _vols = fetch_klines(
+            interval, 1000, timeout=8.0, end_time=end_ms
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ):
+        return status_payload()
+    page_times = [int(item) for item in (_kline_times.get(interval) or [])]
+    older_closes: list[float] = []
+    older_times: list[int] = []
+    first = times[0]
+    for price, stamp in zip(raw, page_times):
+        if stamp < first:
+            older_closes.append(float(price))
+            older_times.append(stamp)
+    if not older_times:
+        _chart_cache["history_end"] = True
+        return status_payload()
+    merged_closes, merged_times = _merge_bars(closes, times, older_closes, older_times)
+    _chart_cache["closes"] = [round(float(item), 4) for item in merged_closes]
+    _chart_cache["times"] = merged_times
+    _chart_cache["history_end"] = False
+    _save_chart_disk()
+    return status_payload()
+
+
+def _kas_chart_path():
+    from backend.crypto_contract import ensure_state_dir
+
+    return ensure_state_dir() / "kas-chart.json"
+
+
+def _portfolio_path():
+    from backend.crypto_contract import ensure_state_dir
+
+    return ensure_state_dir() / "portfolio.json"
+
+
+def portfolio_asset() -> str:
+    path = _portfolio_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return "SOL"
+    if not isinstance(payload, dict):
+        return "SOL"
+    token = str(payload.get("asset") or "").upper()
+    if token in ("KAS", "KASPA"):
+        return "KAS"
+    return "SOL"
+
+
+def _kas_px(value: float) -> float:
+    number = float(value)
+    if number >= 100:
+        return round(number, 2)
+    if number >= 1:
+        return round(number, 4)
+    return round(number, 6)
+
+
+def kas_chart_snapshot() -> dict[str, Any]:
+    if not _kas_chart_cache.get("closes"):
+        _load_kas_chart_disk()
+    return {
+        **crypto_data.freshness(_kas_chart_cache, _CHART_TTL),
+        "symbol": "KASUSDT",
+        "closes": list(_kas_chart_cache.get("closes") or []),
+        "times": list(_kas_chart_cache.get("times") or []),
+        "price": str(_kas_chart_cache.get("price") or ""),
+        "source": str(_kas_chart_cache.get("source") or ""),
+        "interval": str(_kas_chart_cache.get("interval") or ""),
+        "error": str(_kas_chart_cache.get("error") or ""),
+    }
+
+
+def _load_kas_chart_disk() -> None:
+    path = _kas_chart_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    rows = payload.get("closes")
+    if not isinstance(rows, list) or len(rows) < 2:
+        return
+    stamps = payload.get("times")
+    if not isinstance(stamps, list) or len(stamps) != len(rows):
+        stamps = [0] * len(rows)
+    closes: list[float] = []
+    times: list[int] = []
+    for item, stamp in list(zip(rows, stamps))[-2000:]:
+        try:
+            closes.append(float(item))
+            times.append(int(stamp or 0))
+        except (TypeError, ValueError):
+            continue
+    if len(closes) < 2:
+        return
+    if any(stamp <= 0 for stamp in times):
+        times = []
+    _kas_chart_cache["closes"] = closes
+    _kas_chart_cache["times"] = times
+    _kas_chart_cache["price"] = str(payload.get("price") or closes[-1])
+    _kas_chart_cache["source"] = str(payload.get("source") or "")
+    _kas_chart_cache["interval"] = str(payload.get("interval") or "15m")
+    _kas_chart_cache.setdefault("requested_interval", str(payload.get("requested_interval") or payload.get("interval") or "15m"))
+    _kas_chart_cache["fetched_at"] = float(payload.get("fetched_at") or 0)
+    _kas_chart_cache["error"] = ""
+    _kas_chart_cache["ts"] = 0.0
+
+
+def _save_kas_chart_disk() -> None:
+    path = _kas_chart_path()
+    blob = json.dumps(
+        {
+            "closes": _kas_chart_cache.get("closes") or [],
+            "times": _kas_chart_cache.get("times") or [],
+            "price": _kas_chart_cache.get("price") or "",
+            "source": _kas_chart_cache.get("source") or "",
+            "interval": _kas_chart_cache.get("interval") or "",
+            "requested_interval": _kas_chart_cache.get("requested_interval") or _kas_chart_cache.get("interval") or "15m",
+            "fetched_at": _kas_chart_cache.get("fetched_at") or 0,
+        },
+        separators=(",", ":"),
+    )
+    path.write_text(blob + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _set_kas_chart(
+    closes: list[float],
+    times: list[int],
+    source: str,
+    interval: str = "15m",
+) -> None:
+    if len(closes) < 2:
+        return
+    out = [_kas_px(item) for item in closes[-2000:]]
+    if any(not math.isfinite(price) or price <= 0 for price in out):
+        raise RuntimeError("CRYPTO_CHART")
+    stamps = [int(item) for item in times[-len(out):]] if times else []
+    if stamps and len(stamps) != len(out):
+        stamps = []
+    _kas_chart_cache["closes"] = out
+    _kas_chart_cache["times"] = stamps
+    _kas_chart_cache["price"] = str(out[-1])
+    _kas_chart_cache["source"] = source
+    _kas_chart_cache["interval"] = interval
+    _kas_chart_cache["error"] = ""
+    _kas_chart_cache["ts"] = time.monotonic()
+    _kas_chart_cache["fetched_at"] = time.time()
+    _save_kas_chart_disk()
+
+
+def _bucket_closes(
+    closes: list[float],
+    times: list[int],
+    step: int,
+) -> tuple[list[float], list[int]]:
+    """Last price inside each step. Stamps stay real seconds."""
+    if step <= 0 or len(closes) < 2:
+        return closes[-2000:], times[-2000:]
+    order: list[int] = []
+    last: dict[int, float] = {}
+    for stamp, price in zip(times, closes):
+        key = int(stamp) - (int(stamp) % int(step))
+        if key not in last:
+            order.append(key)
+        last[key] = float(price)
+    if len(order) < 2:
+        return closes[-2000:], times[-2000:]
+    kept = order[-2000:]
+    return [last[key] for key in kept], kept
+
+
+def _coingecko_kas_chart(interval: str = "15m") -> tuple[list[float], list[int], str]:
+    """Kaspa is not on Binance spot. CoinGecko is the allowlisted tape.
+
+    Their public chart is about 5 minutes on a 1-day window, hourly out to
+    90 days, and daily after that. 1m therefore lands on the 5m tape.
+    """
+    spec = {
+        "1m": ("1", 300, "5m"),
+        "5m": ("1", 300, "5m"),
+        "15m": ("1", 900, "15m"),
+        "1h": ("90", 3600, "1h"),
+        "4h": ("90", 14400, "4h"),
+        "1d": ("365", 86400, "1d"),
+    }
+    days, step, actual = spec.get(str(interval), ("1", 900, "15m"))
+    url = (
+        "https://api.coingecko.com/api/v3/coins/kaspa/market_chart"
+        "?vs_currency=usd&days=" + days
+    )
+    host = urlparse(url).hostname or ""
+    if host not in _CHART_HOSTS:
+        raise RuntimeError("CRYPTO_CHART_HOST")
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "gg-ai-desktop-crypto/1"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=4.0) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    rows = payload.get("prices") if isinstance(payload, dict) else None
+    closes, times = _price_rows(rows, 8)
+    deltas = sorted(b-a for a, b in zip(times, times[1:]) if b > a)
+    observed = deltas[len(deltas)//2] if deltas else step
+    if observed > step * 1.5:
+        # Coarse source data cannot be promoted to a finer requested interval.
+        actual = next((tf for tf in ("5m", "15m", "1h", "4h", "1d")
+                       if crypto_data.BAR_SECONDS[tf] >= observed * .9), "1d")
+        step = max(step, crypto_data.BAR_SECONDS[actual])
+    bucketed, stamps = _bucket_closes(closes, times, step)
+    if len(bucketed) < 8:
+        raise RuntimeError("CRYPTO_CHART")
+    return bucketed, stamps, actual
+
+
+def cached_kas_chart() -> dict[str, Any]:
+    """Public KAS/USD tape. Same hosts as SOL. No order, no Kaspa RPC."""
+    now = time.monotonic()
+    cached = _kas_chart_cache.get("closes")
+    stamps = list(_kas_chart_cache.get("times") or [])
+    if (
+        isinstance(cached, list)
+        and len(cached) > 1
+        and len(stamps) == len(cached)
+        and now - float(_kas_chart_cache.get("ts") or 0) < _CHART_TTL
+    ):
+        return kas_chart_snapshot()
+    if not cached:
+        _load_kas_chart_disk()
+        cached = _kas_chart_cache.get("closes")
+    closes: list[float] = []
+    times: list[int] = []
+    source = ""
+    interval = str(_kas_chart_cache.get("requested_interval") or _kas_chart_cache.get("interval") or "15m")
+    if interval not in _CHART_TFS:
+        interval = "15m"
+    try:
+        _highs, _lows, raw, _vols = fetch_klines(
+            interval, 120, timeout=3.0, symbol="KASUSDT"
+        )
+        closes = [_kas_px(item) for item in raw[-120:]]
+        times = [int(item) for item in (_kas_kline_times.get(interval) or [])[-len(closes):]]
+        source = "binance"
+    except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+        try:
+            closes, times, interval = _coingecko_kas_chart(interval)
+            source = "coingecko"
+        except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+            _kas_chart_cache["error"] = "NO_MARKET_DATA"
+            return kas_chart_snapshot()
+    if len(closes) > 1:
+        _set_kas_chart(closes, times, source, interval=interval)
+    else:
+        _kas_chart_cache["error"] = "NO_MARKET_DATA"
+    return kas_chart_snapshot()
+
+
+def extend_kas_chart() -> dict[str, Any]:
+    """The loaded CoinGecko window is the whole public tape at this bar size."""
+    _kas_chart_cache["history_end"] = True
+    return status_payload()
+
+
+def set_kas_chart_interval(interval: str) -> dict[str, Any]:
+    """Switch the KAS tape. Public price only. No order."""
+    tf = str(interval or "").strip()
+    if tf not in _CHART_TFS:
+        tf = "15m"
+    _kas_chart_cache["requested_interval"] = tf
+    _kas_chart_cache["history_end"] = False
+    _kas_chart_cache["ts"] = 0.0
+    request_chart_refresh("KAS")
+    return status_payload()
+
+
+def set_portfolio_asset(asset: str) -> dict[str, Any]:
+    """One portfolio. SOL and KAS are wallets on it, not separate pages."""
+    chosen = "KAS" if str(asset or "").strip().upper() in ("KAS", "KASPA") else "SOL"
+    path = _portfolio_path()
+    path.write_text(
+        json.dumps({"asset": chosen}) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    if chosen == "KAS":
+        try:
+            cached_kas_chart()
+        except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+            _kas_chart_cache["error"] = "NO_MARKET_DATA"
+    return status_payload()
+
+
 def _ohlcv_from_closes(closes: list[float]) -> tuple[list[float], list[float], list[float], list[float]]:
-    rows = [float(item) for item in closes]
-    if len(rows) < 8:
-        raise RuntimeError("NO_MARKET_DATA")
-    if len(rows) < 80:
-        rows = [rows[0]] * (80 - len(rows)) + rows
-    highs = [item * 1.002 for item in rows]
-    lows = [item * 0.998 for item in rows]
-    vols = [1.0] * len(rows)
-    return highs, lows, rows, vols
+    raise RuntimeError("NO_MARKET_DATA")
 
 
 def _ohlcv_for_eval() -> tuple[list[float], list[float], list[float], list[float]]:
@@ -1528,6 +2091,7 @@ def set_bot_armed(armed: bool) -> dict[str, Any]:
 def tick_bot() -> dict[str, Any]:
     bot = load_bot()
     report = evaluate_signals()
+    bot = load_bot()
     fired = None
     if (
         bot["armed"]
@@ -1552,24 +2116,28 @@ def tick_bot() -> dict[str, Any]:
 
 
 def set_trader_armed(armed: bool) -> dict[str, Any]:
-    crypto_trader.set_armed(bool(armed))
-    payload = status_payload()
-    payload["trader"] = crypto_trader.snapshot()
-    return payload
+    if armed and load_network() != "testnet":
+        raise RuntimeError("MAINNET_OBSERVE_ONLY")
+    crypto_paper.set_enabled(paper_pair(), crypto_bots.selected(), bool(armed))
+    return status_payload()
+
+
+def set_paper_all(enabled: bool) -> dict[str, Any]:
+    if enabled and load_network() != "testnet":
+        raise RuntimeError("MAINNET_OBSERVE_ONLY")
+    crypto_paper.set_all(paper_pair(), bool(enabled))
+    return status_payload()
 
 
 def reset_trader() -> dict[str, Any]:
+    crypto_paper.reset(paper_pair(), crypto_bots.selected())
     crypto_trader.reset_book()
-    payload = status_payload()
-    payload["trader"] = crypto_trader.snapshot()
-    return payload
+    return status_payload()
 
 
 def set_trader_book(book_id: str) -> dict[str, Any]:
     crypto_bots.set_book(book_id)
-    payload = status_payload()
-    payload["trader"] = dict(crypto_trader.snapshot(), books=crypto_bots.catalog())
-    return payload
+    return status_payload()
 
 
 def _trader_ohlcv() -> tuple[list[float], list[float], list[float], list[float]]:
@@ -1601,125 +2169,56 @@ def _fetch_tf(interval: str, limit: int = 240) -> tuple[list[float], list[float]
 
 
 def tick_trader() -> dict[str, Any]:
-    try:
-        tf_osc: dict[str, dict[str, Any]] = {}
-        frames: dict[str, tuple[list[float], list[float], list[float], list[float]]] = {}
-        votes: dict[str, str] = {}
-        tf_flow: dict[str, str] = {}
-        for tf in crypto_trader.TIMEFRAMES:
-            got = _fetch_tf(tf)
-            if got is None:
-                votes[tf] = "none"
-                continue
-            frames[tf] = got
-            snap = crypto_trader.osc_last(got[0], got[1], got[2], got[3])
-            tf_osc[tf] = snap
-            try:
-                series = crypto_trader.signal_series(got[0], got[1], got[2], got[3])
-                votes[tf] = series[-1] if series else "none"
-            except (ValueError, TypeError, IndexError):
-                rsi_v = snap.get("rsi")
-                if crypto_trader.in_buy_band(rsi_v):
-                    votes[tf] = "buy"
-                elif crypto_trader.in_sell_band(rsi_v):
-                    votes[tf] = "sell"
-                else:
-                    votes[tf] = "none"
-            if len(got[2]) >= 40:
-                tf_flow[tf] = crypto_trader.regime_from_4h(got[0], got[1], got[2])
-            else:
-                tf_flow[tf] = "range"
-        h1 = frames.get("1h")
-        h5 = frames.get("5m") or frames.get("15m") or frames.get("1m") or h1
-        if h1 is not None and len(h1[2]) >= 40:
-            regime = crypto_trader.regime_from_4h(h1[0], h1[1], h1[2])
-        elif h5 is not None:
-            rh, rl, rc = crypto_trader.resample_ohlc(h5[0], h5[1], h5[2], 12)
-            regime = crypto_trader.regime_from_4h(rh or h5[0], rl or h5[1], rc or h5[2])
-        else:
-            raise RuntimeError("NO_MARKET_DATA")
-        px_tf = frames.get("1m") or frames.get("5m") or h1
-        if px_tf is None:
-            raise RuntimeError("NO_MARKET_DATA")
-        atr = crypto_trader.atr_pct(px_tf[0], px_tf[1], px_tf[2])
-        if crypto_bots.selected() == "optimal":
-            from backend import crypto_optimal
-
-            vol_row = h1[3] if h1 is not None and len(h1) > 3 else []
-            state = crypto_trader.load_state()
-            open_lots = list(state.get("open") or state.get("lots") or [])
-            in_pos = bool(open_lots) or int(state.get("float_sol") or 0) > 0
-            gate = crypto_optimal.live_gate(
-                list(h1[2]) if h1 is not None else list(px_tf[2]),
-                list(vol_row) if vol_row else [1.0] * len(px_tf[2]),
-                in_position=in_pos,
-                trades_today=int(state.get("fills_today") or 0),
-            )
-            votes = crypto_optimal.apply_live_votes(votes, gate)
-        sig = {
-            "super": votes.get("1m") or votes.get("5m") or "none",
-            "mtf": votes,
-            "flow": tf_flow,
-            "notes": [tf + " rsi " + str((tf_osc.get(tf) or {}).get("rsi")) for tf in crypto_trader.TIMEFRAMES],
-            "strategy": "weighted-mtf-flow",
-        }
-        book = crypto_trader.tick(
-            px_tf[2][-1],
-            sig,
-            regime,
-            atr,
-            execute_contracts=True,
-            tf_osc=tf_osc,
-            tf_super=votes,
-            tf_flow=tf_flow,
-        )
+    # Public market data only. This engine has no signer, RPC writes or orders.
+    if load_network() != "testnet":
+        for pair in crypto_paper.active_pairs():
+            crypto_paper.set_all(pair, False)
+        payload = status_payload()
+        payload["error"] = "MAINNET_OBSERVE_ONLY"
+        return payload
+    errors = []
+    for pair in crypto_paper.active_pairs():
         try:
-            _ingest_spark(frames, live=float(px_tf[2][-1]))
-        except (TypeError, ValueError, IndexError):
-            _ingest_spark(frames)
-        last = dict(book.get("last") if isinstance(book.get("last"), dict) else {})
-        last["mtf"] = votes
-        book["last"] = last
-        book["mtf"] = votes
-        if last.get("action") in ("buy", "sell"):
-            row = {
-                "ts": int(time.time()),
-                "mode": "TESTNET",
-                "network": "testnet",
-                "side": last.get("action"),
-                "source": "trader-80-20",
-                "txid": "VAULT",
-                "hint": str(last.get("note") or ""),
-            }
-            if lab_status().get("healthy") and has_signer():
-                try:
-                    sent = send_self_transfer(rpc_call, 5_000)
-                    last = dict(last)
-                    last["txid"] = sent.get("txid")
-                    book["last"] = last
-                    row["txid"] = sent.get("txid")
-                except Exception:
-                    pass
-            append_ledger(row)
-    except Exception as exc:
-        token = short_error(str(exc)[:120]) or "NO_MARKET_DATA"
-        if "KLINE" in str(exc) or "CANDLES" in str(exc) or "CHART" in str(exc):
-            token = "NO_MARKET_DATA"
-        sig = {
-            "strategy": "Strategy004",
-            "super": "none",
-            "error": token,
-            "notes": [human_error(token)],
-        }
-        book = dict(crypto_trader.snapshot())
-        last = dict(book.get("last") or {})
-        last["action"] = "none"
-        last["note"] = human_error(token)
-        book["last"] = last
+            if crypto_paper.due(pair):
+                crypto_paper.advance(pair, crypto_market.recent_frames(pair))
+        except Exception as exc:
+            reason = type(exc).__name__ + ": " + str(exc)[:160]
+            crypto_paper.data_error(pair, reason)
+            errors.append(pair + ": " + reason)
     payload = status_payload()
-    payload["signal"] = sig
-    payload["trader"] = book
+    if errors:
+        payload["error"] = "; ".join(errors)
     return payload
+
+
+_paper_tick_lock = threading.RLock()
+_paper_tick_jobs: dict[str, dict[str, Any]] = {}
+
+
+def paper_tick_status() -> dict[str, Any]:
+    with _paper_tick_lock:
+        return {key: dict(value) for key, value in _paper_tick_jobs.items()}
+
+
+def start_paper_tick(kind: str = "trader") -> dict[str, Any]:
+    """One tick per engine at a time; network waits stay outside Qt's thread."""
+    if kind not in ("trader", "bot"):
+        raise ValueError("CRYPTO_TICK_KIND")
+    with _paper_tick_lock:
+        if (_paper_tick_jobs.get(kind) or {}).get("state") == "running":
+            return status_payload()
+        _paper_tick_jobs[kind] = {"state": "running", "note": "Fetching closed market bars…"}
+    def run():
+        try:
+            result = (tick_trader if kind == "trader" else tick_bot)()
+            error = result.get("error") or (result.get("signal") or {}).get("error")
+            job = {"state": "error" if error else "done", "note": str(error or "Paper tick complete.")}
+        except Exception as exc:
+            job = {"state": "error", "note": short_error(str(exc)[:160])}
+        with _paper_tick_lock:
+            _paper_tick_jobs[kind] = job
+    threading.Thread(target=run, name="crypto-paper-" + kind, daemon=True).start()
+    return status_payload()
 
 
 _backtest_lock = threading.Lock()
@@ -1728,7 +2227,7 @@ _backtest_job: dict[str, Any] = {
     "note": "",
     "started": 0.0,
 }
-_UI_BACKTEST_TF = crypto_trader.TIMEFRAMES
+_UI_BACKTEST_TF = crypto_market.TIMEFRAMES
 
 
 def backtest_job() -> dict[str, Any]:
@@ -1749,16 +2248,16 @@ def start_backtest_trader() -> dict[str, Any]:
             launch = True
     if launch:
         threading.Thread(
-            target=_run_backtest_job, name="gg-crypto-backtest", daemon=True
+            target=_run_backtest_job, args=(paper_pair(), crypto_bots.selected()), name="gg-crypto-backtest", daemon=True
         ).start()
     payload = status_payload()
     payload["backtest_job"] = backtest_job()
     return payload
 
 
-def _run_backtest_job() -> None:
+def _run_backtest_job(pair: str | None = None, chosen: str | None = None) -> None:
     try:
-        backtest_trader(tfs=_UI_BACKTEST_TF)
+        backtest_trader(tfs=_UI_BACKTEST_TF, pair=pair, chosen=chosen)
         with _backtest_lock:
             _backtest_job["state"] = "done"
             _backtest_job["note"] = ""
@@ -1769,59 +2268,17 @@ def _run_backtest_job() -> None:
             _backtest_job["note"] = human_error(token)
 
 
-def backtest_trader(tfs: tuple[str, ...] | None = None) -> dict[str, Any]:
-    frames: dict[str, dict[str, Any]] = {}
-    names = tfs or ("1m", "5m", "15m", "1h", "4h", "8h", "1d")
-    if names == crypto_trader.TIMEFRAMES:
-        # 15m/8h on a 2020→now SOL tape is thousands of pages. 1h is the clock.
-        names = ("1h", "4h", "1d")
-    if crypto_bots.selected() == "optimal":
-        names = ("1h",)
-    for tf in names:
-        try:
-            h, l, c, v, times = fetch_klines_history(tf)
-            frames[tf] = {
-                "highs": h,
-                "lows": l,
-                "closes": c,
-                "volumes": v,
-                "times": times,
-            }
-        except (
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            urllib.error.URLError,
-            json.JSONDecodeError,
-        ):
-            continue
-    try:
-        if len(frames) >= 1:
-            report = crypto_bots.run_backtest(frames)
-            report["range"] = "2020-2026 " + "+".join(
-                tf for tf in crypto_trader.TIMEFRAMES if tf in frames
-            )
-        else:
-            raise RuntimeError("CRYPTO_HISTORY")
-    except (
-        OSError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        urllib.error.URLError,
-        json.JSONDecodeError,
-    ) as exc:
-        if crypto_bots.selected() == "hybrid":
-            raise RuntimeError("HYBRID_BACKTEST:" + (str(exc)[:180] or "FAILED")) from exc
-        h5, l5, c5, v5 = _ohlcv_for_eval()
-        report = crypto_trader.run_backtest(h5, l5, c5, v5)
-        report["range"] = "cache-5m"
+def backtest_trader(tfs: tuple[str, ...] | None = None, *, pair: str | None = None,
+                    chosen: str | None = None) -> dict[str, Any]:
+    pair = pair or paper_pair()
+    chosen = chosen or crypto_bots.selected()
+    # Extra slow-TF history; real 15m bars supply the second fast confirmation.
+    start = int(time.time() - (4000 + 2400) * 3600)
+    frames = {tf: crypto_market.history(pair, tf, start) for tf in crypto_market.TIMEFRAMES}
+    report = crypto_bots.compare_books(frames, book_id=chosen)
     payload = status_payload()
     payload["backtest"] = report
     trader = dict(payload.get("trader") or {})
-    trader["backtest"] = report
-    trader["books"] = crypto_bots.catalog()
-    trader["book"] = crypto_bots.selected()
+    trader.update({"backtest": report, "books": crypto_bots.catalog(), "book": crypto_bots.selected()})
     payload["trader"] = trader
     return payload

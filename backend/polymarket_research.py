@@ -13,10 +13,16 @@ validated URL and SQL preview and explains how to enable the query runner.
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import re
+import subprocess
+import sys
 import threading
 import time
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlencode
 from datetime import date as date_type
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -30,6 +36,13 @@ SOURCE_LABEL = "PENDULUMFLOW V3 · REMOTE PARQUET · READ ONLY"
 PRESETS = ("SUMMARY", "TRADES", "TOUCH", "SCAN")
 MAX_ROWS = 240
 MAX_SLUG_LENGTH = 160
+QUERY_TIMEOUT_SECONDS = 30
+MEMORY_LIMIT = "512MiB"
+MAX_SOURCE_BYTES = 2 * 1024**3
+_process_lock = threading.RLock()
+_active_process: subprocess.Popen | None = None
+_cancel = threading.Event()
+_worker_running = False
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _HOUR_RE = re.compile(r"^\d{1,2}$")
@@ -86,7 +99,7 @@ def normalise_query(
     query_date: Any,
     hour: Any,
     slug: Any = "",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     mode = str(preset or "").strip().upper()
     if mode not in PRESETS:
         raise ValueError("POLYMARKET_PRESET")
@@ -118,7 +131,8 @@ def query_spec(
     query_date: Any,
     hour: Any,
     slug: Any = "",
-) -> dict[str, str]:
+    *, condition_id: str = "",
+) -> dict[str, Any]:
     """Return the fixed, auditable query for a selected archive hour."""
 
     query = normalise_query(preset, query_date, hour, slug)
@@ -135,11 +149,12 @@ LIMIT 16
 """.strip()
     elif mode == "TRADES":
         sql = f"""
-SELECT strftime(timestamp_received, '%H:%M:%S') AS at,
+SELECT timestamp_received AS at,
        round(price, 4) AS price,
        round(size, 2) AS size,
        side,
-       '0x' || lower(hex(market)) AS market
+       '0x' || lower(hex(market)) AS market,
+       '0x' || lower(hex(asset_id)) AS asset
 FROM read_parquet({source})
 WHERE event_type = 'last_trade_price'
 ORDER BY size DESC
@@ -148,35 +163,41 @@ LIMIT 20
     elif mode == "SCAN":
         sql = f"""
 SELECT '0x' || lower(hex(market)) AS market,
+       '0x' || lower(hex(asset_id)) AS asset,
        round(avg(best_ask - best_bid), 4) AS spread,
        round(avg(best_bid), 4) AS bid,
        round(avg(best_ask), 4) AS ask,
        count(*) AS quotes
 FROM read_parquet({source})
 WHERE event_type = 'best_bid_ask'
-GROUP BY 1
+GROUP BY 1, 2
 HAVING spread IS NOT NULL
 ORDER BY spread DESC
 LIMIT 20
 """.strip()
     else:
         market_slug = _sql_literal(query["slug"])
-        sql = f"""
-WITH target AS (
+        if condition_id and not re.fullmatch(r"0x[0-9a-fA-F]{64}", condition_id):
+            raise ValueError("POLYMARKET_CONDITION_ID")
+        target_filter = "market = from_hex(" + _sql_literal(condition_id[2:]) + ")" if condition_id else "market = (SELECT market FROM target)"
+        target_cte = "" if condition_id else f"""WITH target AS (
     SELECT market
     FROM read_parquet({source})
     WHERE event_type = 'new_market'
       AND slug = {market_slug}
     LIMIT 1
 )
+"""
+        sql = f"""{target_cte}
 SELECT strftime(date_trunc('minute', timestamp_received), '%H:%M') AS minute,
+       '0x' || lower(hex(asset_id)) AS asset,
        round(avg(best_bid), 4) AS bid,
        round(avg(best_ask), 4) AS ask
 FROM read_parquet({source})
 WHERE event_type = 'best_bid_ask'
-  AND market = (SELECT market FROM target)
-GROUP BY 1
-ORDER BY 1
+  AND {target_filter}
+GROUP BY 1, 2
+ORDER BY 1, 2
 LIMIT 240
 """.strip()
     return {
@@ -184,7 +205,50 @@ LIMIT 240
         "url": url,
         "sql": sql,
         "source": SOURCE_LABEL,
+        "budget": {"memory": MEMORY_LIMIT, "threads": 2, "timeout_seconds": QUERY_TIMEOUT_SECONDS, "max_source_bytes": MAX_SOURCE_BYTES},
     }
+
+
+def _public_json(url: str) -> Any:
+    # Fixed URLs constructed internally, never user-supplied hosts or paths.
+    request = urllib.request.Request(url, headers={"User-Agent": "gg-ai-desktop-crypto/2"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("POLYMARKET_METADATA_SIZE")
+    return json.loads(raw)
+
+
+def resolve_market(slug: str) -> dict[str, Any]:
+    slug = _normalise_slug(slug, required=True)
+    rows = _public_json("https://gamma-api.polymarket.com/markets?" + urlencode({"slug": slug, "limit": 2}))
+    for row in rows if isinstance(rows, list) else []:
+        if row.get("slug") != slug:
+            continue
+        condition = str(row.get("conditionId") or "")
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", condition):
+            continue
+        def array(value):
+            return json.loads(value) if isinstance(value, str) else (value or [])
+        tokens, outcomes = array(row.get("clobTokenIds")), array(row.get("outcomes"))
+        labels = {"0x" + int(token).to_bytes(32, "big").hex(): str(outcome) for token, outcome in zip(tokens, outcomes)}
+        return {"condition_id": condition, "outcomes": labels, "slug": slug}
+    raise ValueError("POLYMARKET_MARKET_NOT_FOUND")
+
+
+def source_metadata(query_date: str, hour: str) -> dict[str, Any]:
+    """Check the selected object before DuckDB can scan it, without downloading it."""
+    url = archive_url(query_date, hour)
+    request = urllib.request.Request(url, method="HEAD")
+    with urllib.request.urlopen(request, timeout=8) as response:
+        size = int(response.headers.get("Content-Length") or 0)
+        tag = response.headers.get("ETag") or ""
+    if size <= 0:
+        raise ValueError("POLYMARKET_SOURCE_SIZE_UNKNOWN")
+    if size > MAX_SOURCE_BYTES:
+        raise ValueError("POLYMARKET_SOURCE_BUDGET")
+    return {"url": url, "bytes": size, "etag": tag, "checked_at": datetime.now(timezone.utc).isoformat(),
+            "coverage": "One archive hour; completeness of the feed is not verified."}
 
 
 def duckdb_available() -> bool:
@@ -194,20 +258,61 @@ def duckdb_available() -> bool:
         return False
 
 
-def _duckdb_execute(sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+def _duckdb_in_process(sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
     if not duckdb_available():
         raise DuckDBUnavailable("DUCKDB_NOT_INSTALLED")
     import duckdb
 
-    connection = duckdb.connect(database=":memory:")
+    connection = duckdb.connect(database=":memory:", config={"memory_limit": MEMORY_LIMIT, "threads": 2,
+        "autoinstall_known_extensions": False, "autoload_known_extensions": False})
     try:
+        # Loading a previously installed extension is explicit; never install
+        # software as a side effect of a read-only archive query.
+        connection.execute("LOAD httpfs")
         connection.execute("SET TimeZone = 'UTC'")
+        connection.execute("SET http_timeout = 10")
+        connection.execute("SET http_retries = 1")
+        connection.execute("SET max_temp_directory_size = '0B'")
         cursor = connection.execute(sql)
         columns = [str(item[0]) for item in (cursor.description or ())]
         rows = [tuple(row) for row in cursor.fetchmany(MAX_ROWS)]
         return columns, rows
     finally:
         connection.close()
+
+
+def _duckdb_execute(sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """An interruptible child bounds wall time and isolates optional DuckDB."""
+    global _active_process
+    if not duckdb_available():
+        raise DuckDBUnavailable()
+    with _process_lock:
+        if _cancel.is_set() or _active_process is not None:
+            raise RuntimeError("POLYMARKET_CANCELLED_OR_BUSY")
+        process = subprocess.Popen([sys.executable, "-B", "-m", "backend.polymarket_research", "--worker"],
+                                   cwd=str(Path(__file__).resolve().parents[1]),
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True)
+        _active_process = process
+    try:
+        try:
+            output, _ = process.communicate(sql, timeout=QUERY_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise RuntimeError("POLYMARKET_QUERY_TIMEOUT")
+        if process.returncode or _cancel.is_set():
+            raise RuntimeError("POLYMARKET_QUERY_CANCELLED")
+        payload = json.loads(output)
+        if payload.get("error"):
+            raise RuntimeError(payload["error"])
+        return payload["columns"], payload["rows"]
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        with _process_lock:
+            _active_process = None
 
 
 def _json_value(value: Any) -> Any:
@@ -264,18 +369,18 @@ def _format_lines(preset: str, rows: Sequence[dict[str, Any]]) -> list[str]:
             )
         return lines
     if preset == "TRADES":
-        lines = ["AT        PRICE      SIZE       SIDE  MARKET"]
+        lines = ["AT (UTC, full precision)       PRICE      SIZE       SIDE  MARKET / OUTCOME ASSET"]
         for row in rows:
             lines.append(
-                f"{str(row.get('at') or '')[:8]:<8}  "
+                f"{str(row.get('at') or ''):<28}  "
                 f"{str(row.get('price') or '')[:10]:>10}  "
                 f"{str(row.get('size') or '')[:10]:>10}  "
                 f"{str(row.get('side') or '')[:4]:<4}  "
-                f"{_display_market(row.get('market'))}"
+                f"{_display_market(row.get('market'))} / {_display_market(row.get('asset'))}"
             )
         return lines
     if preset == "SCAN":
-        lines = ["MARKET              SPREAD      BID        ASK   QUOTES"]
+        lines = ["MARKET / OUTCOME ASSET                    SPREAD      BID        ASK   QUOTES"]
         for row in rows:
             lines.append(
                 f"{_display_market(row.get('market')):<18}  "
@@ -283,20 +388,30 @@ def _format_lines(preset: str, rows: Sequence[dict[str, Any]]) -> list[str]:
                 f"{str(row.get('bid') or '')[:8]:>8}  "
                 f"{str(row.get('ask') or '')[:8]:>8}  "
                 f"{str(row.get('quotes') or 0):>6}"
+                f"  ASSET {_display_market(row.get('asset'))}"
             )
         return lines
-    lines = ["MINUTE    BID        ASK"]
+    lines = ["MINUTE    BID        ASK        OUTCOME / ASSET"]
     for row in rows:
         lines.append(
             f"{str(row.get('minute') or '')[:8]:<8}  "
             f"{str(row.get('bid') or '')[:10]:>10}  "
-            f"{str(row.get('ask') or '')[:10]:>10}"
+            f"{str(row.get('ask') or '')[:10]:>10}  "
+            f"{row.get('outcome') or _display_market(row.get('asset'))}"
         )
     return lines
 
 
 def _error_message(exc: Exception) -> str:
     message = " ".join(str(exc).split())
+    known = {
+        "POLYMARKET_SOURCE_BUDGET": "The selected archive file exceeds the 2 GiB source budget. Choose another UTC hour.",
+        "POLYMARKET_SOURCE_SIZE_UNKNOWN": "The archive did not report its file size. The query stopped before scanning.",
+        "POLYMARKET_QUERY_TIMEOUT": "The query exceeded its 30-second SQL time budget and was stopped.",
+        "POLYMARKET_MARKET_NOT_FOUND": "No market matched this slug. Verify the market's slug.",
+    }
+    if message in known:
+        return known[message]
     if len(message) > 240:
         message = message[:237] + "..."
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
@@ -309,6 +424,8 @@ def run_query(
     slug: Any = "",
     *,
     executor: QueryExecutor | None = None,
+    resolver: Callable[[str], dict[str, Any]] | None = None,
+    metadata_reader: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run one fixed query, or return a precise local setup error."""
 
@@ -323,8 +440,21 @@ def run_query(
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
     try:
+        metadata = {"coverage": "Injected offline executor; archive coverage is not verified."}
+        market = {}
+        if not executor and not duckdb_available():
+            raise DuckDBUnavailable()
+        if not executor or metadata_reader:
+            metadata = (metadata_reader or source_metadata)(spec["date"], spec["hour"])
+        if spec["preset"] == "TOUCH" and (not executor or resolver):
+            market = (resolver or resolve_market)(spec["slug"])
+            spec = query_spec(preset, query_date, hour, slug, condition_id=market["condition_id"])
+        if not executor and _cancel.is_set():
+            raise RuntimeError("POLYMARKET_QUERY_CANCELLED")
         columns, raw_rows = executor(spec["sql"]) if executor else _duckdb_execute(spec["sql"])
         rows = _row_dicts(columns, raw_rows)
+        for row in rows:
+            row["outcome"] = (market.get("outcomes") or {}).get(str(row.get("asset") or ""), "")
         return {
             "ok": True,
             "error": "",
@@ -336,6 +466,10 @@ def run_query(
             "duration_ms": int((time.monotonic() - started) * 1000),
             "sql": spec["sql"],
             "url": spec["url"],
+            "budget": spec["budget"],
+            "source_metadata": metadata,
+            "market": market,
+            "limit_note": "Ranked/limited sample; empty results do not establish absence of activity.",
         }
     except DuckDBUnavailable:
         return {
@@ -406,6 +540,7 @@ def _snapshot_locked() -> dict[str, Any]:
         "error": str(_state.get("error") or ""),
         "note": str(_state.get("note") or ""),
         "duckdb": duckdb_available(),
+        "budget": {"memory": MEMORY_LIMIT, "threads": 2, "timeout_seconds": QUERY_TIMEOUT_SECONDS, "max_source_bytes": MAX_SOURCE_BYTES},
         "poly_data": {
             "repo": REPO_URL,
             "state": "OPTIONAL · NOT STARTED",
@@ -424,9 +559,10 @@ def snapshot() -> dict[str, Any]:
 
 def _run_async(
     token: int,
-    spec: dict[str, str],
+    spec: dict[str, Any],
     executor: QueryExecutor | None,
 ) -> None:
+    global _worker_running
     result = run_query(
         spec["preset"],
         spec["date"],
@@ -435,9 +571,15 @@ def _run_async(
         executor=executor,
     )
     with _lock:
+        _worker_running = False
+        if _cancel.is_set():
+            _state["state"] = "cancelled"
+            _state["note"] = "Query cancelled. The worker has stopped."
+            return
         if token != _generation:
             return
         _state["result"] = result
+        _state["sql"] = result.get("sql", spec["sql"])
         _state["state"] = "done" if result.get("ok") else "error"
         _state["error"] = str(result.get("error") or "")
         _state["note"] = (
@@ -457,7 +599,10 @@ def start_query(
 ) -> dict[str, Any]:
     """Start a single bounded query after validating all user inputs."""
 
-    global _generation, _state
+    global _generation, _state, _worker_running
+    with _lock:
+        if _worker_running:
+            return _snapshot_locked()
     try:
         spec = query_spec(preset, query_date, hour, slug)
     except ValueError as exc:
@@ -477,8 +622,10 @@ def start_query(
             )
             return _snapshot_locked()
     with _lock:
-        if _state.get("state") == "running":
+        if _worker_running:
             return _snapshot_locked()
+        _cancel.clear()
+        _worker_running = True
         _generation += 1
         token = _generation
         _state = _initial_state()
@@ -505,9 +652,25 @@ def reset() -> dict[str, Any]:
     global _generation, _state
     with _lock:
         _generation += 1
+        _cancel.set()
         _state = _initial_state()
+        if _worker_running:
+            _state["state"] = "cancelling"
+            _state["note"] = "Stopping the query worker…"
+        with _process_lock:
+            if _active_process is not None and _active_process.poll() is None:
+                _active_process.kill()
         return _snapshot_locked()
 
 
 def reset_for_tests() -> None:
     reset()
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--worker"]:
+    try:
+        columns, rows = _duckdb_in_process(sys.stdin.read(65537))
+        payload = {"columns": columns, "rows": _json_value(rows)}
+    except Exception as exc:
+        payload = {"error": _error_message(exc)}
+    sys.stdout.write(json.dumps(payload, allow_nan=False))
