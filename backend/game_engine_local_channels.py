@@ -16,7 +16,7 @@ import os
 import time
 from contextlib import contextmanager
 
-from backend.game_engine_benilla_channels import ZONE_CHANNELS, password_record, password_matches
+from backend.game_engine_adapter_channels import ZONE_CHANNELS, password_record, password_matches
 
 MAX_CHANNELS = 32
 MAX_SLOTS = 10

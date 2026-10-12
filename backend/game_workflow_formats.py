@@ -130,7 +130,7 @@ def inspect(data: bytes, suffix: str) -> dict:
                     raise ValueError("M2_ARRAY_OUT_OF_RANGE")
                 metadata[name] = count
         return {"format": "WOW_M2", "kind": "model", "coverage": "HEADER", "metadata": metadata,
-                "limits": ["Use the installed Benilla adapter for supported pre-Wrath MD20 geometry; later M2 variants need their own adapter."]}
+                "limits": ["Use the installed GgEngine adapter for supported pre-Wrath MD20 geometry; later M2 variants need their own adapter."]}
     if data[:4] in (b"BLP1", b"BLP2"):
         if len(data) < 148:
             raise ValueError("TRUNCATED_BLP_HEADER")
@@ -139,7 +139,7 @@ def inspect(data: bytes, suffix: str) -> dict:
             raise ValueError("BLP_DIMENSIONS_OUT_OF_RANGE")
         return {"format": "WOW_BLP", "kind": "texture", "coverage": "HEADER",
                 "metadata": {"width": width, "height": height, "magic": data[:4].decode()},
-                "limits": ["Pixel decoding uses GG's installed Benilla adapter; catalog header inspection does not decode pixels."]}
+                "limits": ["Pixel decoding uses GG's installed GgEngine adapter; catalog header inspection does not decode pixels."]}
     if data[:4] == b"MPQ\x1a" or suffix == ".mpq":
         return {"format": "WOW_MPQ_CANDIDATE", "kind": "archive", "coverage": "SIGNATURE" if data[:4] == b"MPQ\x1a" else "EXTENSION_ONLY",
                 "metadata": {}, "limits": ["The bounded WoW archive reader is separate; indexing does not extract archive entries."]}

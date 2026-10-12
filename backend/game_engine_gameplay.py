@@ -1,6 +1,6 @@
-"""Shared Benilla-style input, targeting and action-bar integration.
+"""Shared GgEngine-style input, targeting and action-bar integration.
 
-Rules adapted from samwhosung/benilla under MIT; see licenses/benilla-MIT.txt.
+Rules adapted from samwhosung/engine under MIT; see licenses/engine-MIT.txt.
 World picks name stable simulation identities. All effects validate distance,
 ownership, health and cooldown again in the authoritative runtime.
 """
@@ -11,7 +11,7 @@ from backend import game_engine_items as items,game_engine_combat as combat
 from backend import game_engine_npc as npc,game_engine_factions as factions
 from backend import game_engine_economy as economy
 from backend import game_engine_quests as quests,game_engine_dialogue as dialogue
-from backend.game_engine_benilla_merchant import MerchantBundlesMixin
+from backend.game_engine_adapter_merchant import MerchantBundlesMixin
 
 class GameplayMixin(MerchantBundlesMixin):
     def _vendor_durable_locked(self,action):
@@ -48,7 +48,7 @@ class GameplayMixin(MerchantBundlesMixin):
         return index is not None and not error
 
     def _quest_dialog_view_locked(self):
-        panel=getattr(self,'_benilla_quest_panel',{})
+        panel=getattr(self,'_engine_quest_panel',{})
         if not panel or not self._quest_contact_locked(panel.get('npc_id')):return {'open':False}
         definition=self._quest_catalog.get(panel.get('quest_id'))
         if not definition or definition.get('giver_id')!=panel.get('npc_id'):return {'open':False}
@@ -66,8 +66,8 @@ class GameplayMixin(MerchantBundlesMixin):
             if not definition or definition.get('giver_id')!=npc_id:return {'error':'QUEST_GIVER_MISMATCH'}
             active=quest_id in self._quest_state.get('active',{})
             if not active and quest_id not in quests.view(self._quest_state,self._quest_catalog)['available']:return {'error':'QUEST_UNAVAILABLE'}
-            self._benilla_quest_panel={'npc_id':npc_id,'quest_id':quest_id,'panel':'PROGRESS' if active else 'DETAIL'}
-            self._benilla_gossip_hidden=True
+            self._engine_quest_panel={'npc_id':npc_id,'quest_id':quest_id,'panel':'PROGRESS' if active else 'DETAIL'}
+            self._engine_gossip_hidden=True
             return self.snapshot_locked()
 
     def quest_dialog_action(self,npc_id,quest_id,panel,action,choice=0):
@@ -79,19 +79,19 @@ class GameplayMixin(MerchantBundlesMixin):
                 if result.get('error'):return result
             elif action=='CONTINUE' and panel=='PROGRESS':
                 if not current['completable']:return {'error':'QUEST_NOT_READY'}
-                self._benilla_quest_panel=dict(self._benilla_quest_panel,panel='REWARD');return self.snapshot_locked()
+                self._engine_quest_panel=dict(self._engine_quest_panel,panel='REWARD');return self.snapshot_locked()
             elif action=='REWARD' and panel=='REWARD':
                 if type(choice) is not int or choice!=0:return {'error':'QUEST_REWARD_CHOICE_INVALID'}
                 result=self.claim_quest(quest_id)
                 if result.get('error'):return result
             elif action not in ('DECLINE','CLOSE'):return {'error':'QUEST_ACTION_INVALID_FOR_PANEL'}
-            self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            self._engine_quest_panel={};self._engine_gossip_hidden=False
             if action=='CLOSE':return self.close_dialogue()
             return self.snapshot_locked()
 
     def gossip_close(self):
         with self._lock:
-            self._benilla_gossip_hidden=True
+            self._engine_gossip_hidden=True
             if self._quest_dialog_view_locked().get('open'):return self.snapshot_locked()
             return self.close_dialogue()
 
@@ -99,7 +99,7 @@ class GameplayMixin(MerchantBundlesMixin):
         with self._lock:
             if quest_id not in self._quest_state.get('active',{}):return {'error':'QUEST_NOT_ACTIVE'}
             self._quest_state['active'].pop(quest_id);self._quest_state['revision']=int(self._quest_state.get('revision',0))+1
-            if getattr(self,'_benilla_quest_panel',{}).get('quest_id')==quest_id:self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            if getattr(self,'_engine_quest_panel',{}).get('quest_id')==quest_id:self._engine_quest_panel={};self._engine_gossip_hidden=False
             self._append_event_locked('QUEST_ABANDON','Player abandoned an active quest.',actor_id='player',subject_id=quest_id)
             return self.snapshot_locked()
 

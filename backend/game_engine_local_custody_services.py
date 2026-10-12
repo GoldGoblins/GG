@@ -10,7 +10,7 @@ import copy
 import time
 
 from backend import game_engine_items as items
-from backend.game_engine_benilla_gameplay import QUALITY,EQUIPMENT_SLOTS
+from backend.game_engine_adapter_gameplay import QUALITY,EQUIPMENT_SLOTS
 from backend.game_engine_local_custody import RecoveryRequired,integer,digest
 from backend import game_engine_local_petitions as petitions
 from backend import game_engine_local_direct_trade as direct_trades
@@ -178,7 +178,7 @@ class SharedLocalServicesMixin(SharedLocalGroupLootMixin, shared_channels.Shared
             if op=='GroupRequestInvite':raise ValueError('GROUP_RECIPIENT_CONSENT_REQUIRED')
             if op=='GroupRaidInfo':return events('UPDATE_INSTANCE_INFO')
             if op=='GroupReadyLine':
-                from backend.game_engine_benilla_local_client import text
+                from backend.game_engine_adapter_local_client import text
                 return [{'event':'CHAT_MSG_SYSTEM','args':[text(row.get('text'),512)]}]
             if not (group_replay or old_sequence) and self._services['group']['members']:raise ValueError('GROUP_ALREADY_MEMBER')
             request={key:copy.deepcopy(value) for key,value in row.items() if key not in ('kind','session','custody_sequence')}
@@ -304,7 +304,7 @@ class SharedLocalServicesMixin(SharedLocalGroupLootMixin, shared_channels.Shared
                 return None
             if not chat_replay and not guild['ranks'][guild['members'][character]['rank']]['rights'] & (8 if kind=='OFFICER' else 2):
                 raise ValueError('GUILD_PERMISSION_DENIED')
-        from backend.game_engine_benilla_local_client import text
+        from backend.game_engine_adapter_local_client import text
         message=row.get('message') if kind=='ADDON' else text(row.get('text'),255)
         outcome=self._shared_execute_locked(row,lambda store,owner,seq,revision:store.send_chat(owner,seq,kind,message,
             recipient=recipient,expected_revision=revision,prefix=row.get('prefix','') if kind=='ADDON' else '',
@@ -426,7 +426,7 @@ class SharedLocalServicesMixin(SharedLocalGroupLootMixin, shared_channels.Shared
             group['ready_check']=dict(id=ready['id'],initiator=alias(ready['initiator']),
                 remaining=max(0,ready['expires']-now),finished=ready['finished'] or ready['expires']<=now) if ready else None
             group['shared_id']=group_id;group['roster']=[];guids=self._shared_group_guids_locked(snapshot)
-            from backend.game_engine_benilla_identity import identity as character_identity
+            from backend.game_engine_adapter_identity import identity as character_identity
             for member in [character]+[m for m in stored_group['members'] if m!=character]:
                 if member==character:
                     unit=self._service_unit_locked('player');unit['name']=name(member)

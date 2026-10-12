@@ -55,7 +55,7 @@ Item {
         paneLive:root.paneLive
     }
     Repeater {
-        model: root.runtime && !root.runtime.benillaUiEnabled ? root.runtime.framesModel : null
+        model: root.runtime && !root.runtime.engineUiEnabled ? root.runtime.framesModel : null
         delegate: Rectangle {
             id: frame
             required property var frameData

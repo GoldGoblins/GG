@@ -25,7 +25,7 @@ def capabilities() -> dict:
             "adapters": [{"format": "glTF / GLB", "coverage": "Catalog metadata; existing GG inspector validates runtime imports"},
                          {"format": "OBJ / DAE / SMD / GGFLORA1", "coverage": "Bounded exported topology, joint aliases, raw weight profiles and pose samples; no automatic cleanup or retarget"},
                          {"format": "RenderWare", "coverage": "Chunk structure and embedded string names; native platform payloads remain opaque"},
-                         {"format": "WoW", "coverage": "M2/BLP headers; optional installed Benilla decoder for supported versions"},
+                         {"format": "WoW", "coverage": "M2/BLP headers; optional installed GgEngine decoder for supported versions"},
                          {"format": "ELF / MIPS", "coverage": "Header identity; existing Ghidra jobs provide function analysis"},
                          {"format": "Jak / Ratchet / Vexx / Sly / other", "coverage": "Game-independent workflow; proprietary title formats need an adapter or extracted common-format assets"}],
             "store": str(common.ROOT), "operations": sorted(OPERATIONS),
@@ -45,7 +45,7 @@ def inspect_asset(raw: str, *, native: bool = False) -> dict:
     if native:
         if path.suffix.lower() not in (".m2", ".mdx", ".blp", ".wmo", ".adt", ".tga"):
             raise ValueError("NO_NATIVE_ADAPTER_FOR_FORMAT")
-        from backend.game_engine_benilla_formats import NativeFormats
+        from backend.game_engine_adapter_formats import NativeFormats
         if len(data) > 16 * 1024 * 1024:
             raise ValueError("NATIVE_SOURCE_LIMIT_16_MIB")
         # Decode the inspected bytes, not a second mutable read of the source.
@@ -62,8 +62,8 @@ def inspect_asset(raw: str, *, native: bool = False) -> dict:
             raise ValueError("ASSET_CHANGED_DURING_NATIVE_DECODE")
         result["native_metadata"] = metadata
         result["native_format"] = metadata.get("format", "UNKNOWN")
-        result["coverage"] = "BENILLA_DECODED_METADATA"
-        result["summary"] = path.name + " · installed Benilla adapter decoded the selected file"
+        result["coverage"] = "GG_ENGINE_DECODED_METADATA"
+        result["summary"] = path.name + " · installed GgEngine adapter decoded the selected file"
         if metadata.get("blob_kind") == "rgba":
             from PIL import Image
             width, height = metadata.get("width", 0), metadata.get("height", 0)

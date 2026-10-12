@@ -24,7 +24,7 @@ from pathlib import Path
 
 from backend import game_engine_items as items, game_engine_trade as trade
 from backend.game_engine_local_characters import MAX_BYTES, validate_payload
-from backend.game_engine_benilla_social import guild_record,ALL_RIGHTS,SocialServicesMixin
+from backend.game_engine_adapter_social import guild_record,ALL_RIGHTS,SocialServicesMixin
 from backend import game_engine_local_petitions as petitions
 from backend import game_engine_local_direct_trade as direct_trades
 from backend import game_engine_local_channels as shared_channels

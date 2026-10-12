@@ -39,9 +39,9 @@ class GroundGroupLoot(unittest.TestCase):
         self.assertEqual((self.runtime._item_instances, self.runtime._inventory), before)
         self.assertTrue(result['loot']['open'])
         self.assertEqual(result['loot']['rows'][0]['instance_id'], item['instance_id'])
-        self.assertEqual(self.runtime._benilla_loot['source_kind'], 'GROUND')
-        self.assertEqual(self.runtime._benilla_loot['ids'], (item['instance_id'],))
-        return item, self.runtime._benilla_loot['session']
+        self.assertEqual(self.runtime._engine_loot['source_kind'], 'GROUND')
+        self.assertEqual(self.runtime._engine_loot['ids'], (item['instance_id'],))
+        return item, self.runtime._engine_loot['session']
 
     def test_actual_combat_drop_opens_without_transfer_then_need_awards_exact_instance_once(self):
         self.join(); item, session = self.opened_drop()
@@ -102,11 +102,11 @@ class GroundGroupLoot(unittest.TestCase):
         self.assertEqual(item, before)
         item_result = self.runtime.pickup_item(item['instance_id'])
         self.assertIsNone(item_result.get('error'))
-        self.pick(item, item, self.runtime._benilla_loot['session']); key = self.roll()['id']
+        self.pick(item, item, self.runtime._engine_loot['session']); key = self.roll()['id']
         self.public('LootRollVote', id=key, vote=0)
         self.assertEqual(item, before); self.assertIn(item['instance_id'], self.runtime._services['free_loot'])
         self.runtime._services['free_loot'].remove(item['instance_id'])
-        self.pick(item, item, self.runtime._benilla_loot['session']); roll = self.roll()
+        self.pick(item, item, self.runtime._engine_loot['session']); roll = self.roll()
         with patch('time.time', return_value=roll['expires'] + 1):
             self.runtime._settle_services_locked()
         self.assertEqual(item, before); self.assertFalse(self.runtime._services['loot_rolls'])
@@ -137,11 +137,11 @@ class GroundGroupLoot(unittest.TestCase):
         # absence is also valid; a loot flow must never create container state.
         self.assertEqual(item.pop('contents'), []); self.assertEqual(item.pop('container_state'), '')
         opened = self.runtime.pickup_item(item['instance_id'])
-        session = self.runtime._benilla_loot['session']
+        session = self.runtime._engine_loot['session']
         self.assertIsNone(opened.get('error')); self.runtime.close_loot(session)
         self.assertNotIn('contents', item); self.assertNotIn('container_state', item)
         self.runtime.pickup_item(item['instance_id'])
-        self.pick(item, item, self.runtime._benilla_loot['session'])
+        self.pick(item, item, self.runtime._engine_loot['session'])
         self.assertEqual(item['location'], 'INVENTORY')
         self.assertNotIn('contents', item); self.assertNotIn('container_state', item)
 

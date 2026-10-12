@@ -1,6 +1,6 @@
 """Retained Qt scene handles: publish transforms without rebinding mesh metadata.
 
-Like Benilla's retained scene, static identity and live transforms have separate
+Like GgEngine's retained scene, static identity and live transforms have separate
 update paths. This adapter runs on the Qt thread, never the simulation thread.
 """
 from __future__ import annotations

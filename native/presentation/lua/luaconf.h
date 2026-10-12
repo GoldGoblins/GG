@@ -201,7 +201,7 @@
 ** CHANGE it if you want a different appearance.
 */
 /*
-** BENILLA: 1.12's Lua is 5.0, which quotes every program element in an error
+** GG_ENGINE: 1.12's Lua is 5.0, which quotes every program element in an error
 ** message with a BACKQUOTE and an apostrophe. 5.1 introduced this macro and made it two
 ** apostrophes. Read out of WoW.exe's own .rdata, which carries all five of the formats this macro
 ** feeds, in the 5.0 spelling:
@@ -367,7 +367,7 @@
 ** CHANGE it to 2 if you want the old behaviour, or undefine it to turn
 ** off the advisory error when nesting [[...]].
 */
-/* BENILLA: 2, the 5.0 behaviour. 1.12.1 ships Lua 5.0, where `[[ ... [[ ... ]] ... ]]`
+/* GG_ENGINE: 2, the 5.0 behaviour. 1.12.1 ships Lua 5.0, where `[[ ... [[ ... ]] ... ]]`
 ** nests; 5.1 kept the machinery and put an advisory error in front of it, on which two
 ** corpus addons stop loading ("nesting of [[...]] is deprecated").
 */

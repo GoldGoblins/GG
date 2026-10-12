@@ -356,14 +356,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(exported["changed"])
 
     def test_native_wow_adapter_uses_actual_installed_reader(self):
-        from backend.game_engine_benilla_formats import available
+        from backend.game_engine_adapter_formats import available
         if not available():
-            self.skipTest("Verified Benilla reader unavailable")
-        from tools.world import benilla_format_fixtures as fixtures
+            self.skipTest("Verified GgEngine reader unavailable")
+        from tools.world import engine_format_fixtures as fixtures
         path = self.file("gold.blp", fixtures.blp())
         result = game_workflows.execute("scout_inspect", {"path": str(path), "native": True})
         self.assertEqual(result["status"], "READY", result)
-        self.assertEqual(result["coverage"], "BENILLA_DECODED_METADATA")
+        self.assertEqual(result["coverage"], "GG_ENGINE_DECODED_METADATA")
         self.assertTrue(result["image"].startswith("file:"))
         path = self.file("panel.m2", fixtures.m2())
         result = game_workflows.execute("scout_inspect", {"path": str(path), "native": True})
@@ -385,10 +385,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(jobs.status("../escape")["status"], "ERROR")
 
     def test_native_decoder_inside_supervised_workflow_inherits_compatible_limits(self):
-        from backend.game_engine_benilla_formats import available
+        from backend.game_engine_adapter_formats import available
         if not available():
-            self.skipTest("Verified Benilla reader unavailable")
-        from tools.world import benilla_format_fixtures as fixtures
+            self.skipTest("Verified GgEngine reader unavailable")
+        from tools.world import engine_format_fixtures as fixtures
         source = self.file("gold.blp", fixtures.blp())
         state = jobs.start("scout_inspect", {"path": str(source), "native": True})
         self.assertEqual(state["status"], "QUEUED")
@@ -398,7 +398,7 @@ class WorkflowTests(unittest.TestCase):
             state = jobs.status(state["job_id"])
         self.assertEqual(state["status"], "COMPLETE", state)
         self.assertEqual(state["result"]["status"], "READY", state["result"])
-        self.assertEqual(state["result"]["coverage"], "BENILLA_DECODED_METADATA")
+        self.assertEqual(state["result"]["coverage"], "GG_ENGINE_DECODED_METADATA")
 
     def test_worker_paths_are_resolved_in_the_callers_workspace(self):
         self.file("a.png", png())

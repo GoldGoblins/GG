@@ -1,4 +1,4 @@
-"""Offline native presentation build, including the pinned Benilla Lua C VM."""
+"""Offline native presentation build, including the pinned GgEngine Lua C VM."""
 from __future__ import annotations
 import argparse, hashlib, json, os, shutil, subprocess, tempfile
 from pathlib import Path

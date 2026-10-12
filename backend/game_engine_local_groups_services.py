@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from backend import game_engine_items as items
 from backend import game_engine_local_groups as groups
-from backend.game_engine_benilla_social import QUALITY, event
-from backend.game_engine_benilla_loot_sources import CanonicalLootSourcesMixin, ground_signature
+from backend.game_engine_adapter_social import QUALITY, event
+from backend.game_engine_adapter_loot_sources import CanonicalLootSourcesMixin, ground_signature
 
 
 class SharedLocalGroupLootMixin(CanonicalLootSourcesMixin):
@@ -43,7 +43,7 @@ class SharedLocalGroupLootMixin(CanonicalLootSourcesMixin):
             # A former solo bind prompt cannot bypass a subsequently selected
             # group method. The current canonical row initiates that policy.
             raise ValueError('LOOT_GROUP_WINDOW_REQUIRED')
-        source = self._loot_source_locked(); shown = self._benilla_loot
+        source = self._loot_source_locked(); shown = self._engine_loot
         identity = command.get('item'); item = self._item_instance_locked(identity)
         if (not source or (shown.get('session'), shown.get('container_id')) !=
                 (command.get('loot_session'), command.get('source'))):
@@ -73,7 +73,7 @@ class SharedLocalGroupLootMixin(CanonicalLootSourcesMixin):
         if method == 'roundrobin' or quality < context['threshold']:
             self._services['loot_turn'] += 1
             self._award_group_item_locked(instance, source, 'player')
-            return event('LOOT_SLOT_CLEARED', list(self._benilla_loot['ids']).index(instance['instance_id']) + 1)
+            return event('LOOT_SLOT_CLEARED', list(self._engine_loot['ids']).index(instance['instance_id']) + 1)
         if method == 'master' and context['master'] != 'player':
             raise ValueError('LOOT_MASTER_NOT_PRESENT')
         if len(self._services['loot_rolls']) >= 64:

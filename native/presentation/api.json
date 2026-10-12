@@ -1,6 +1,6 @@
 {
   "schema": "gg.game-presentation-api.v6",
-  "source_origin": "Benilla original UI core plus GG adapters; native/presentation/provenance.json",
+  "source_origin": "Upstream UI core plus GG adapters; native/presentation/provenance.json",
   "compatibility": {
     "original_ui_core": "INTEGRATED_UNMODIFIED",
     "gg_game_host": "PARTIAL",
@@ -11,8 +11,8 @@
     "original_formats_library": "INTEGRATED_UNMODIFIED"
   },
   "lua": {
-    "dialect": "Unmodified Benilla Lua 5.1.5 fork with Lua 5.0 grammar and standard-library compatibility",
-    "core": "Full vendored benilla-ui crate via Rust C ABI 1; supervised worker with real Qt font measurements",
+    "dialect": "Unmodified GgEngine Lua 5.1.5 fork with Lua 5.0 grammar and standard-library compatibility",
+    "core": "Full vendored engine-ui-core crate via Rust C ABI 1; supervised worker with real Qt font measurements",
     "frame_types": [
       "Button",
       "CheckButton",
@@ -138,7 +138,7 @@
     },
     "library_policy": "Original sandbox: no io/os/package/require/debug/loadfile/dofile/module/native reach; text loadstring and pcall/xpcall supported. Parent process deadlines also cover swallowed instruction-hook errors.",
     "unwired_gameplay": "Mail, local trade-session adapters, guilds, party/raid, auctions, auras, taxis, trainer/pet/stable and other original host systems still require real GG gameplay mappings. All ordinary queues are accounted for: unimplemented queues report failure and are drained rather than replayed. An error/drain is not implementation. Local banking/vendor/quest/crafting/loot, action slots, macros, targeting/follow/posture and client preferences are connected within their documented GG policies.",
-    "upstream_missing_engine_names": "See docs/benilla-compatibility-2026-10-08/ui-surface.json; 54 names missing upstream at baseline, including nil handler globals outside dispatch.",
+    "upstream_missing_engine_names": "See docs/engine-compatibility-2026-10-08/ui-surface.json; 54 names missing upstream at baseline, including nil handler globals outside dispatch.",
     "action_editing": "Original packed tags/ids mapped to actual GG abilities/items and command aliases. GG currently has 24 slots; aliases are not a complete original macro engine. Queue processing follows host phases, not arbitrary cross-queue Lua operation ordering."
   },
   "UI_rendering": {
@@ -177,7 +177,7 @@
     "stream_capacity_seconds": 2,
     "GG_stream_capacity_frames": 48000,
     "core": "Native C++ mono/stereo PCM resampling, per-voice pitch, generation-safe source movement, stereo ring streaming, spatial panning and category mix",
-    "limiter": "Benilla look-ahead algorithm: 2 ms delay, stereo-linked 0.99 ceiling, sliding minimum/average, 120 ms release; allocation-free render path",
+    "limiter": "GgEngine look-ahead algorithm: 2 ms delay, stereo-linked 0.99 ceiling, sliding minimum/average, 120 ms release; allocation-free render path",
     "reverb": "Vendored Kira/Freeverb equations: eight comb filters and four all-pass filters per stereo channel; opt-in spatial SFX send",
     "music": "FFmpeg local-file streaming with pipe backpressure, 500 ms crossfades, bounded rotating rings and 15 ms safe reuse; missing decoder falls back to GG PCM loop",
     "decoder_failure": "Failed music stream is closed/faded and reported while other game audio continues",
@@ -241,16 +241,16 @@
       "AddNoAlpha",
       "MOD2X"
     ],
-    "new_material": "BenillaModelMaterial uses original model blend equations, alpha-key threshold, UV animation, model lighting and blend-dependent fog neutral colours",
+    "new_material": "GgEngineModelMaterial uses original model blend equations, alpha-key threshold, UV animation, model lighting and blend-dependent fog neutral colours",
     "verification": "Seven blend lanes and their fog limits measured in a real GPU window using an opaque output pass",
     "remaining": "Original world/app rendering and host behavior remain partial: independent disabled-depth-test state, exact anisotropic/LOD and terrain/liquid/weather mip semantics, multi-stage M2 combiners, dense individual WMO geometry/prop capacity, original moving-unit/vehicle/transport election, full event-to-local-world routing and original creature/GO/combat/footstep/spell audio. Continuous placed-model animation/effects, Light.dbc/sky/weather and authored M2/WMO mip chains have scoped fixtures and Qt integration; none certify the whole original corpus.",
     "lua_environment": "Actual GG/imported zone, floor/interior and wet-grid liquid kind/height/submersion feed original zone getters/events and GG_GetWorldState; selected ADT/WDT/WMO world pages use a shared authoritative provider"
   },
-  "ABI": "native/benilla-ui/gg_benilla_ui.h and native/benilla-assets/gg_benilla_assets.h; actual C++17 callers compiled and run against both Rust libraries",
+  "ABI": "native/engine-ui/gg_engine_ui.h and native/engine-formats/gg_engine_formats.h; actual C++17 callers compiled and run against both Rust libraries",
   "activation": "Installed verified native libraries; finite separate game-client tests. Existing Desktop/chat kept running.",
   "release": "Player selection includes adapters, sources/licenses, installed native libraries, own FrameXML/core files when present, audio and shaders; isolated compilers/build caches and game installation MPQs excluded. Selected inputs audited, relocated native runtime tested. No release archive or external publication created.",
   "asset_readers": {
-    "core": "Eight unmodified original reader crates plus original TGA decoder and the entire unmodified benilla-formats crate (283 source files in its provenance inventory)",
+    "core": "Eight unmodified original reader crates plus original TGA decoder and the entire unmodified engine-formats-core crate (283 source files in its provenance inventory)",
     "texture_formats": [
       "BLP2 palette/raw BGRA/DXT1/DXT3/DXT5 with original alpha/mip semantics",
       "TGA raw/RLE, palette/gray/BGR/BGRA, top/bottom and left/right origin",
@@ -371,11 +371,11 @@
       "Exact authored mip upload for composed Qt character atlases",
       "Whole-group liquid volumes, shared MLIQ cell/color splitting, authored liquid mip chains, damage rules and original underwater atmosphere"
     ],
-    "verification": "docs/benilla-world-objects-2026-10-09/verification.json",
+    "verification": "docs/engine-world-objects-2026-10-09/verification.json",
     "source_routing": "Core and addons: original TOC parser, shared 2048-file/8 MiB byte budget, 1 MiB per Lua/XML file and 64 KiB per manifest; bytecode rejected. UTF-8 transport retains raw bytes, other encodings use bounded hex transport. No original installation data is bundled.",
     "world_streaming": {
-      "manifest": "gg.benilla-world.v1; explicit scoped local directory and optional mounted original archive chain",
-      "integration": "GAME ENGINE LOAD WORLD / DEMO WORLD / GG WORLD; standalone --benilla-world; both Qt hosts share the authoritative imported-world provider",
+      "manifest": "gg.engine-world.v1; explicit scoped local directory and optional mounted original archive chain",
+      "integration": "GAME ENGINE LOAD WORLD / DEMO WORLD / GG WORLD; standalone --engine-world; both Qt hosts share the authoritative imported-world provider",
       "residency": "One loader; current terrain, nearest WMO and nearest neighbour terrain get first priority, followed by distance-ranked WMO/terrain prefetch; nearest 25 desired pages, radius 0/1, conservative logical 96 MiB resident geometry/texture/physics budget",
       "rendering": "QAbstractListModel inserts/removes changed page delegates; unchanged geometry/textures stay retained; data is published after Quick3D node binding; repeated base/layer/prop textures share each page-owned Qt texture",
       "materials": "Four sequential terrain layers with half-texel-clamped 64x64 alpha/shadow; Qt-generated terrain colour mips and single-mip alpha/shadow. M2/WMO and model-particle BLP texture chains retain authored levels in a bounded atlas with manual bilinear/trilinear sampling; full terrain/liquid/weather authored mip and exact independent depth state remain partial.",

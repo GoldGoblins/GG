@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue,Empty
 from threading import Event,Thread
-from backend.game_engine_benilla_assets import asset_path
-from backend.game_engine_benilla_formats import NativeFormats
+from backend.game_engine_adapter_assets import asset_path
+from backend.game_engine_adapter_formats import NativeFormats
 
 @dataclass(frozen=True)
 class ArchiveAudioSource:

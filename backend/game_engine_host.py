@@ -64,9 +64,9 @@ from backend import game_engine_world as world
 from backend import game_engine_world_events as world_events_contract
 from backend.game_engine_world_population import WorldPopulation
 from backend import game_engine_world_places as world_places_contract
-from backend.game_engine_benilla_spells import SpellsMixin
-from backend.game_engine_benilla_rides import RidesMixin
-from backend.game_engine_benilla_survival import SurvivalMixin
+from backend.game_engine_adapter_spells import SpellsMixin
+from backend.game_engine_adapter_rides import RidesMixin
+from backend.game_engine_adapter_survival import SurvivalMixin
 from backend.game_engine_local_custody_services import SharedLocalServicesMixin
 
 
@@ -143,12 +143,12 @@ def _round(value: float, places: int = 3) -> float:
 from backend.game_engine_gameplay import GameplayMixin
 
 
-from backend.game_engine_benilla_local_actions import LocalActionsMixin
-from backend.game_engine_benilla_controls import ClientControlsMixin
+from backend.game_engine_adapter_local_actions import LocalActionsMixin
+from backend.game_engine_adapter_controls import ClientControlsMixin
 
 
-from backend.game_engine_benilla_local_client import LocalClientMixin
-from backend.game_engine_benilla_services import ServicesMixin
+from backend.game_engine_adapter_local_client import LocalClientMixin
+from backend.game_engine_adapter_services import ServicesMixin
 
 class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, SpellsMixin, ClientControlsMixin, LocalClientMixin, ServicesMixin, LocalActionsMixin, GameplayMixin):
     """Threaded local simulation with bounded, inspectable state."""
@@ -209,7 +209,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         self._quest_state = quests_contract.new_state()
         self._quest_visit_presence: set[str] = set()
         self._dialogue_state = dialogue_contract.new_state()
-        self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+        self._engine_quest_panel={};self._engine_gossip_hidden=False
         self._social_state = social_contract.new_state()
         self._world_event_catalog = world_events_contract.normalized_catalog(
             self._content.get("world_events")
@@ -473,7 +473,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
 
     def _terrain_height_locked(self, x: float, z: float, *, static: bool = False) -> float:
         """Cache exact samples; movers never evict fixed flora/animal anchors."""
-        imported=getattr(self,'_benilla_world',None)
+        imported=getattr(self,'_engine_world',None)
         if imported is not None:return imported.ground(x,self._y[0],z)
         revision = int(self._terrain_overrides.get("revision", 0))
         if (revision != getattr(self, "_height_cache_revision", None)
@@ -503,8 +503,8 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         return self._terrain_height_locked(x, z, static=True)
 
     def _water_sample_locked(self, x: float, z: float) -> dict[str, Any]:
-        if getattr(self,'_benilla_world',None) is not None:
-            return self._benilla_world.water_sample(x,self._y[0],z)
+        if getattr(self,'_engine_world',None) is not None:
+            return self._engine_world.water_sample(x,self._y[0],z)
         from backend.game_engine_landscape import water_at
         inland=water_at(x,z)
         if inland is not None:
@@ -536,7 +536,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         elif depth>mobility_contract.MIN_SWIMMABLE_DEPTH_M and self._y[0]<=water['height_m']+1.5:medium='WATER'
         else:medium='LAND'
         return {'height_m':height,'medium':medium,'water_depth_m':depth,'water_height_m':water['height_m'],
-                'biome':'WORLD' if getattr(self,'_benilla_world',None) is not None else planet_contract.biome_at(x,z,WORLD_SEED),
+                'biome':'WORLD' if getattr(self,'_engine_world',None) is not None else planet_contract.biome_at(x,z,WORLD_SEED),
                 'liquid_kind':water.get('body_kind','WATER' if depth>0 else 'NONE')}
 
     def _ground_contact_height_locked(
@@ -547,7 +547,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         vehicle_kind: str = "NONE",
     ) -> float:
         terrain_y = self._terrain_height_locked(x, z)
-        if getattr(self,'_benilla_world',None) is not None:return terrain_y+mobility_contract.PLAYER_ROOT_HEIGHT_M
+        if getattr(self,'_engine_world',None) is not None:return terrain_y+mobility_contract.PLAYER_ROOT_HEIGHT_M
         floor_y = terrain_y + mobility_contract.PLAYER_ROOT_HEIGHT_M
         from backend.game_engine_landscape import contact_height
         landscape_floor=contact_height(x,z,self._y[0],self._static_terrain_height_locked)
@@ -665,7 +665,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
 
     def _tick_house_walls_locked(self) -> None:
         """Solid walls with a door hole — the hut is a room, not a blob."""
-        imported=getattr(self,'_benilla_world',None)
+        imported=getattr(self,'_engine_world',None)
         if imported is not None:
             self._x[0],self._z[0]=imported.collide(self._x[0],self._y[0],self._z[0]);return
         from backend.game_engine_landscape import cave_collision
@@ -1022,7 +1022,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         self._quest_state = quests_contract.new_state()
         self._quest_visit_presence = set()
         self._dialogue_state = dialogue_contract.new_state()
-        self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+        self._engine_quest_panel={};self._engine_gossip_hidden=False
         self._social_state = social_contract.new_state()
         self._promoted_life_ids = set()
         self._last_population_promotion_s = 0.0
@@ -1038,10 +1038,10 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         self._last_item_interaction = {}
         self._open_stash_container_id = ""
         self._open_merchant_id = ""
-        self._benilla_loot = {}
-        self._benilla_craft_book = {}
-        self._benilla_craft_repeat = {}
-        self._benilla_craft_error = ''
+        self._engine_loot = {}
+        self._engine_craft_book = {}
+        self._engine_craft_repeat = {}
+        self._engine_craft_error = ''
         self._last_crafting = {}
         self._last_trade = {}
         self._economy_state = economy_contract.new_state(self._vendor_catalog)
@@ -1277,7 +1277,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             }
         )
         self._events = self._events[-24:]
-        from backend.game_engine_benilla_feedback import observe
+        from backend.game_engine_adapter_feedback import observe
         observe(self,event)
         self._animate_world_event_locked(kind, actor_id, subject_id, target_id, payload)
         return event
@@ -4786,7 +4786,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         }
 
     def _build_spatial_grid_locked(self) -> dict[tuple[int, int], list[int]]:
-        if getattr(self,'_benilla_world',None) is not None:return {}
+        if getattr(self,'_engine_world',None) is not None:return {}
         grid: dict[tuple[int, int], list[int]] = {}
         for index in self._static_entity_indices:
             cell = (
@@ -4863,7 +4863,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
 
     def _line_of_sight_locked(self,start,end,*,ignore_index=None) -> bool:
         """Observe the current world between the two actual combatants."""
-        imported=getattr(self,'_benilla_world',None)
+        imported=getattr(self,'_engine_world',None)
         if imported is not None:
             return imported.line_of_sight(start,end)
         target_x,target_z=end[0],end[2]
@@ -4994,7 +4994,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             self._npc_path_goal_tile[index] = None
             self._npc_path_navigation_key[index] = None
             return
-        if getattr(self, '_benilla_world', None) is not None:
+        if getattr(self, '_engine_world', None) is not None:
             # Imported geometry has its own resident floors and hulls. GG's
             # procedural tile cache is not a path through a mounted world.
             self._npc_path[index] = []
@@ -5092,10 +5092,10 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 self._npc_state[index] = "DEAD"
                 self._npc_reason[index] = "COMBAT_DEFEATED"
                 continue
-            mounted = getattr(self, '_benilla_world', None)
+            mounted = getattr(self, '_engine_world', None)
             swimming = False
             if mounted is not None:
-                from backend.game_engine_benilla_locomotion import motion
+                from backend.game_engine_adapter_locomotion import motion
                 position,vertical,mode,impact=motion(mounted,(self._x[index],self._y[index]-.65,self._z[index]),self._vy[index],dt)
                 if position[1]!=self._y[index]-.65:self._y[index]=position[1]+.65
                 self._vy[index]=vertical;swimming=mode=='SWIM'
@@ -5238,9 +5238,9 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 target_distance = home_distance
                 desired_speed = profile['speed']
                 self._npc_reason[index] = 'HOME_RETURN'
-            mounted = getattr(self, '_benilla_world', None)
+            mounted = getattr(self, '_engine_world', None)
             if mounted is not None:
-                from backend.game_engine_benilla_locomotion import routes
+                from backend.game_engine_adapter_locomotion import routes
                 waypoint = routes(mounted).waypoint(str(self._npc_ids[index]),
                     (self._x[index], self._y[index]-.65, self._z[index]),
                     (self._x[index]+target_dx, self._y[index]-.65, self._z[index]+target_dz), self._sim_time,swimming=swimming)
@@ -5274,7 +5274,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 self._vx[index] *= scale
                 self._vz[index] *= scale
             if mounted is not None:
-                from backend.game_engine_benilla_locomotion import move
+                from backend.game_engine_adapter_locomotion import move
                 old_x, old_z = self._x[index], self._z[index]
                 nx, ny, nz = move(mounted, (old_x, self._y[index]-.65, old_z),
                     old_x+self._vx[index]*dt, old_z+self._vz[index]*dt,swimming=swimming)
@@ -5292,7 +5292,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 self._yaw[index] = math.atan2(self._vx[index], self._vz[index])
 
     def _tick_locked(self, dt: float) -> None:
-        mounted=getattr(self,'_benilla_world',None)
+        mounted=getattr(self,'_engine_world',None)
         if getattr(self,'_mounted_world_resume',None) or getattr(mounted,'initial_collision_pending',False):
             return
         started = time.perf_counter()
@@ -5699,7 +5699,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             water = self._water_sample_locked(self._x[0], self._z[0])
             terrain_y = self._terrain_height_locked(self._x[0], self._z[0])
             water_depth = max(0.0, water["height_m"] - terrain_y)
-            if getattr(self,'_benilla_world',None) is not None and water.get('body_kind')=='NONE':
+            if getattr(self,'_engine_world',None) is not None and water.get('body_kind')=='NONE':
                 # Finish this transition tick at the current swim height. The
                 # no-liquid sentinel must never become the buoyancy target.
                 water={**water,'height_m':self._y[0]-.18}
@@ -5721,7 +5721,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             self._vy[0] = swim_motion["vy"]
             self._vz[0] = swim_motion["vz"]
             self._yaw[0] = swim_motion["yaw"]
-            imported=getattr(self,'_benilla_world',None)
+            imported=getattr(self,'_engine_world',None)
             if imported is not None:
                 if self._y[0]>previous_y:
                     ceiling=imported.ceiling(self._x[0],previous_y+.65,self._z[0])
@@ -5826,7 +5826,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         ):
             if self._water_depth_locked(self._x[0], self._z[0]) > mobility_contract.MIN_SWIMMABLE_DEPTH_M:
                 water = self._water_sample_locked(self._x[0], self._z[0])
-                if getattr(self,'_benilla_world',None) is None or self._y[0]<=water['height_m']+.3:
+                if getattr(self,'_engine_world',None) is None or self._y[0]<=water['height_m']+.3:
                     self._movement_mode = "SWIM"
                     self._input["movement_mode"] = "SWIM"
                     if water.get('has_surface') is not False:self._y[0] = max(self._y[0], water["height_m"] + 0.18)
@@ -5885,7 +5885,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         # lifecycle.  It removes an ambient proxy at the same time, keeping
         # the render population stable while the authoritative actor pool
         # grows only within its explicit budget.
-        from backend.game_engine_benilla_triggers import tick as tick_world_triggers
+        from backend.game_engine_adapter_triggers import tick as tick_world_triggers
         tick_world_triggers(self)
         self._tick_world_events_locked()
         self._tick_population_locked()
@@ -6129,8 +6129,8 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             self._replay_inputs = []
             self._replay_index = 0
             self._reset_world_locked()
-            if getattr(self,'_benilla_world',None) is not None:
-                self._x[0],self._y[0],self._z[0]=self._benilla_world.config['spawn'];self._benilla_world.safe=None
+            if getattr(self,'_engine_world',None) is not None:
+                self._x[0],self._y[0],self._z[0]=self._engine_world.config['spawn'];self._engine_world.safe=None
             return self.snapshot_locked()
 
     def step(self) -> dict[str, Any]:
@@ -8874,7 +8874,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
 
     def close_dialogue(self):
         with self._lock:
-            self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            self._engine_quest_panel={};self._engine_gossip_hidden=False
             identity=self._dialogue_state.get('active',{}).get('npc_id','')
             if identity in self._world_population.people:self._world_population.resume_route(identity,self._sim_time)
             self._dialogue_state['active']=dict(npc_id='',tree_id='',node_id='',turn=0)
@@ -9059,7 +9059,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
     ) -> dict[str, Any]:
         """Start or continue a real nearby NPC conversation."""
         with self._lock:
-            if not choice_id:self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            if not choice_id:self._engine_quest_panel={};self._engine_gossip_hidden=False
             if npc_id in self._world_population.people:
                 return self._talk_regional_locked(npc_id,str(choice_id or ''))
             regional=self._regional_interaction_target_locked() if not npc_id else None
@@ -10271,7 +10271,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
 
     def save_state(self, *, snapshot: bool = True) -> dict[str, Any]:
         with self._lock:
-            from backend import game_engine_benilla_world_state as mounted_world_state
+            from backend import game_engine_adapter_world_state as mounted_world_state
             # Record the transition before serializing so the saved journal
             # contains the save boundary itself without a second revision.
             self._append_event_locked(
@@ -10352,7 +10352,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 rows=payload.get(source)
                 if isinstance(rows,list) and any(not item_state.saved_gift_payload_valid(row) for row in rows):
                     result=self.snapshot_locked();result['error']='ITEM_SAVE_GIFT_PAYLOAD_INVALID';return result
-            from backend import game_engine_benilla_world_state as mounted_world_state
+            from backend import game_engine_adapter_world_state as mounted_world_state
             try:
                 saved_mounted_world = mounted_world_state.read(payload)
             except (ValueError, TypeError, OSError) as exc:
@@ -10471,7 +10471,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             self._dialogue_state = dialogue_contract.normalize_state(
                 payload.get("dialogue_state")
             )
-            self._benilla_quest_panel={};self._benilla_gossip_hidden=False
+            self._engine_quest_panel={};self._engine_gossip_hidden=False
             self._social_state = social_contract.normalize_state(
                 payload.get("social_state")
             )
@@ -11442,8 +11442,8 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         player['client_controls']=self._client_controls_view_locked()
         player['world_map']=self._instance_map_descriptor_locked()
         player['ride_frame']=self._ride_view_locked()
-        player.pop('benilla_world',None)
-        if getattr(self,'_benilla_world',None) is not None:player['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
+        player.pop('engine_world',None)
+        if getattr(self,'_engine_world',None) is not None:player['engine_world']=self._engine_world.environment(self._x[0],self._y[0],self._z[0])
         player.update(
             {
                 "x": _round(self._x[0]),
@@ -12078,7 +12078,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             overrides=self._terrain_overrides,
             cell_cache=self._terrain_cell_cache,
         )
-        if getattr(self,'_benilla_world',None) is not None:
+        if getattr(self,'_engine_world',None) is not None:
             terrain_view['player_surface']={**terrain_view['player_surface'],**self._player_surface_locked()}
         navigation_tiles = self._navigation_tiles_for_cells_locked(
             chunks,
@@ -12182,7 +12182,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             self._regional_dialogue_catalog_locked(),
         )
         dialogue_view['accessible']=self._quest_contact_locked(dialogue_view.get('active',{}).get('npc_id',''))
-        dialogue_view['gossip_hidden']=bool(getattr(self,'_benilla_gossip_hidden',False))
+        dialogue_view['gossip_hidden']=bool(getattr(self,'_engine_gossip_hidden',False))
         social_view = social_contract.view(
             self._social_state,
             active_people_ids,
@@ -12617,7 +12617,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
                 "PERSISTED_WORLD_TRANSITION_AUDIT",
             ],
         }
-        if getattr(self,'_benilla_world',None) is not None:snapshot['player']['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
+        if getattr(self,'_engine_world',None) is not None:snapshot['player']['engine_world']=self._engine_world.environment(self._x[0],self._y[0],self._z[0])
         self._remember_render_snapshot_locked(snapshot)
         self._ui_snapshot_base=self._ui_status_from_snapshot(snapshot)
         return snapshot
@@ -12920,8 +12920,8 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         player['client_controls']=self._client_controls_view_locked()
         player['world_map']=self._instance_map_descriptor_locked()
         player['ride_frame']=self._ride_view_locked()
-        player.pop('benilla_world',None)
-        if getattr(self,'_benilla_world',None) is not None:player['benilla_world']=self._benilla_world.environment(self._x[0],self._y[0],self._z[0])
+        player.pop('engine_world',None)
+        if getattr(self,'_engine_world',None) is not None:player['engine_world']=self._engine_world.environment(self._x[0],self._y[0],self._z[0])
         player.update(x=self._x[0],y=self._y[0],z=self._z[0],yaw=self._yaw[0],
             time_s=self._sim_time,movement_mode=self._movement_mode,vehicle=self._vehicle_kind,
             grounded=self._grounded,jump_stage=self._jump_count,sprinting=self._sprinting,

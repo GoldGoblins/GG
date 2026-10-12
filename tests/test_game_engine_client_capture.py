@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtGui import QImage
-from backend.game_engine_benilla_client_tools import ClientTools
+from backend.game_engine_adapter_client_tools import ClientTools
 
 
 class Grab(QObject):

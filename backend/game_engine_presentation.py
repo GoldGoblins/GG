@@ -4,13 +4,13 @@ import array,json,math,time,wave
 from pathlib import Path
 from PySide6.QtCore import QObject,Property,Signal,Slot,QTimer,QCoreApplication,QAbstractListModel,QModelIndex,Qt
 from backend.game_engine_native_presentation import Audio,Lua,library,status
-from backend.game_engine_benilla_assets import asset_path
-from backend.game_engine_benilla_gameplay import GameplayViews
+from backend.game_engine_adapter_assets import asset_path
+from backend.game_engine_adapter_gameplay import GameplayViews
 PROJECT=Path(__file__).resolve().parents[1]
 CLIPS=('step-grass','step-stone','step-water','ui-click','attack','hit','ambience','music')
 
 def load_toc(path):
-    """Benilla TOC order, within the selected addon directory only."""
+    """GgEngine TOC order, within the selected addon directory only."""
     path=Path(path);root=path.parent.resolve();directives={};files=[]
     if path.stat().st_size>16384:raise ValueError('addon manifest too large')
     for raw in path.read_text(encoding='utf-8-sig').splitlines():
@@ -48,24 +48,24 @@ class Presentation(QObject):
         self.timer.setInterval(10);self.timer.timeout.connect(self._pump)
         self._frames='[]';self._audio_json='{}';self.errors=[];self.last_update=0.;self._lua_tick_last=time.monotonic();self.updates=0
         self.active=True;self.focused=True;self.running=False;self.muted=False;self.music_streams=None;self.short_sounds=None;self.audio_zone=None;self.snapshot={};self.progression={};self.gameplay_views=GameplayViews();self.file_clips={};self.unsupported_requests=[]
-        from backend.game_engine_benilla_client_tools import ClientTools
+        from backend.game_engine_adapter_client_tools import ClientTools
         self.client_tools=ClientTools(self)
-        from backend.game_engine_benilla_graphics import ClientGraphics
+        from backend.game_engine_adapter_graphics import ClientGraphics
         self.graphics=ClientGraphics(self)
         self._nameplate_bits=0
         self._nameplate_report={}
         self._nameplate_pending=None;self._nameplate_scheduled=False
         self._ui_input_scheduled=False
-        from backend.game_engine_benilla_formats import AssetCache
+        from backend.game_engine_adapter_formats import AssetCache
         self.sound_assets=AssetCache()
         from random import Random
         self.sound_random=Random();self.sound_pick={}
         self.zone_audio=None;self.zone_source=None;self.zone_context=None;self._default_voices=[]
-        from backend.game_engine_benilla_entity_audio import EntityAudio
+        from backend.game_engine_adapter_entity_audio import EntityAudio
         self.entity_audio=EntityAudio()
-        from backend.game_engine_benilla_spell_audio import SpellAudio
+        from backend.game_engine_adapter_spell_audio import SpellAudio
         self.spell_audio=SpellAudio()
-        from backend.game_engine_benilla_world_actors import WorldActors
+        from backend.game_engine_adapter_world_actors import WorldActors
         self.world_actors=WorldActors(self)
         self._world_actor_rows=None;self._world_actor_rows_scope=None
         self.volumes={'master':.5,'sfx':1.,'music':.4,'ambience':.6}
@@ -91,15 +91,15 @@ class Presentation(QObject):
 
     def _init_lua(self,clock_floor=0.):
         try:
-            from backend.game_engine_benilla_ui import BenillaUI,available
+            from backend.game_engine_adapter_ui import GgEngineUI,available
             if available():
-                self.lua=BenillaUI(clock=max(time.monotonic(),clock_floor));self.full_ui=True
+                self.lua=GgEngineUI(clock=max(time.monotonic(),clock_floor));self.full_ui=True
                 self.lua.saving_enabled=not (self.local_character_mode and self.character_key is None)
                 self._sync_runtime_settings()
                 state,character=self._addon_roots(self.character_key)
                 characters=getattr(self.parent(),'_local_characters',None)
                 if self.character_key is not None and characters is not None:
-                    from backend.game_engine_benilla_addon_state import bind_local_roster
+                    from backend.game_engine_adapter_addon_state import bind_local_roster
                     bind_local_roster(self.lua,state,self.character_key,characters)
                 self.loaded_addons=self.lua.load_addons(PROJECT/'qml/game/framexml',state,assets=self.sound_assets,core_root=PROJECT/'qml/game/Interface/FrameXML',character_saved_root=character)
                 self.graphics.seed()
@@ -141,13 +141,13 @@ class Presentation(QObject):
         if not self.full_ui or not self.lua:self.character_key=key;return True
         candidate=None
         try:
-            from backend.game_engine_benilla_ui import BenillaUI
+            from backend.game_engine_adapter_ui import GgEngineUI
             state,character=self._addon_roots(key)
             clock=time.monotonic()
             if not self.lua.closed:
                 clock=max(clock,self.lua.evaluate('return GetTime()')[0])
                 self.lua.event('PLAYER_LOGOUT');self.lua.save()
-            candidate=BenillaUI(clock=max(time.monotonic(),clock))
+            candidate=GgEngineUI(clock=max(time.monotonic(),clock))
             candidate.resize(*self.lua._size)
             candidate.saving_enabled=not (local_mode and key is None)
             settings={**self.runtime_settings,**{name:str(self.volumes[bus]) for name,bus in (('MasterVolume','master'),('SoundVolume','sfx'),('MusicVolume','music'),('AmbienceVolume','ambience'))}}
@@ -161,7 +161,7 @@ class Presentation(QObject):
                 self._publish_full_ui(candidate,initial_snapshot,data,emit_pending=False)
             characters=getattr(self.parent(),'_local_characters',None)
             if key is not None and characters is not None:
-                from backend.game_engine_benilla_addon_state import bind_local_roster
+                from backend.game_engine_adapter_addon_state import bind_local_roster
                 bind_local_roster(candidate,state,key,characters)
             loaded=candidate.load_addons(PROJECT/'qml/game/framexml',state,assets=self.sound_assets,
                 core_root=PROJECT/'qml/game/Interface/FrameXML',character_saved_root=character)
@@ -212,9 +212,9 @@ class Presentation(QObject):
     @staticmethod
     def _prepare_world_frame(ui):
         ui.execute("if not WorldFrame then WorldFrame=CreateFrame('WorldFrame','WorldFrame');WorldFrame:SetAllPoints() end")
-        from backend.game_engine_benilla_navigation import install as install_navigation
+        from backend.game_engine_adapter_navigation import install as install_navigation
         install_navigation(ui)
-        ui.execute(Path(__file__).with_name('game_engine_benilla_spells.lua').read_text())
+        ui.execute(Path(__file__).with_name('game_engine_adapter_spells.lua').read_text())
 
     def _init_audio(self,device):
         try:
@@ -309,7 +309,7 @@ class Presentation(QObject):
         if previous_filter!=self.textureTrilinear:self.textureSettingsChanged.emit()
         if changed:
             self.audio_zone=None;self._gain();self._notify_audio()
-            world=getattr(self.parent(),'_benilla_world_stream',None)
+            world=getattr(self.parent(),'_engine_world_stream',None)
             if world:world.lightingChanged.emit()
     def _gain(self):
         if self.audio:
@@ -342,7 +342,7 @@ class Presentation(QObject):
         self.last_update=0.;self.update(self.snapshot)
 
     def _world_audio(self,world):
-        host=self.parent();stream=getattr(host,'_benilla_world_stream',None)
+        host=self.parent();stream=getattr(host,'_engine_world_stream',None)
         source=stream.cache.archive_source if stream is not None and stream.active else None
         if source!=self.zone_source:
             if self.zone_audio:
@@ -352,7 +352,7 @@ class Presentation(QObject):
                 self.short_sounds=ShortSounds(self.audio)
             self.zone_source=source;self.zone_context=None
             if source:
-                from backend.game_engine_benilla_audio import ZoneAudio
+                from backend.game_engine_adapter_audio import ZoneAudio
                 for voice in self._default_voices:
                     if voice>=0 and self.audio.voice_active(voice):self.audio.fade(voice,0,0,True)
                 self._default_voices.clear();self.music_streams.stop('zone',0)
@@ -400,17 +400,17 @@ class Presentation(QObject):
         self.client_tools.events(result.get('client_events',[]))
 
     def _publish_full_ui(self,lua,snapshot,data,*,emit_pending=True):
-        from backend.game_engine_benilla_world import environment
+        from backend.game_engine_adapter_world import environment
         player=snapshot['player'];progression=snapshot.get('progression',self.progression)
         combat=snapshot.get('combat_live',{});actor=combat.get('player',{})
         data=dict(data);data['world']=environment(snapshot)
         data['combat_profile']=combat.get('profile')
-        from backend.game_engine_benilla_identity import identity
+        from backend.game_engine_adapter_identity import identity
         data['identity']=identity(snapshot)
-        from backend.game_engine_benilla_navigation import presentation_imported_navigation
+        from backend.game_engine_adapter_navigation import presentation_imported_navigation
         data['navigation']=presentation_imported_navigation(self,snapshot,lua)
         data['client_controls']=player.get('client_controls',{})
-        stream=getattr(self.parent(),'_benilla_world_stream',None)
+        stream=getattr(self.parent(),'_engine_world_stream',None)
         life=player.get('client_controls',{}).get('services',{}).get('lifecycle',{})
         if stream and stream.light.player_ghost!=bool(life.get('ghost')):
             stream.light.player_ghost=bool(life.get('ghost'));stream.light.next_ms=0;stream.light._room()
@@ -465,7 +465,7 @@ class Presentation(QObject):
         Missing render rows mean this packet does not carry that stream. An
         explicit empty canonical list still retires the visible world actors.
         """
-        stream=getattr(self.parent(),'_benilla_world_stream',None)
+        stream=getattr(self.parent(),'_engine_world_stream',None)
         cache=getattr(stream,'cache',None)
         if not getattr(stream,'active',False) or cache is None or cache.closed or cache.archive_source is None:
             self._world_actor_rows=None;self._world_actor_rows_scope=None
@@ -510,10 +510,10 @@ class Presentation(QObject):
         try:
             if self.audio:
                 self.audio.listener(*(float(player.get(k,0)) for k in ('x','y','z','yaw')));self._gain()
-                from backend.game_engine_benilla_world import environment
+                from backend.game_engine_adapter_world import environment
                 world=environment(snapshot)
                 self._world_audio(world)
-                stream=getattr(self.parent(),'_benilla_world_stream',None)
+                stream=getattr(self.parent(),'_engine_world_stream',None)
                 config=getattr(stream,'config',None) or {}
                 audio_snapshot=self.world_actors.bound_snapshot(self._world_actor_snapshot(snapshot),stream)
                 self.entity_audio.update(self.zone_audio if world.get('world_loaded') else None,audio_snapshot,stream,
@@ -800,7 +800,7 @@ class Presentation(QObject):
         if missing:
             # Every original queue is accounted for. Missing gameplay must
             # report failure and cannot accumulate/replay on a future tick.
-            for row in missing[:128]:self._unsupported('Required Benilla host: '+str(row.get('method',''))[:128])
+            for row in missing[:128]:self._unsupported('Required GgEngine host: '+str(row.get('method',''))[:128])
             self.lua.event('UI_ERROR_MESSAGE','Den här funktionen saknar ännu en spelkoppling i den lokala världen.')
         # Requests refer to the rows shown when the worker queued them.
         # Refreshing eligibility after a purchase must never reinterpret a
@@ -859,7 +859,7 @@ class Presentation(QObject):
             else:self.lua.event('CHAT_MSG_TEXT_EMOTE',str(row.get('token',''))[:128],str(self.snapshot.get('player',{}).get('name','Gold Goblin')))
         for row in requests.get('local_client',[])[:128]:
             if row.get('op')=='MinimapPing':
-                from backend.game_engine_benilla_minimap import route_ping
+                from backend.game_engine_adapter_minimap import route_ping
                 route_ping(self,row,dispatch)
             else:
                 intent=dict(row,kind='local')
@@ -979,7 +979,7 @@ class Presentation(QObject):
             else:self.lua.event('UI_ERROR_MESSAGE','Unknown GG repair equipment slot')
         if requests.get('repair_all'):route(merchant_requests.route_repair)
         if any(len(requests.get(key,[]))>64 for key in ('merchant_slot_buys','merchant_buybacks','container_repairs','inventory_repairs')):self._unsupported('Merchant request capacity exceeded')
-        from backend.game_engine_benilla_gameplay import EQUIPMENT_NAMES
+        from backend.game_engine_adapter_gameplay import EQUIPMENT_NAMES
         for move in requests.get('item_moves',[])[:64]:
             if -1 in (move['src_bag'],move['dst_bag']):
                 before=bank_requests.bank_refs if move['src_bag']==-1 else inventory_sources
@@ -1087,12 +1087,12 @@ class Presentation(QObject):
     @Property(bool,notify=textureSettingsChanged)
     def textureTrilinear(self):return self.runtime_settings['trilinear']=='1'
     @Property(bool,constant=True)
-    def benillaUiEnabled(self):return self.full_ui
+    def engineUiEnabled(self):return self.full_ui
     @Slot(QObject,bool)
     def attachCanvas(self,item,standalone):
         if not self.full_ui:return
-        from backend.game_engine_benilla_canvas import BenillaCanvas
-        self._canvas=BenillaCanvas(self,item,0 if standalone else 174);self._canvas.sync(self.lua.rows)
+        from backend.game_engine_adapter_canvas import GgEngineCanvas
+        self._canvas=GgEngineCanvas(self,item,0 if standalone else 174);self._canvas.sync(self.lua.rows)
         self._canvas.setCursorMode(getattr(self,'_cursor_mode','Point'))
         self.graphics.attach(standalone)
     @Property(str,notify=audioChanged)
@@ -1126,7 +1126,7 @@ class Presentation(QObject):
                     friends=controls.get('services',{}).get('group',{}).get('members',[])
                     if self._nameplate_bits & (8 if person['id'] in friends else 1):continue
             rows.append(dict(item))
-        from backend.game_engine_benilla_minimap import quest_signals
+        from backend.game_engine_adapter_minimap import quest_signals
         signals=quest_signals(self.snapshot)
         for person in controls.get('services',{}).get('people',[])[:64]:
             marker=signals.get(person['id'])
@@ -1178,7 +1178,7 @@ class Presentation(QObject):
         try:
             if generation!=self._ui_generation or not self.lua or not self.lua.saving_enabled:raise ValueError('Addon list changed')
             self.lua.save()
-            from backend.game_engine_benilla_addon_choices import AddonChoices
+            from backend.game_engine_adapter_addon_choices import AddonChoices
             self._addon_editor=AddonChoices(self.lua);self._addon_error='';self.refreshAddons();return True
         except (OSError,ValueError,RuntimeError,TimeoutError) as exc:self._addon_error=str(exc)[:160];self.refreshAddons();return False
 
@@ -1250,7 +1250,7 @@ class Presentation(QObject):
         except (ValueError,RuntimeError,TimeoutError) as exc:self._error(exc);return False
     @Slot(result=str)
     def diagnostics(self):
-        return json.dumps({'native':status(),'lua':{'core':'BENILLA_FULL' if self.full_ui else 'GG_LEGACY','addons':self.loaded_addons,'updates':self.updates,'memory_bytes':self.lua.memory() if self.lua else 0,'warnings':getattr(self.lua,'warnings',[]),'errors':getattr(self.lua,'errors',[])},
+        return json.dumps({'native':status(),'lua':{'core':'GG_ENGINE_FULL' if self.full_ui else 'GG_LEGACY','addons':self.loaded_addons,'updates':self.updates,'memory_bytes':self.lua.memory() if self.lua else 0,'warnings':getattr(self.lua,'warnings',[]),'errors':getattr(self.lua,'errors',[])},
             'world_actors':json.loads(self.world_actors.diagnostics),
             'audio':{'state':self.audio_state,'voices':self.audio.voices() if self.audio else 0,'mixed_frames':self.rendered_frames,
                      'submitted_frames':self.submitted_frames,'processed_us':self.sink.processedUSecs() if self.sink else 0,'underrun_polls':self.underruns,

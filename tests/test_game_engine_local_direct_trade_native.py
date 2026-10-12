@@ -3,8 +3,8 @@ import copy
 import json
 import unittest
 
-from backend.game_engine_benilla_gameplay import GameplayViews
-from backend.game_engine_benilla_ui import BenillaUI
+from backend.game_engine_adapter_gameplay import GameplayViews
+from backend.game_engine_adapter_ui import GgEngineUI
 from tests import test_game_engine_local_direct_trade_services as fixture
 
 
@@ -19,7 +19,7 @@ class NativeSharedDirectTrade(unittest.TestCase):
 
     def setUp(self):
         fixture.SharedDirectTradeServices.setUp(self)
-        self.ui = BenillaUI(clock=100); self.addCleanup(self.ui.close)
+        self.ui = GgEngineUI(clock=100); self.addCleanup(self.ui.close)
         self.gameplay = GameplayViews(); self.publish()
 
     def publish(self):

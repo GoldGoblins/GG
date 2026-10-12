@@ -5,7 +5,7 @@ import json
 from unittest.mock import patch
 
 from backend import game_engine_items as items
-from backend.game_engine_benilla_social import guild_record
+from backend.game_engine_adapter_social import guild_record
 from backend.game_engine_local_custody import asset_id, digest
 from backend.game_engine_local_custody import RecoveryRequired
 from backend.game_engine_local_characters import CharacterStore, atomic

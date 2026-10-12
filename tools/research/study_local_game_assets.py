@@ -246,9 +246,9 @@ def smd_facts(path):
 
 
 def original_readers():
-    upstream = Path('/home/GG/.local/share/goldgoblins/gg-ai-desktop/game-engine/benilla-upstream')
+    upstream = Path('/home/GG/.local/share/goldgoblins/gg-ai-desktop/game-engine/engine-reference-upstream')
     rows = []
-    for name in ("benilla-assets", "benilla-ui"):
+    for name in ("engine-formats", "engine-ui-core"):
         root = PROJECT / "native" / name
         source_files = json.loads((root / "upstream-provenance.json").read_text())["source_files"]
         changed = [key for key, expected in source_files.items() if not (root / key).is_file() or digest(root / key) != expected]
@@ -321,7 +321,7 @@ def study():
         raise ValueError("ASSETS_CHANGED_DURING_STUDY: " + ", ".join(changed[:8]))
     return {"schema": "gg.local-game-asset-study.v1", "status": "MEASURED", "asset_root": str(ASSETS),
             "scope": "Local corpus metadata and exported topology, not complete game compatibility",
-            "original_intent": "Learn from original Benilla, GG adapters and already available game assets; preserve the game-independent working steps.",
+            "original_intent": "Learn from upstream, GG adapters and already available game assets; preserve the game-independent working steps.",
             "asset_files": len(initial), "asset_bytes": sum(v[2] for v in initial.values()),
             "source_stamps_unchanged": True, "groups": groups, "gltf_groups": model_groups,
             "gltf_documents": gltfs, "obj_references": objs, "dae_references": daes,

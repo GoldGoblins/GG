@@ -127,7 +127,7 @@ def cancel(job_id: str):
 
 
 def _worker(job_id):
-    # The existing supervised Benilla child sets its own 2 GiB address-space
+    # The existing supervised GgEngine child sets its own 2 GiB address-space
     # limit; keep that hard ceiling available while bounding this parent.
     resource.setrlimit(resource.RLIMIT_AS, (1536 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_CPU, (45, 45))

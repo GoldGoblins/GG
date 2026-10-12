@@ -448,7 +448,7 @@ static void recfield (LexState *ls, struct ConsControl *cc) {
   int rkkey;
   if (ls->t.token == TK_NAME) {
     luaY_checklimit(fs, cc->nh, MAX_INT, "items in a constructor");
-    cc->nh++;  /* benilla: 5.0's placement -- `[expr] = v` credits NEITHER size hint */
+    cc->nh++;  /* engine: 5.0's placement -- `[expr] = v` credits NEITHER size hint */
     checkname(ls, &key);
   }
   else  /* ls->t.token == '[' */
@@ -509,8 +509,8 @@ static void constructor (LexState *ls, expdesc *t) {
   checknext(ls, '{');
   do {
     lua_assert(cc.v.k == VVOID || cc.tostore > 0);
-    /* BENILLA: Lua 5.0's constructor compat-semicolon, restored (see
-    ** third_party/lua-src/BENILLA.md). 5.0 opened this loop with exactly the
+    /* GG_ENGINE: Lua 5.0's constructor compat-semicolon, restored (see
+    ** third_party/lua-src/SOURCE-ATTRIBUTION.md). 5.0 opened this loop with exactly the
     ** line below, a Lua 4.0 leftover; 5.1 deleted it, so one extra `;' after a
     ** field separator (`Back_Title = AL["Factions"];;', which AtlasLoot writes)
     ** raised "unexpected symbol near ';'" while the 1.12.1 client accepts it.
@@ -761,8 +761,8 @@ static void simpleexp (LexState *ls, expdesc *v) {
       init_exp(v, VFALSE, 0);
       break;
     }
-    /* BENILLA: 5.1's vararg EXPRESSION arm, deleted (see
-    ** third_party/lua-src/BENILLA.md). Lua 5.0 has no grammar for `...' as a
+    /* GG_ENGINE: 5.1's vararg EXPRESSION arm, deleted (see
+    ** third_party/lua-src/SOURCE-ATTRIBUTION.md). Lua 5.0 has no grammar for `...' as a
     ** value: a vararg function reads its extra arguments out of the implicit
     ** `arg' table. `...' as an expression is how the Ace2 corpus asks which
     ** interpreter it is on:
@@ -809,7 +809,7 @@ static UnOpr getunopr (int op) {
   switch (op) {
     case TK_NOT: return OPR_NOT;
     case '-': return OPR_MINUS;
-    /* BENILLA: 5.1's `#' length operator, deleted. 5.0 asks a table for its
+    /* GG_ENGINE: 5.1's `#' length operator, deleted. 5.0 asks a table for its
     ** size with table.getn and a string with string.len; the operator does not
     ** exist and neither does its __len metamethod. Byte-read in the client:
     ** getunopr is 0x6fe0a0, a leaf with exactly two token tests, `cmp ecx,0x2D'
@@ -828,7 +828,7 @@ static BinOpr getbinopr (int op) {
     case '-': return OPR_SUB;
     case '*': return OPR_MUL;
     case '/': return OPR_DIV;
-    /* BENILLA: 5.1's `%' modulo operator, deleted. 5.0 spells it math.mod
+    /* GG_ENGINE: 5.1's `%' modulo operator, deleted. 5.0 spells it math.mod
     ** (and the bare global `mod'), which this VM publishes. Byte-read in the
     ** client: getbinopr is 0x6fe0c0 and its switch is based at `ecx-0x2A' (`*',
     ** the lowest token it handles). `%' is 0x25, below the base, so it is

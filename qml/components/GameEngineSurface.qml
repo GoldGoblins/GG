@@ -42,23 +42,23 @@ Item {
         ? surfaceHost.gameEnginePresentation() : null
     readonly property var originalWorldActors: nativeScenePresentation ? nativeScenePresentation.worldActors : null
     property var localServiceState: ({})
-    property var benillaWorld: surfaceHost && surfaceHost.gameEngineBenillaWorld ? surfaceHost.gameEngineBenillaWorld() : null
-    readonly property bool originalWorldActive: !!benillaWorld && benillaWorld.active
+    property var engineWorld: surfaceHost && surfaceHost.gameEngineImportedWorld ? surfaceHost.gameEngineImportedWorld() : null
+    readonly property bool originalWorldActive: !!engineWorld && engineWorld.active
     property string worldLoadMessage: ""
     property var mountedWorldState: ({status:"GG",message:""})
-    function selectBenillaWorld(manifest) {
-        if (!surfaceHost || !surfaceHost.gameEngineLoadBenillaWorld) return
-        var result=JSON.parse(surfaceHost.gameEngineLoadBenillaWorld(String(manifest)))
+    function selectGgEngineWorld(manifest) {
+        if (!surfaceHost || !surfaceHost.gameEngineLoadImportedWorld) return
+        var result=JSON.parse(surfaceHost.gameEngineLoadImportedWorld(String(manifest)))
         worldLoadMessage=result.ok ? "" : String(result.error || "World load failed")
-        benillaWorld=surfaceHost.gameEngineBenillaWorld()
+        engineWorld=surfaceHost.gameEngineImportedWorld()
         refresh()
     }
     FileDialog {
         id: worldManifestDialog
-        title: "Select a packaged Benilla world"
+        title: "Select a world"
         nameFilters: ["World manifest (*.json)"]
         currentFolder: Qt.resolvedUrl("../game")
-        onAccepted: root.selectBenillaWorld(selectedFile)
+        onAccepted: root.selectGgEngineWorld(selectedFile)
     }
     property color frameBorder: "#6a6a6a"
     property int frameRadius: 4
@@ -134,11 +134,11 @@ Item {
     property bool importedCameraReady: false
     property bool cameraWaterCollision: true
     function updateImportedCamera(delta) {
-        if (!root.originalWorldActive || !root.benillaWorld) {
+        if (!root.originalWorldActive || !root.engineWorld) {
             root.importedCameraReady=false
             return
         }
-        root.importedCameraSeat=root.benillaWorld.solveCamera({
+        root.importedCameraSeat=root.engineWorld.solveCamera({
             feet:[root.number(root.player.x,0),root.number(root.player.y,0)-.65,root.number(root.player.z,0)],
             head_height:1.4,pivot_height:.65+root.cameraPivotOffsetM,
             yaw:root.cameraWorldYaw,pitch:root.orbitPitch,
@@ -462,7 +462,7 @@ Item {
         root.number((root.life.clock || {}).day_length_s, 120))
     readonly property var atmosphere: {
         var a=Object.assign({},root.ggAtmosphere)
-        var light=root.originalWorldActive && root.benillaWorld ? root.benillaWorld.lighting : null
+        var light=root.originalWorldActive && root.engineWorld ? root.engineWorld.lighting : null
         if (light && light.source === "ORIGINAL_LIGHT_DBC") {
             function c(rgb) { return Qt.rgba(rgb[0],rgb[1],rgb[2],1) }
             a.sky=c(light.sky[0]);a.horizon=c(light.fog.color);a.cloud=c(light.cloud_colors[1])
@@ -540,7 +540,7 @@ Item {
     readonly property var planetMap: root.terrain.planet || ({})
     readonly property string nearbyWorldPlace: {
         if (root.originalWorldActive) {
-            var imported = root.player.benilla_world || ({})
+            var imported = root.player.engine_world || ({})
             return String(imported.subzone || imported.zone || "")
         }
         var list = root.planetMap.places || []
@@ -1596,9 +1596,9 @@ Item {
             // Loading a saved character may replace the Qt world owner while
             // retaining this pane. Bind the live owner before publishing its
             // coordinates and models into the scene.
-            if (root.surfaceHost.gameEngineBenillaWorld) {
-                var provider=root.surfaceHost.gameEngineBenillaWorld()
-                if (root.benillaWorld!==provider) root.benillaWorld=provider
+            if (root.surfaceHost.gameEngineImportedWorld) {
+                var provider=root.surfaceHost.gameEngineImportedWorld()
+                if (root.engineWorld!==provider) root.engineWorld=provider
             }
             var started=Date.now()
             var raw = root.surfaceHost.gameEngineRenderStatus()
@@ -2670,7 +2670,7 @@ Item {
     }
 
     function dragCameraLook(dx, dy) {
-        // Benilla's normal pitch and yaw rate law, adapted to our +Z facing.
+        // GgEngine's normal pitch and yaw rate law, adapted to our +Z facing.
         if (root.mouseRightHeld)
             root.mouseLookHeading = root.wrapDegrees(root.mouseLookHeading - dx * 0.225)
         else
@@ -3108,7 +3108,7 @@ Item {
     }
     Timer {
         interval:100;repeat:true
-        running:root.paneLive && root.surfaceHost!==null && (root.mountedWorldState.status==="LOADING" || (root.benillaWorld && root.benillaWorld.loading) || (root.originalWorldActive && !root.running && !root.replaying))
+        running:root.paneLive && root.surfaceHost!==null && (root.mountedWorldState.status==="LOADING" || (root.engineWorld && root.engineWorld.loading) || (root.originalWorldActive && !root.running && !root.replaying))
         onTriggered: {root.refreshRender();root.refresh()}
     }
 
@@ -3301,9 +3301,9 @@ Item {
                     implicitWidth: 96
                     implicitHeight: 25
                     HoverHandler { id: worldLoadHover }
-                    ToolTip.text: root.worldLoadMessage || (root.benillaWorld ? root.benillaWorld.error : "")
+                    ToolTip.text: root.worldLoadMessage || (root.engineWorld ? root.engineWorld.error : "")
                     ToolTip.visible: worldLoadHover.hovered && ToolTip.text.length > 0
-                    onClicked: root.originalWorldActive ? root.selectBenillaWorld("") : worldManifestDialog.open()
+                    onClicked: root.originalWorldActive ? root.selectGgEngineWorld("") : worldManifestDialog.open()
                 }
 
                 GgButton {
@@ -3312,7 +3312,7 @@ Item {
                     implicitWidth: 96
                     implicitHeight: 25
                     enabled: !root.originalWorldActive
-                    onClicked: root.selectBenillaWorld("game/worlds/benilla-demo/world.json")
+                    onClicked: root.selectGgEngineWorld("game/worlds/engine-demo/world.json")
                 }
 
                 GgButton {
@@ -3648,7 +3648,7 @@ Item {
 
                     Model {
                         objectName: "gameAtmosphereSkyDome"
-                        visible: !(root.originalWorldActive && root.benillaWorld && root.benillaWorld.lighting.source === "ORIGINAL_LIGHT_DBC")
+                        visible: !(root.originalWorldActive && root.engineWorld && root.engineWorld.lighting.source === "ORIGINAL_LIGHT_DBC")
                         geometry: root.lowPolySphereGeometry
                         position: camera.position
                         scale: Qt.vector3d(root.cameraClipFarM*.99/50,
@@ -3804,9 +3804,9 @@ Item {
                         scale: Qt.vector3d(1, 1, 1)
                     }
 
-                    BenillaWorldPage {
+                    GgEngineWorldPage {
                         id: originalWorldPage
-                        stream: root.benillaWorld
+                        stream: root.engineWorld
                         textureTrilinear: root.nativeScenePresentation ? root.nativeScenePresentation.textureTrilinear : true
                         cameraPosition: camera.scenePosition
                         sceneCamera: camera
@@ -3814,19 +3814,19 @@ Item {
                         live: root.paneLive
                         animate: root.running || root.replaying
                     }
-                    BenillaWorldActorsPage {
+                    GgEngineWorldActorsPage {
                         provider: root.originalWorldActors
                         textureTrilinear: root.nativeScenePresentation ? root.nativeScenePresentation.textureTrilinear : true
-                        stream: root.benillaWorld
+                        stream: root.engineWorld
                         cameraPosition: camera.scenePosition
                         hidePlayer: root.firstPersonView
                         visible: root.originalWorldActive
                     }
 
-                    BenillaFfxEffect {
+                    GgEngineFfxEffect {
                         id: originalFfx
-                        objectName: "ggBenillaFfx"
-                        property var state: root.benillaWorld ? root.benillaWorld.ffx : ({})
+                        objectName: "ggGgEngineFfx"
+                        property var state: root.engineWorld ? root.engineWorld.ffx : ({})
                         glowWeight: state.gain || 0
                         hazeWeight: state.haze || 0
                         ghost: state.ghost || false
@@ -3835,8 +3835,8 @@ Item {
                         viewportWidth: view3d.explicitTextureWidth
                         viewportHeight: view3d.explicitTextureHeight
                         waveTexture: root.originalWorldActive && root.surfaceHost
-                            && typeof root.surfaceHost.gameEngineBenillaWaveTexture === "function"
-                            ? root.surfaceHost.gameEngineBenillaWaveTexture() : null
+                            && typeof root.surfaceHost.gameEngineImportedWaveTexture === "function"
+                            ? root.surfaceHost.gameEngineImportedWaveTexture() : null
                     }
 
                     PaintedClayMaterial {

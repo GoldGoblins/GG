@@ -40,7 +40,7 @@ class SavedGroupLoot(unittest.TestCase):
         source, item = self.actual_source(**fields)
         result = self.runtime.open_container(source['instance_id'])
         self.assertIsNone(result.get('error'), result.get('error'))
-        return source, item, self.runtime._benilla_loot['session']
+        return source, item, self.runtime._engine_loot['session']
 
     def pick(self, source, item, session):
         result = self.runtime.loot_slot(session, source['instance_id'], item['instance_id'])
@@ -59,7 +59,7 @@ class SavedGroupLoot(unittest.TestCase):
         self.assertTrue(result['loot']['open'])
         self.assertEqual((self.runtime._item_instances, self.runtime._inventory), before)
         inactive = self.runtime._local_custody_store.snapshot()['characters'][self.second]
-        self.pick(source, item, self.runtime._benilla_loot['session'])
+        self.pick(source, item, self.runtime._engine_loot['session'])
         roll = self.roll(); self.assertEqual(roll['eligible'], ['player']); self.assertEqual(roll['votes'], {})
         self.public('LootRollVote', id=roll['id'], vote=1)
         self.assertEqual(self.runtime._item_instances[item['instance_id']]['location'], 'INVENTORY')

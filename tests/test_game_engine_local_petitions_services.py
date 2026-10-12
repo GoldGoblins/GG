@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import game_engine_character_creation as appearance
-from backend.game_engine_benilla_petitions import CHARTER_COST, REGISTRAR
+from backend.game_engine_adapter_petitions import CHARTER_COST, REGISTRAR
 from backend.game_engine_local_custody import RecoveryRequired
 from tests import test_game_engine_local_custody_services as fixture
 

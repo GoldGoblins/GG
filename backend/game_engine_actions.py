@@ -1,8 +1,8 @@
-"""Action slots and TAB history adapted from samwhosung/benilla (MIT).
+"""Action slots and TAB history adapted from samwhosung/engine (MIT).
 
-Copyright (c) 2026 Sam. See backend/licenses/benilla-MIT.txt.
-Reference: benilla-ui/src/script/{action,cursor/bar}.rs and
-benilla-app/src/target/scan.rs. Slot content and live state are separate;
+Copyright (c) 2026 Sam. See backend/licenses/engine-MIT.txt.
+Reference: engine-ui-core/src/script/{action,cursor/bar}.rs and
+engine-app/src/target/scan.rs. Slot content and live state are separate;
 item shortcuts refer to item definitions and never move bag instances.
 """
 from __future__ import annotations
@@ -43,12 +43,12 @@ class ActionBars:
     def move(self,source,destination):
         if self.locked:return {'error':'ACTION_BAR_LOCKED'}
         if not all(isinstance(i,int) and 0<=i<len(self.slots) for i in (source,destination)):return {'error':'ACTION_SLOT_INVALID'}
-        # Atomic swap is the UI equivalent of Benilla's displaced cursor action.
+        # Atomic swap is the UI equivalent of GgEngine's displaced cursor action.
         self.slots[source],self.slots[destination]=self.slots[destination],self.slots[source]
         self.revision+=1;return {'ok':True}
 
     def cycle(self,rows,current,now,reverse=False):
-        # Benilla: on-screen tier, distance + off-centre priority, attacker bonus,
+        # GgEngine: on-screen tier, distance + off-centre priority, attacker bonus,
         # history for four seconds, reverse restores the previous candidate.
         rows=[r for r in rows if r.get('attackable',True) and not r.get('dead') and not r.get('no_tab')]
         if not rows:return ''

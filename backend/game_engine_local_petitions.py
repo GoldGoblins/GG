@@ -11,8 +11,8 @@ import copy
 import time
 
 from backend import game_engine_items as items
-from backend.game_engine_benilla_petitions import SIGNATURES, REGISTRAR
-from backend.game_engine_benilla_social import guild_record
+from backend.game_engine_adapter_petitions import SIGNATURES, REGISTRAR
+from backend.game_engine_adapter_social import guild_record
 
 OFFER_SECONDS = 60
 MAX_OFFERS = 10

@@ -2454,36 +2454,36 @@ class ChatSurfaceHost(QObject):
         return presentation_for(self)
 
     @Slot(result=QObject)
-    def gameEngineBenillaWorld(self):
-        from backend.game_engine_benilla_streaming import world_for
+    def gameEngineImportedWorld(self):
+        from backend.game_engine_adapter_streaming import world_for
         return self._keep_game_engine_geometry(world_for(self))
 
     @Slot(result=QObject)
-    def gameEngineBenillaWaveTexture(self):
-        from backend.game_engine_benilla_ffx import wave_for
+    def gameEngineImportedWaveTexture(self):
+        from backend.game_engine_adapter_ffx import wave_for
         return self._keep_game_engine_geometry(wave_for(self))
 
     @Slot(str,result=str)
-    def gameEngineLoadBenillaWorld(self,manifest):
-        from backend.game_engine_benilla_streaming import load_world
+    def gameEngineLoadImportedWorld(self,manifest):
+        from backend.game_engine_adapter_streaming import load_world
         return json.dumps(load_world(self,manifest),separators=(',',':'))
 
     @Slot('QVariantMap',result=bool)
-    def gameEngineBenillaWeather(self,value):
-        stream=getattr(self,'_benilla_world_stream',None)
+    def gameEngineImportedWeather(self,value):
+        stream=getattr(self,'_engine_world_stream',None)
         return bool(stream and stream.setWeather(value))
     @Slot('QByteArray',result=bool)
-    def gameEngineBenillaWeatherPacket(self,payload):
-        stream=getattr(self,'_benilla_world_stream',None)
+    def gameEngineImportedWeatherPacket(self,payload):
+        stream=getattr(self,'_engine_world_stream',None)
         return bool(stream and stream.weatherPacket(payload))
     @Slot('QByteArray',result=bool)
-    def gameEngineBenillaMusicPacket(self,payload):
+    def gameEngineImportedMusicPacket(self,payload):
         presentation=getattr(self,'_game_presentation',None)
         return bool(presentation and presentation.world_music_packet(payload))
 
     @Slot(result=str)
-    def gameEngineBenillaWorldStatus(self):
-        from backend.game_engine_benilla_streaming import world_for
+    def gameEngineImportedWorldStatus(self):
+        from backend.game_engine_adapter_streaming import world_for
         return json.dumps(world_for(self).status(),separators=(',',':'))
 
     @Slot(QObject,str,result=bool)
@@ -2499,7 +2499,7 @@ class ChatSurfaceHost(QObject):
             from backend.game_engine_scene_driver import SceneDriver
             self._scene_driver=SceneDriver()
         accepted=self._scene_driver.set_view(raw)
-        if getattr(game_engine_host._RUNTIME,'_benilla_world',None) is not None:return accepted
+        if getattr(game_engine_host._RUNTIME,'_engine_world',None) is not None:return accepted
         if accepted:
             from backend.game_engine_world_trees import update_world_trees
             update_world_trees(self,self._scene_driver.view)
@@ -2555,7 +2555,7 @@ class ChatSurfaceHost(QObject):
         return self._scene_driver.register_rig(loader,identity,self._game_engine_runtime_clip_driver)
 
     def _publish_game_scene(self,value):
-        from backend.game_engine_benilla_streaming import update_world
+        from backend.game_engine_adapter_streaming import update_world
         update_world(self)
         presentation=getattr(self,'_game_presentation',None)
         if presentation is not None:presentation.update(value)
@@ -2934,12 +2934,12 @@ class ChatSurfaceHost(QObject):
 
     @Slot(str, QObject, result=QObject)
     def gameEngineEmblemTexture(self, uri: str, owner: QObject) -> QObject | None:
-        from backend.game_engine_benilla_materials import emblem_texture_data
+        from backend.game_engine_adapter_materials import emblem_texture_data
         return emblem_texture_data(self,uri,owner)
 
     @Slot('QQuaternion','QQuaternion','QVector3D',result='QVariantMap')
     def gameEngineAlignedAttachment(self, socket_rotation, actor_rotation, offset):
-        from backend.game_engine_benilla_materials import aligned_attachment
+        from backend.game_engine_adapter_materials import aligned_attachment
         return aligned_attachment(socket_rotation,actor_rotation,offset)
 
     @Slot(QObject, str, float, result=bool)

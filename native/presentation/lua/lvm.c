@@ -680,8 +680,8 @@ void luaV_execute (lua_State *L, int nexeccalls) {
       }
       case OP_TFORLOOP: {
         StkId cb = ra + 3;  /* call base */
-        /* BENILLA: Lua 5.0's OP_TFORPREP, folded into the loop opcode (see
-        ** third_party/lua-src/BENILLA.md).
+        /* GG_ENGINE: Lua 5.0's OP_TFORPREP, folded into the loop opcode (see
+        ** third_party/lua-src/SOURCE-ATTRIBUTION.md).
         **
         ** 5.0 ran this once at loop entry in its own opcode (index 30, 157 bytes, at
         ** 0x6f94a2 in the 1.12.1 client): when a generic-for's generator is a table, the

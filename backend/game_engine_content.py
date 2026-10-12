@@ -20,7 +20,7 @@ from backend import game_engine_npc_identity as identity_catalog
 from backend import game_engine_content_packs as content_packs
 from backend import game_engine_quests as quests_catalog
 from backend import game_engine_world_events as world_events_catalog
-from backend.game_engine_benilla_spells import authored_abilities
+from backend.game_engine_adapter_spells import authored_abilities
 
 
 SCHEMA = "gg.game-engine.content.v1"

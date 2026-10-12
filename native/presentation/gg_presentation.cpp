@@ -1,4 +1,4 @@
-// GG C++/Qt adaptation. Benilla source attribution and deltas: provenance.json.
+// GG C++/Qt adaptation. GgEngine source attribution and deltas: provenance.json.
 #include "gg_presentation.h"
 #include "gg_audio_dsp.h"
 #include <algorithm>
@@ -31,7 +31,7 @@ struct Audio {
     double x=0,y=0,z=0,yaw=0; float master=.5f,buses[3]={1,.4f,.6f},gate=0,output=0,limiter=1;
     explicit Audio(uint32_t r):rate(r),lookahead(r),reverb(r) {voice_stream.fill(-1);}
 };
-// Pure gain terms ported from benilla-app/src/sound/math.rs.
+// Pure gain terms ported from engine-app/src/sound/math.rs.
 float attenuation(double d,float near,float far) {
     if(d>=far) return 0;
     const double roll=d<=near?1:near/(near+4*(d-near));

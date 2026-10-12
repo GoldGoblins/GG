@@ -1,9 +1,9 @@
 {
-  "schema": "gg.benilla-source-port.v1",
+  "schema": "gg.engine-source-port.v1",
   "repository": "https://github.com/samwhosung/benilla",
   "commit": "d0d1b5def910fda88388f7be0e81fee903a32b54",
   "retrieved": "2026-10-08",
-  "local_complete_checkout": "/home/GG/.local/share/goldgoblins/gg-ai-desktop/game-engine/benilla-upstream",
+  "local_complete_checkout": "/home/GG/.local/share/goldgoblins/gg-ai-desktop/game-engine/engine-reference-upstream",
   "source_files": {
     "crates/benilla-assets/src/spatial_cache.rs": {
       "sha256": "ca39e22afef25dffe5b59027cb46efc5a0e45e63b4d3f2aac65e1bc2b26e395e",
@@ -19,7 +19,7 @@
     }
   },
   "license": "MIT",
-  "notice": "backend/licenses/benilla-MIT.txt",
+  "notice": "backend/licenses/engine-MIT.txt",
   "scope": "Source-level C++ cache/window port; independent conservative sphere culler and retained-sector range selector. Not a complete client conversion.",
   "adaptations": [
     "Metres, X/Z ground plane and double-precision coordinates",

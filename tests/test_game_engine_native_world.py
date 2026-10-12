@@ -184,6 +184,6 @@ class NativeWorldTests(unittest.TestCase):
     def test_release_includes_binary_source_and_notice(self):
         spec=importlib.util.spec_from_file_location('gg_package_test',PROJECT/'tools/package_gg_game_release.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
         names={p.relative_to(PROJECT).as_posix() for p in mod.package_files()}
-        self.assertTrue({'backend/native/linux-x86_64/libgg_world.so','backend/native/linux-x86_64/build.json','backend/game_engine_native_world.py','native/world/gg_world.cpp','native/world/gg_world.h','native/world/provenance.json','backend/licenses/benilla-MIT.txt'}<=names)
+        self.assertTrue({'backend/native/linux-x86_64/libgg_world.so','backend/native/linux-x86_64/build.json','backend/game_engine_native_world.py','native/world/gg_world.cpp','native/world/gg_world.h','native/world/provenance.json','backend/licenses/engine-MIT.txt'}<=names)
 
 if __name__=='__main__':unittest.main()

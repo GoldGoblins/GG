@@ -1,5 +1,5 @@
-// GG world core. Benilla-derived algorithms: Copyright (c) 2026 Sam, MIT.
-// Original notice: ../../backend/licenses/benilla-MIT.txt. GG adaptations below.
+// GG world core. GgEngine-derived algorithms: Copyright (c) 2026 Sam, MIT.
+// Original notice: ../../backend/licenses/engine-MIT.txt. GG adaptations below.
 #pragma once
 #include <stdint.h>
 #ifdef __cplusplus

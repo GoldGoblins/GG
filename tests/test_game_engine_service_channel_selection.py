@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from backend.game_engine_benilla_service_views import ServiceViews
+from backend.game_engine_adapter_service_views import ServiceViews
 
 
 class ChannelSelection(unittest.TestCase):

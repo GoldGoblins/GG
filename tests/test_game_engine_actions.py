@@ -1,4 +1,4 @@
-"""Authoritative action slots, Benilla click/TAB rules and actual inventory effects."""
+"""Authoritative action slots, GgEngine click/TAB rules and actual inventory effects."""
 import copy,json,os,sys
 from pathlib import Path
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')

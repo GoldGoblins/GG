@@ -1,9 +1,9 @@
-"""Benilla-derived residency primitives adapted to our unbounded local grid.
+"""GgEngine-derived residency primitives adapted to our unbounded local grid.
 
-Algorithm sources: samwhosung/benilla, terrain_stream/window.rs and
-benilla-assets/src/spatial_cache.rs (snapshot in docs/world-scale-review-
-2026-10-02/reference-code/benilla). Copyright (c) 2026 Sam, MIT licensed;
-license preserved in backend/licenses/benilla-MIT.txt.
+Algorithm sources: samwhosung/engine, terrain_stream/window.rs and
+engine-formats/src/spatial_cache.rs (snapshot in docs/world-scale-review-
+2026-10-02/reference-code/engine). Copyright (c) 2026 Sam, MIT licensed;
+license preserved in backend/licenses/engine-MIT.txt.
 
 Differences: meter-space cells, negative coordinates, no WoW tile-grid clamp,
 and an explicit LRU memory cap overriding the grace interval when full.

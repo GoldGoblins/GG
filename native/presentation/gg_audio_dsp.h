@@ -1,5 +1,5 @@
 #pragma once
-// Benilla's 2 ms look-ahead limiter and vendored Kira/Freeverb equations.
+// GgEngine's 2 ms look-ahead limiter and vendored Kira/Freeverb equations.
 // MIT attribution is recorded in provenance.json and backend/licenses.
 #include <array>
 #include <algorithm>

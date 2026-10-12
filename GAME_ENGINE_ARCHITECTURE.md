@@ -1838,11 +1838,11 @@ loads the new asset.
 ## Patch notes · 2026-10-02 · Native flora, culling and tab targeting
 
 The [implementation report](docs/world-development-2026-10-02/README.md)
-records Benilla-derived streaming windows and spatial residency, paced seeded
+records GgEngine-derived streaming windows and spatial residency, paced seeded
 64 m flora cells, 22 shared native geometry/instance tables, eight biome kits,
 and authoritative tab targeting connected to existing attacks. This stage
 adds 11 original Blender-authored flora species with near/far geometry.
-The standalone package includes the compiled meshes and Benilla MIT notice.
+The standalone package includes the compiled meshes and GgEngine MIT notice.
 
 Camera frustum culling is now enabled. In the actual static Westreach view,
 draw calls drop from 553 (culling off) to 80 (on); 640 selected flora instances

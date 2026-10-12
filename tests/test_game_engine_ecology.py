@@ -1,4 +1,4 @@
-"""Behavior checks for Benilla-derived residency and native flora streaming."""
+"""Behavior checks for GgEngine-derived residency and native flora streaming."""
 import json, os, sys
 from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

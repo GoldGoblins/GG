@@ -1,4 +1,4 @@
-// Cache and window algorithms ported from samwhosung/benilla (MIT).
+// Cache and window algorithms ported from samwhosung/engine (MIT).
 // See provenance.json for the exact source files and intentional adaptations.
 #include "gg_world.h"
 #include <algorithm>

@@ -211,7 +211,7 @@ class FloraStreamer:
                       "sample_step_cap": SAMPLE_STEPS_PER_UPDATE,
                       "sample_budget_ms": BUILD_BUDGET_S*1000,
                       "prefetch_window_cells": len(desired), "cache_cap": MAX_CACHE_CELLS,
-                      "cache_grace_s": 30, "residency_source": "BENILLA_ADAPTED_WINDOW_AND_SPATIAL_CACHE",
+                      "cache_grace_s": 30, "residency_source": "GG_ENGINE_ADAPTED_WINDOW_AND_SPATIAL_CACHE",
                       "residency_backend": self.cache.backend,
                       "tree_cap": 0, "ground_cap": ground_cap,
                       "ground_distance_m": 88,

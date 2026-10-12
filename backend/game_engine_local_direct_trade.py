@@ -574,7 +574,7 @@ class SharedLocalDirectTradeMixin:
                     gear_items.append(items.instance_view(self._item_catalog, item, sim_time=self._sim_time))
                 except ValueError:pass
         roster = {r['id']: r for r in snapshot['roster']}
-        from backend.game_engine_benilla_identity import identity as character_identity
+        from backend.game_engine_adapter_identity import identity as character_identity
         selection = roster[other].get('selection', {})
         labels = character_identity(dict(character_creation=dict(active=bool(selection), selection=selection), progression={}))
         cls = labels.get('class') or {}

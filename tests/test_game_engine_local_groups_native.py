@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import test_game_engine_local_custody_services as fixture
 import test_game_engine_local_groups_loot as loot_fixture
-from backend.game_engine_benilla_gameplay import GameplayViews
-from backend.game_engine_benilla_ui import BenillaUI
+from backend.game_engine_adapter_gameplay import GameplayViews
+from backend.game_engine_adapter_ui import GgEngineUI
 
 
 class NativeLocalGroups(unittest.TestCase):
@@ -18,7 +18,7 @@ class NativeLocalGroups(unittest.TestCase):
 
     def setUp(self):
         fixture.SharedServices.setUp(self)
-        self.ui=BenillaUI(clock=100);self.addCleanup(self.ui.close)
+        self.ui=GgEngineUI(clock=100);self.addCleanup(self.ui.close)
         self.gameplay=GameplayViews();self.publish()
 
     def publish(self):
@@ -87,7 +87,7 @@ class NativeLocalGroups(unittest.TestCase):
         # Explicit received answers are absent; offline people are not inferred ready.
         self.assertEqual(self.view()['group']['ready'],{'player':True})
         self.assertFalse(any(r['op']=='GroupReadyLine' for r in self.ui.request('requests')['services']))
-        self.ui.close();self.ui=BenillaUI(clock=500);self.addCleanup(self.ui.close)
+        self.ui.close();self.ui=GgEngineUI(clock=500);self.addCleanup(self.ui.close)
         with patch('time.time',return_value=moment+21):self.publish()
         self.ui.request('clock',seconds=508);self.ui.execute('CheckReadyCheckTime()')
         self.assertFalse(any(r['op']=='GroupReadyLine' for r in self.ui.request('requests')['services']))
@@ -144,12 +144,12 @@ class NativeLocalGroups(unittest.TestCase):
         source,item,session=self.opened();self.publish()
         self.assertEqual(self.ui.evaluate('return GetMasterLootCandidate(11)'),[self.runtime._local_character_name])
         self.assertEqual(self.ui.evaluate('return GetMasterLootCandidate(1),GetMasterLootCandidate(12),GetMasterLootCandidate(40)'),[None,None,None])
-        slot=list(self.runtime._benilla_loot['ids']).index(item['instance_id'])+1
+        slot=list(self.runtime._engine_loot['ids']).index(item['instance_id'])+1
         self.call('GiveMasterLoot('+str(slot)+',11)')
         self.assertEqual(self.runtime._item_instances[item['instance_id']]['location'],'INVENTORY')
         self.call('SetLootMethod("master","Second Hero")')
         source,item,session=self.opened();self.publish()
-        slot=list(self.runtime._benilla_loot['ids']).index(item['instance_id'])+1
+        slot=list(self.runtime._engine_loot['ids']).index(item['instance_id'])+1
         before=self.runtime._local_custody_store.snapshot()['characters']
         self.ui.execute('GiveMasterLoot('+str(slot)+',11)')
         pair=self.ui.request('requests')['loot_master_gives'][0]
