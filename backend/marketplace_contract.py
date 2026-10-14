@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import time
 from pathlib import Path
@@ -24,7 +26,7 @@ from backend.domain_merkle import (
 SCHEMA = "gg.ai-desktop.marketplace-status.v2"
 LISTING_SCHEMA = "gg.ai-desktop.marketplace-listing.v2"
 LEDGER_SCHEMA = "gg.ai-desktop.marketplace-ledger.v2"
-STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/marketplace")
+STATE_DIR = Path(str(STATE_ROOT / 'marketplace'))
 CATALOG_NAME = "catalog.json"
 LEDGER_NAME = "ledger.jsonl"
 PREFS_NAME = "prefs.json"

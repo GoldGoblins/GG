@@ -36,9 +36,6 @@ fi
 if [[ ! -f "$PROJECT/main.py" && -f "$HERE/../../main.py" ]]; then
   PROJECT="$(cd "$HERE/../.." && pwd)"
 fi
-if [[ ! -f "$PROJECT/main.py" && -f /home/GG/GoldGoblins/projects/gg-ai-desktop/main.py ]]; then
-  PROJECT=/home/GG/GoldGoblins/projects/gg-ai-desktop
-fi
 MAIN="$PROJECT/main.py"
 STARTUP="$PROJECT/startup.py"
 PYTHON="${PYTHON:-/usr/bin/python3}"
@@ -76,16 +73,16 @@ find_grok() {
   return 1
 }
 
-if ! GROK_BIN="$(find_grok)"; then
-  fail "grok CLI missing. Install Grok Build from xAI, then: grok login"
+if GROK_BIN="$(find_grok)"; then
+  export GG_GROK_BIN="$GROK_BIN"
 fi
 
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/gg-ai-desktop-share"
-mkdir -p "$STATE/grok-home"
-export GG_GROK_BIN="$GROK_BIN"
-export GG_GROK_HOME="${GG_GROK_HOME:-$STATE/grok-home}"
-export GG_WORKSPACE="${GG_WORKSPACE:-$PWD}"
-export GG_GROK_PRODUCT_HOME="${GG_GROK_PRODUCT_HOME:-$STATE/product-grok-home}"
+export GG_APP_ROOT="$PROJECT"
+DEFAULT_WORKSPACE="$PROJECT"
+if [[ "$(basename "$(dirname "$PROJECT")")" == projects && -f "$PROJECT/../../AGENTS.md" ]]; then
+  DEFAULT_WORKSPACE="$(cd "$PROJECT/../.." && pwd)"
+fi
+export GG_WORKSPACE="${GG_WORKSPACE:-$DEFAULT_WORKSPACE}"
 
 if [[ -z "${WAYLAND_DISPLAY:-}" && -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ]]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -100,7 +97,7 @@ fi
 
 printf 'GG_AI_DESKTOP=SHARE\n'
 printf 'MOTOR=GROK_TUI\n'
-printf 'GG_GROK_BIN=%s\n' "$GG_GROK_BIN"
+printf 'GG_GROK_BIN=%s\n' "${GG_GROK_BIN:-not-installed}"
 printf 'GG_WORKSPACE=%s\n' "$GG_WORKSPACE"
 cd "$PROJECT"
 exec "$PYTHON" -B "$STARTUP"

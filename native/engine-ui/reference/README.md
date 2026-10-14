@@ -1,6 +1,6 @@
 # `reference/`: verified facts about the 1.12.1 client, vendored
 
-Generated tables describing the reference client, committed so benilla can measure itself against
+Generated tables describing the reference client, committed so engine can measure itself against
 them on any machine without re-deriving them. Data, not documentation: each has a generator beside
 it in `scripts/`.
 
@@ -22,7 +22,7 @@ the complete 1.12 shipped-UI corpus:
 
 | origin | count | meaning |
 |---|---|---|
-| `engine` | 1,104 | the C client provides it; benilla implements these in Rust |
+| `engine` | 1,104 | the C client provides it; engine implements these in Rust |
 | `framexml` | 20,427 | the shipped UI defines it; the stock files run off the player's own install (`ui_script::reference_ui`) |
 | `lua` | 24 | Lua 5.0's own runtime |
 
@@ -36,12 +36,12 @@ needs a 1.12 install, its FrameXML extracted to a folder, and the maintainer's r
 the reference client's `_G`, which is not in this repo, so it is a manual regeneration. The table is
 stable: it describes a client that shipped in 2006.
 
-Reading it: `scripts/api-coverage.sh` asks a real `UiScript::new()` what benilla exposes and reports
+Reading it: `scripts/api-coverage.sh` asks a real `UiScript::new()` what engine exposes and reports
 `have / missing / beyond-1.12`. Two gates hold the line.
-`crates/benilla-ui/src/script/tests/reference_surface.rs` fails if the engine puts a global 1.12
+`crates/engine-ui-core/src/script/tests/reference_surface.rs` fails if the engine puts a global 1.12
 does not have in a bare VM and nobody wrote down why, with no prefix excusing an engine name.
-`crates/benilla-app/src/ui_script/surface_gate.rs` fails if the production load, the core and
-benilla's layer, adds any global past 1.12 other than the layer's own `Benilla`-prefixed names, or
+`crates/engine-app/src/ui_script/surface_gate.rs` fails if the production load, the core and
+engine's layer, adds any global past 1.12 other than the layer's own `GgEngine`-prefixed names, or
 any widget method.
 
 ## `1.12-shapes.tsv` and `1.12-events.tsv`
@@ -59,7 +59,7 @@ clone and reproduces the committed file byte for byte.
 ## `1.12-message-catalog.tsv`
 
 The client's message registry (`0xb4b498`: id, key, kind, sound, chat type).
-`scripts/gen-message-catalog.py` re-shapes it into `crates/benilla-ui/src/messages/catalog.rs`,
+`scripts/gen-message-catalog.py` re-shapes it into `crates/engine-ui-core/src/messages/catalog.rs`,
 the table `CGGameUI::DisplayError` indexes.
 
 ## `1.12-verb-events.tsv`
@@ -71,13 +71,13 @@ verb for its side effect of an event repaints nothing when the verb fires nothin
 
 Regenerating: `scripts/gen-reference-verb-events.py`, whose header carries the rule, the two
 families it drops (glue-space verbs, the unit-field bridge) and why getters are excluded (a getter's
-fire is a cache-miss re-query, a state event benilla's feeds fire off the packet). A fire site is
+fire is a cache-miss re-query, a state event engine's feeds fire off the packet). A fire site is
 attributed to a function by the verified function extents plus the disassembly's padding
 boundaries, and a site past its candidate's extent is left out rather than mis-filed. The fire
 sites and the shapes are the vendored tables above; the function names, their extents and the
 disassembly are the maintainer's, so this one is a manual regeneration.
 
-Reading it: `crates/benilla-app/src/ui_script/verb_event_gate.rs` is the gate. For every pair whose
-verb benilla registers, the module that registers the verb fires the event, or the pair is declared
+Reading it: `crates/engine-app/src/ui_script/verb_event_gate.rs` is the gate. For every pair whose
+verb engine registers, the module that registers the verb fires the event, or the pair is declared
 there: `ELSEWHERE` (a feed fires it on the state the verb changes, and the named file is checked
 too) or `GAP` (nothing does, with the reason).

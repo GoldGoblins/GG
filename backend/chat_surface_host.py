@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT, prepare_codex_skills
+
 import fcntl
 import json
 import math
@@ -100,7 +102,7 @@ _GAME_KEYS = {
     87: 11,
 }
 SCRATCH_ROOT = (
-    Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/scratch")
+    Path(str(STATE_ROOT / 'scratch'))
 )
 _SCRATCH_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 _ANSI = re.compile(
@@ -500,7 +502,7 @@ class ChatSurfaceHost(QObject):
         """
         try:
             DESKTOP_CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-            for name in ("auth.json", "config.toml", "rules", "skills"):
+            for name in ("auth.json", "config.toml", "rules"):
                 source = CODEX_SESSIONS.parent / name
                 target = DESKTOP_CODEX_HOME / name
                 if target.exists() or target.is_symlink() or not source.exists():
@@ -509,6 +511,13 @@ class ChatSurfaceHost(QObject):
                     source,
                     target_is_directory=source.is_dir(),
                 )
+            prepare_codex_skills(DESKTOP_CODEX_HOME)
+            user_skills = CODEX_SESSIONS.parent / "skills"
+            if user_skills.is_dir():
+                for source in user_skills.iterdir():
+                    target = DESKTOP_CODEX_HOME / "skills" / source.name
+                    if not target.exists() and not target.is_symlink():
+                        target.symlink_to(source, target_is_directory=source.is_dir())
             return True
         except OSError:
             return False
@@ -2436,6 +2445,15 @@ class ChatSurfaceHost(QObject):
     @Slot(result=str)
     def gameEngineStatus(self) -> str:
         return self._game_engine_json(game_engine_host.status_payload())
+
+    @Slot(result=str)
+    def gameEnginePhysicsStatus(self) -> str:
+        return json.dumps(game_engine_host.physics_status_payload(), separators=(",", ":"))
+
+    @Slot(str, result=str)
+    def gameEnginePhysicsCommand(self, raw: str) -> str:
+        # Physics metadata must not replace the retained world render tables.
+        return json.dumps(game_engine_host.physics_command(raw), separators=(",", ":"))
 
     @Slot(str, result=str)
     def gameEngineCharacterCreate(self, raw: str) -> str:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME, STATE_HOME, STATE_ROOT, WORKSPACE_ROOT
+
 import hashlib
 import json
 import os
@@ -26,7 +28,7 @@ GPT_TUI_TERMINAL_ID = "ws.tui.gpt"
 
 SESSION_SCHEMA = "gg.workbench.grok-worker-session.v1"
 SESSION_STATE_PATH = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/grok-worker-session.json"
+    str(STATE_ROOT / 'grok-worker-session.json')
 )
 
 def _desktop_grok_bin() -> Path:
@@ -36,7 +38,7 @@ def _desktop_grok_bin() -> Path:
         return Path(override)
     candidates = (
         Path.home() / ".grok" / "bin" / "grok",
-        Path("/home/GG/.local/share/goldgoblins/tools/grok-build/1.0.5/grok"),
+        Path(str(DATA_HOME / 'goldgoblins/tools/grok-build/1.0.5/grok')),
     )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -48,17 +50,17 @@ GROK_BIN = _desktop_grok_bin()
 DEV_GROK_HOME = Path(
     os.environ.get(
         "GG_GROK_HOME",
-        "/home/GG/.local/state/goldgoblins/grok-cloud-worker",
+        str(STATE_HOME / 'goldgoblins/grok-cloud-worker'),
     )
 )
 GROK_HOME = Path(
     os.environ.get(
         "GG_GROK_PRODUCT_HOME",
-        "/home/GG/.local/state/goldgoblins/gg-ai-desktop/grok-home",
+        str(STATE_ROOT / 'grok-home'),
     )
 )
 GROK_CWD = Path(
-    os.environ.get("GG_WORKSPACE", "/home/GG/GoldGoblins")
+    os.environ.get("GG_WORKSPACE", str(WORKSPACE_ROOT))
 )
 MAX_WORKER_TURNS = 32
 PRODUCT_GROK_CONFIG = (

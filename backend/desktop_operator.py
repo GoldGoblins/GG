@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import argparse
 import json
 import os
@@ -15,7 +17,7 @@ from backend import task_scoped_action_grant
 SCHEMA_COMMAND = "gg.desktop-operator-command.v1"
 SCHEMA_RESULT = "gg.desktop-operator-result.v1"
 GENERAL_ACTION_AUTHORITY = "NONE"
-ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/desktop-operator")
+ROOT = Path(str(STATE_ROOT / 'desktop-operator'))
 COMMAND_NAME = "command.json"
 ACTIVE_NAME = "command.active.json"
 RESULT_NAME = "result.json"

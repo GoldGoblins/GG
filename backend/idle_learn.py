@@ -8,6 +8,8 @@ and never writes repository source.
 
 from __future__ import annotations
 
+from backend.application_paths import HOME, WORKSPACE_ROOT
+
 import json
 import os
 from pathlib import Path
@@ -76,7 +78,7 @@ def _skip(row: dict[str, Any]) -> bool:
 
 def _statement(row: dict[str, Any]) -> str:
     path = str(row.get("path") or "")
-    short = path.replace("/home/GG/GoldGoblins/", "").replace("/home/GG/", "")
+    short = path.replace(str(WORKSPACE_ROOT), "").replace(str(HOME), "")
     doc = str(row.get("doc") or "").strip()
     names = [
         str(item.get("name") or "")

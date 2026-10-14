@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME, HOME
+
 import json
 import os
 import signal
@@ -178,16 +180,16 @@ def _stop_proc() -> None:
 def _spawn_env() -> dict[str, str]:
     env = os.environ.copy()
     extra = [
-        "/home/GG/.local/bin",
+        str(HOME / '.local/bin'),
         str(Path.home() / ".local/bin"),
-        "/home/GG/.local/share/goldgoblins/tools/emu/usr/bin",
-        "/home/GG/.local/share/goldgoblins/tools/node/bin",
-        "/home/GG/.local/share/pnpm",
-        "/home/GG/.local/share/pnpm/bin",
+        str(DATA_HOME / 'goldgoblins/tools/emu/usr/bin'),
+        str(DATA_HOME / 'goldgoblins/tools/node/bin'),
+        str(DATA_HOME / 'pnpm'),
+        str(DATA_HOME / 'pnpm/bin'),
     ]
     path = str(env.get("PATH") or "")
     env["PATH"] = os.pathsep.join(extra + ([path] if path else []))
-    lib = Path("/home/GG/.local/share/goldgoblins/tools/emu/usr/lib64")
+    lib = Path(str(DATA_HOME / 'goldgoblins/tools/emu/usr/lib64'))
     if lib.is_dir():
         current = str(env.get("LD_LIBRARY_PATH") or "")
         env["LD_LIBRARY_PATH"] = str(lib) + ((os.pathsep + current) if current else "")

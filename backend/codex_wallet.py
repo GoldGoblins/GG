@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT, USER_CODEX_HOME, WORKSPACE_ROOT
+
 import json
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-CODEX_SESSIONS = Path("/home/GG/.codex/sessions")
+CODEX_SESSIONS = Path(str(USER_CODEX_HOME / 'sessions'))
 CODEX_SESSION_STATE = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/codex-tui-session.json"
+    str(STATE_ROOT / 'codex-tui-session.json')
 )
 DESKTOP_CODEX_HOME = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/codex-gpt-tui"
+    str(STATE_ROOT / 'codex-gpt-tui')
 )
 DESKTOP_CODEX_SESSIONS = DESKTOP_CODEX_HOME / "sessions"
 DESKTOP_CODEX_SESSION_STATE = DESKTOP_CODEX_HOME / "active-session.json"
@@ -100,7 +102,7 @@ def session_path(
 
 
 def discover_sessions(
-    cwd: str = "/home/GG/GoldGoblins",
+    cwd: str = str(WORKSPACE_ROOT),
     sessions_root: Path = CODEX_SESSIONS,
 ) -> list[str]:
     """Return real saved Codex sessions for this workspace, newest first."""

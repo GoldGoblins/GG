@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import os
 import re
@@ -7,7 +9,7 @@ from pathlib import Path
 
 from backend.grok_worker_contract import ENGINE_TARGETS, normalize_engine_target
 
-STATE = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop")
+STATE = Path(str(STATE_ROOT))
 SETTINGS_PATH = STATE / "settings-v1.json"
 SCHEMA = "gg.ai-desktop.settings.v1"
 _COLOR = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")

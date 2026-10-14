@@ -19,6 +19,10 @@ GOLD=(.91,.65,.19,1);TEAL=(.12,.48,.47,1);DARK=(.13,.17,.18,1)
 
 @lru_cache(maxsize=1)
 def catalog():
+    if not SOURCE.is_file():
+        return {'schema':'gg.world-places.v1','planet_id':'','map_revision':0,
+                'revision':0,'coordinates':'metres','places':[],'residents':[],
+                'objects':[],'roads':[]}
     document=json.loads(SOURCE.read_text())
     if document['schema']!='gg.world-places.v1':raise ValueError('invalid world places')
     return document

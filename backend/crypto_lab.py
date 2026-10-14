@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import HOME
+
 import json
 import os
 import shutil
@@ -13,7 +15,7 @@ import urllib.request
 
 from backend.crypto_contract import STATE_DIR, ensure_state_dir
 
-VALIDATOR_BIN = Path("/home/GG/.local/opt/solana-cli/bin/solana-test-validator")
+VALIDATOR_BIN = Path(str(HOME / '.local/opt/solana-cli/bin/solana-test-validator'))
 LEDGER_DIR = STATE_DIR / "local-ledger"
 LOG_PATH = STATE_DIR / "local-validator.log"
 PID_PATH = STATE_DIR / "local-validator.pid"

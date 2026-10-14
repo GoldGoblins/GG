@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME, HOME
+
 import os
 import pwd
 import socket
@@ -19,10 +21,10 @@ APPIMAGE_NAMES = frozenset(
     }
 )
 SEARCH_DIRS = (
-    Path("/home/GG/Hämtningar"),
+    Path(str(HOME / 'Hämtningar')),
     Path.home() / "Hämtningar",
     Path.home() / "Downloads",
-    Path("/home/GG/.local/share/goldgoblins/tools/tmog"),
+    Path(str(DATA_HOME / 'goldgoblins/tools/tmog')),
 )
 MIN_APPIMAGE_BYTES = 1_000_000
 MAX_APPIMAGE_BYTES = 200_000_000

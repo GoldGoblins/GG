@@ -5,6 +5,8 @@ to their producer. Saving a lesson creates a proposed method, not verified truth
 """
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME
+
 from collections import OrderedDict
 import hashlib
 import json
@@ -25,7 +27,7 @@ MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_STRINGS = 96
 SAMPLE_BYTES = 2 * 1024 * 1024
-TOOLS_ROOT = Path(os.environ.get("GG_RESEARCH_TOOLS_ROOT", "/home/GG/.local/share/goldgoblins/gg-ai-desktop/research-tools"))
+TOOLS_ROOT = Path(os.environ.get("GG_RESEARCH_TOOLS_ROOT", str(DATA_HOME / 'goldgoblins/gg-ai-desktop/research-tools')))
 _REPORTS: OrderedDict[str, dict] = OrderedDict()
 _LOCK = threading.RLock()
 

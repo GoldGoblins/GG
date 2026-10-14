@@ -6,6 +6,8 @@ are decoded on selection, never by the simulation or its frame transport.
 """
 from __future__ import annotations
 
+from backend.application_paths import HOME
+
 import base64
 import copy
 import hashlib
@@ -762,7 +764,7 @@ class AssetEditor:
         settings = self._settings(self.selected.get("identity",""),source.as_uri())
         if any(m.get("strokes") for m in settings.get("materials",{}).values()):
             raise ValueError("Förbered UV före målning. Befintliga penseldrag måste behålla sin UV-layout.")
-        blender = Path("/home/GG/blender-5.2.2-linux-x64/blender")
+        blender = Path(str(HOME / 'blender-5.2.2-linux-x64/blender'))
         if not blender.is_file():
             raise ValueError("Blender behövs för att packa UV-atlasen.")
         GENERATED_ROOT.mkdir(parents=True,exist_ok=True)

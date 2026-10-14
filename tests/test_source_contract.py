@@ -379,6 +379,7 @@ def main() -> int:
                      '__future__',
                      'ast',
                      'backend',
+                     'collections',
                      'copy',
                      'difflib',
                      'hashlib',
@@ -389,6 +390,7 @@ def main() -> int:
                      're',
                      'shutil',
                      'stat',
+                     'startup',
                      'subprocess',
                      'sys',
                      'tarfile',
@@ -1003,14 +1005,17 @@ def main() -> int:
         "Manifest synthetic context policy mismatch.",
     )
 
+    catalog = json.loads((PROJECT / "FILE-CATALOG.json").read_text())
     expected_hashed = {
-        path.relative_to(PROJECT).as_posix()
-        for path in PROJECT.rglob("*")
-        if path.is_file()
-        and "__pycache__" not in path.parts
-        and path.suffix != ".pyc"
-        and path.name != "SOURCE-MANIFEST.json"
+        row["path"] for row in catalog["files"]
+        if row["kind"] == "file" and row["path"] != "SOURCE-MANIFEST.json"
     }
+    require(
+        {"AGENTS.md", "main.py", "startup.py", "backend/application_paths.py",
+         "skills/gg-live-eyes/SKILL.md", "skills/gg-blender-reference-workflow/SKILL.md",
+         "config/dependencies.json"}.issubset(expected_hashed),
+        "Essential application sources missing from distribution.",
+    )
     require(
         set(manifest["files"]) == expected_hashed,
         "Manifest file set mismatch.",

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 from pathlib import Path
 from typing import Any
 
-STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/kaspa")
+STATE_DIR = Path(str(STATE_ROOT / 'kaspa'))
 NETWORK_DEFAULT = "paper"
 RPC_ALLOWLIST = {
     "paper": "",

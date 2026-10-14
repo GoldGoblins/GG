@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import os
 import re
@@ -14,7 +16,7 @@ from backend import web_surface
 SCHEMA = "gg.sftp-operator-config.v1"
 GENERAL_ACTION_AUTHORITY = "NONE"
 SFTP_BIN = Path("/usr/bin/sftp")
-ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/sftp-operator")
+ROOT = Path(str(STATE_ROOT / 'sftp-operator'))
 CONFIG_NAME = "config.json"
 STAGING_NAME = "staging"
 FORBIDDEN_CONFIG_KEYS = {"password", "passphrase", "secret", "token"}

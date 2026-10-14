@@ -1,6 +1,8 @@
 """Bounded, data-only primitives for the game-independent research workflows."""
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import hashlib
 import json
 import os
@@ -10,7 +12,7 @@ import stat
 import tempfile
 from urllib.parse import unquote, urlparse
 
-ROOT = Path(os.environ.get("GG_GAME_WORKFLOWS_ROOT", "/home/GG/.local/state/goldgoblins/gg-ai-desktop/game-workflows"))
+ROOT = Path(os.environ.get("GG_GAME_WORKFLOWS_ROOT", str(STATE_ROOT / 'game-workflows')))
 MAX_FILE = 32 * 1024 * 1024
 MAX_JSON = 4 * 1024 * 1024
 SCHEMA = "gg.game-workflows.v1"

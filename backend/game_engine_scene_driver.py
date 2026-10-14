@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 import json
 from PySide6.QtCore import QObject
-from PySide6.QtGui import QVector3D
+from PySide6.QtGui import QVector3D, QQuaternion
 from shiboken6 import isValid
 from backend.game_engine_life import RENDER_RADIUS_M
 from backend.game_engine_native_world import cull_spheres, sphere_visible, status as native_status
@@ -63,6 +63,25 @@ class SceneDriver:
         now=float(snapshot.get('player',{}).get('time_s',0))
         if now < self.clock:self.out_since.clear()
         self.clock=now
+        # Explicitly registered physics nodes consume native transforms on
+        # the Qt thread. Their namespace cannot overwrite gameplay bindings.
+        physics_nodes=set()
+        for body in snapshot.get('rigid_physics',{}).get('bodies',[]):
+            identity=body.get('scene_node','')
+            if not identity.startswith('physics:'):continue
+            physics_nodes.add(identity)
+            node=self.nodes.get(identity)
+            if node is None or not isValid(node):continue
+            position=body.get('position',[]);rotation=body.get('rotation',[])
+            if len(position)!=3 or len(rotation)!=4:continue
+            if not all(type(x) in (int,float) and math.isfinite(x) for x in (*position,*rotation)):continue
+            node.setProperty('position',QVector3D(*position))
+            node.setProperty('rotation',QQuaternion(rotation[3],*rotation[:3]))
+            node.setProperty('nativeVisible',True)
+        if 'rigid_physics' in snapshot:
+            for identity,node in self.nodes.items():
+                if identity.startswith('physics:') and identity not in physics_nodes and isValid(node):
+                    node.setProperty('nativeVisible',False)
         prepared=[];centers=[]
         for row in rows:
             identity=row.get('id','');node=self.nodes.get(identity)

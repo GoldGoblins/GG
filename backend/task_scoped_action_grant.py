@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import copy
 import hashlib
 import json
@@ -19,7 +21,7 @@ SCOPE_AUTHORITY = live_mandate_store.TASK_SCOPED_SCOPE_AUTHORITY
 AUTHORIZATION_SCHEMA = "gg.task-scoped-effect-authorization.v1"
 RUNTIME_SCHEMA = "gg.task-scoped-runtime-authorization.v1"
 DEFAULT_MANDATE_ROOT = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/mandate-store"
+    str(STATE_ROOT / 'mandate-store')
 )
 RUNTIME_NAME = "active-chat-task.json"
 

@@ -6,6 +6,8 @@ Only scrubbed reports survive; scratch and provider projects are removed.
 """
 from __future__ import annotations
 
+from backend.application_paths import HOME, STATE_ROOT
+
 import argparse
 import fcntl
 import hashlib
@@ -23,7 +25,7 @@ import uuid
 
 from backend import research_lab as lab
 
-ROOT = Path(os.environ.get('GG_RESEARCH_JOBS_ROOT', '/home/GG/.local/state/goldgoblins/gg-ai-desktop/research-jobs'))
+ROOT = Path(os.environ.get('GG_RESEARCH_JOBS_ROOT', str(STATE_ROOT / 'research-jobs')))
 SCHEMA = 'gg.research-job.v1'
 PROJECT = Path(__file__).resolve().parents[1]
 TIMEOUT = 300
@@ -253,7 +255,7 @@ def _sandbox(scratch: Path, target: Path, kind: str, operation: str, query: str)
     for directory in ['home', 'tmp']:
         (scratch / directory).mkdir()
     sandbox_target = '/input/' + target.name
-    node = Path(shutil.which('node') or '/home/GG/.local/bin/node').resolve()
+    node = Path(shutil.which('node') or str(HOME / '.local/bin/node')).resolve()
     local_jdk = lab.TOOLS_ROOT / 'jdk'
     java_home = Path('/tools/jdk') if (local_jdk / 'bin/javac').is_file() else Path(shutil.which('java') or '/usr/bin/java').resolve().parent.parent
     if not node.is_file():

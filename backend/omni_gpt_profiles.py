@@ -1,7 +1,7 @@
 """Shared local GPT profile layer for the GG AI Desktop motors.
 
-The source packages live outside the repository so they can keep evolving in
-one place.  This module makes them available as a routed, bounded context:
+The source packages ship in knowledge/web-gpts inside the application.
+This module makes them available as a routed, bounded context:
 Idékompassen is always present, while the other profiles contribute when the
 user's task matches their domain.  The files are guidance/reference material;
 they never grant authority or override AGENTS.md and the executable safety
@@ -16,14 +16,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.application_paths import GPT_KNOWLEDGE_ROOT
+
 
 SCHEMA = "gg.ai-desktop.omni-gpt-profiles.v1"
-DEFAULT_ROOT = Path(
-    os.environ.get(
-        "GG_GPT_KNOWLEDGE_ROOT",
-        "/home/GG/GG-KNOWLEDGE/web-gpts",
-    )
-)
+DEFAULT_ROOT = GPT_KNOWLEDGE_ROOT
 PROJECT_INDEX = Path(__file__).resolve().parents[1] / "OMNI-GPT-PROFILES.md"
 MAX_SOURCE_BYTES = 1_048_576
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ-]{3,}", re.UNICODE)
@@ -342,6 +339,8 @@ def build_context(
             record.spec.slug for record in selected
         )
     )
+    if system_one_block and not include_registry:
+        chunks.append(system_one_block)
     apply_line = (
         "Apply the selected profiles together in this turn. State facts, findings, "
         "decisions, assumptions, and unresolved questions separately. Preserve the "
@@ -365,22 +364,32 @@ def build_context(
     try:
         from backend.long_memory import render as render_long_memory
 
-        mem_cap = 280 if not include_registry else 900
+        mem_cap = 140 if not include_registry else 900
         mem_text = render_long_memory(user_text, budget=mem_cap)
     except Exception:
         mem_text = ""
-    desk_cap = 720 if not include_registry else 1400
+    try:
+        from backend.blender_reference_workflow import render_context as render_blender_context
+
+        blender_text = render_blender_context(user_text, budget=1000 if include_registry else 350)
+    except Exception:
+        blender_text = ""
+    # Keep the default compass and authority context ahead of optional memory.
+    # The workflow block already points compact modeling turns to the full skill.
+    if blender_text and not include_registry:
+        research_text = ""
+    desk_cap = 420 if not include_registry else 1400
     if len(desk_text) > desk_cap:
         desk_text = desk_text[: desk_cap - 18].rstrip() + "\n[/SAME_TASK_DESK]"
     memory_block = ("\n" + mem_text) if mem_text else ""
-    tail = apply_line + "\n" + research_text + "\n" + desk_text + memory_block + "\n" + closer
+    tail = apply_line + "\n" + research_text + "\n" + blender_text + "\n" + desk_text + memory_block + "\n" + closer
     remaining = int(max_chars) - sum(len(chunk) + 1 for chunk in chunks) - len(tail) - 1
     remaining = max(0, remaining)
     for record in selected:
-        if remaining <= 500:
+        if remaining <= (300 if not include_registry else 500):
             break
         per_profile = 5_200 if record.spec.slug == "idekompassen" else 3_000
-        per_profile = min(per_profile, remaining - 250)
+        per_profile = min(per_profile, remaining - (100 if not include_registry else 250))
         sources: list[str] = []
         source_budget = per_profile
         for path in _primary_paths(record):
@@ -408,13 +417,12 @@ def build_context(
         )
         chunks.append(block)
         remaining -= len(block) + 1
-    if system_one_block and not include_registry:
-        chunks.append(system_one_block)
-
     def _join(desk: str, memory: str) -> str:
         parts = list(chunks) + [apply_line, desk]
         if research_text:
             parts.append(research_text)
+        if blender_text:
+            parts.append(blender_text)
         if memory:
             parts.append(memory)
         parts.append(closer)

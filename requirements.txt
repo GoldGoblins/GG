@@ -1,0 +1,5 @@
+# Core desktop and locally used analysis/image interfaces.
+PySide6>=6.8,<7
+Pillow>=10
+numpy
+duckdb

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME, HOME, STATE_ROOT
+
 import hashlib
 import json
 import os
@@ -15,7 +17,7 @@ from urllib.parse import urlparse
 
 
 SCHEMA = "gg.ai-desktop.media-status.v1"
-STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/media")
+STATE_DIR = Path(str(STATE_ROOT / 'media'))
 MODES = ("MUSIC", "RADIO", "TV", "GAME", "FETCH")
 DEFAULT_MODE = "MUSIC"
 MAX_ITEMS = 600
@@ -149,13 +151,13 @@ TOOL_BINS = {
 }
 
 TOOL_DIRS = (
-    Path("/home/GG/.local/bin"),
+    Path(str(HOME / '.local/bin')),
     Path.home() / ".local/bin",
-    Path("/home/GG/.local/share/goldgoblins/tools"),
-    Path("/home/GG/.local/share/goldgoblins/tools/emu/usr/bin"),
-    Path("/home/GG/.local/share/goldgoblins/tools/node/bin"),
-    Path("/home/GG/.local/share/pnpm"),
-    Path("/home/GG/.local/share/pnpm/bin"),
+    Path(str(DATA_HOME / 'goldgoblins/tools')),
+    Path(str(DATA_HOME / 'goldgoblins/tools/emu/usr/bin')),
+    Path(str(DATA_HOME / 'goldgoblins/tools/node/bin')),
+    Path(str(DATA_HOME / 'pnpm')),
+    Path(str(DATA_HOME / 'pnpm/bin')),
 )
 
 RADIO_API = "https://de1.api.radio-browser.info/json/stations/search"
@@ -262,15 +264,15 @@ FM_BAND_HI = 108.0
 _RTL_SDR_USB = frozenset({"0bda:2832", "0bda:2838", "0bda:2831"})
 
 LIBRARY_DIRS = (
-    Path("/home/GG/Musik"),
+    Path(str(HOME / 'Musik')),
     Path.home() / "Musik",
     Path.home() / "Music",
-    Path("/home/GG/Videor"),
+    Path(str(HOME / 'Videor')),
     Path.home() / "Videor",
     Path.home() / "Videos",
-    Path("/home/GG/ROMs"),
+    Path(str(HOME / 'ROMs')),
     Path.home() / "ROMs",
-    Path("/home/GG/Spel"),
+    Path(str(HOME / 'Spel')),
     Path.home() / "Spel",
     Path.home() / "Games",
     STATE_DIR / "library",
@@ -365,7 +367,7 @@ def fetch_terminal() -> str:
 
 
 def ensure_rom_library() -> Path:
-    root = Path("/home/GG/ROMs")
+    root = Path(str(HOME / 'ROMs'))
     home = Path.home() / "ROMs"
     if not root.exists() and home.exists():
         root = home

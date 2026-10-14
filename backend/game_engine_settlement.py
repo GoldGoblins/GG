@@ -15,6 +15,10 @@ SOURCE = Path(__file__).resolve().parents[1]/'qml/assets/authored/world/sandover
 
 @lru_cache(maxsize=1)
 def catalog():
+    if not SOURCE.is_file():
+        # A desktop installation can have no authored project content yet.
+        return {'schema':'gg.settlement.v1','id':'','coordinates':'metres',
+                'places':[],'fixtures':[],'routines':[],'roads':[],'fences':[]}
     document=json.loads(SOURCE.read_text())
     if document['schema']!='gg.settlement.v1':raise ValueError('invalid settlement map')
     return document

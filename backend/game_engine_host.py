@@ -68,6 +68,7 @@ from backend.game_engine_adapter_spells import SpellsMixin
 from backend.game_engine_adapter_rides import RidesMixin
 from backend.game_engine_adapter_survival import SurvivalMixin
 from backend.game_engine_local_custody_services import SharedLocalServicesMixin
+from backend.game_engine_rigid_physics import PhysicsScene, RigidPhysicsMixin
 
 
 SCHEMA = "gg.game-engine.runtime.v1"
@@ -150,11 +151,12 @@ from backend.game_engine_adapter_controls import ClientControlsMixin
 from backend.game_engine_adapter_local_client import LocalClientMixin
 from backend.game_engine_adapter_services import ServicesMixin
 
-class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, SpellsMixin, ClientControlsMixin, LocalClientMixin, ServicesMixin, LocalActionsMixin, GameplayMixin):
+class GameEngineRuntime(RigidPhysicsMixin, SharedLocalServicesMixin, SurvivalMixin, RidesMixin, SpellsMixin, ClientControlsMixin, LocalClientMixin, ServicesMixin, LocalActionsMixin, GameplayMixin):
     """Threaded local simulation with bounded, inspectable state."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._rigid_physics = PhysicsScene(FIXED_HZ)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -951,6 +953,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         return value
 
     def _reset_world_locked(self) -> None:
+        self._rigid_physics.reset()
         self._published_frame = None
         self._published_nature = None
         self._nature = nature_contract.NatureWorld(terrain_contract.DEFAULT_WORLD_SEED)
@@ -5997,6 +6000,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
         if self._tick % 3 == 0:
             self._network_seq += 1
 
+        self._tick_rigid_physics_locked(dt)
         self._tick_auto_attack_locked()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self._last_tick_ms = elapsed_ms
@@ -11525,6 +11529,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             "stress": self._stress,
             "player": player,
             "simulation": simulation_view,
+            "rigid_physics": self._rigid_physics.frame(),
             "render": render_view,
             "fauna": self._fauna_view_locked(),
             "ecology": self._ecology_view_locked(),
@@ -12045,6 +12050,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             active_particles=self._particle_count,
             resource=self._resource,
         )
+        physics_view["rigid_body"] = self._rigid_physics.status()
         render_policy = render_contract.PROFILES.get(
             self._render_profile,
             render_contract.PROFILES["PS2_CLASSIC"],
@@ -12454,6 +12460,7 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             "people": people_view,
             "gear": gear_contract.table_summary(self._gear_tables),
             "physics": physics_view,
+            "rigid_physics": self._rigid_physics.frame(),
             "chunks": {
                 "loaded": chunks,
                 "loaded_count": len(chunks),
@@ -12964,9 +12971,18 @@ class GameEngineRuntime(SharedLocalServicesMixin, SurvivalMixin, RidesMixin, Spe
             thread.join(timeout=1.0)
         with self._lock:
             self._thread = None
+            self._rigid_physics.close()
 
 
 _RUNTIME = GameEngineRuntime()
+
+
+def physics_command(request):
+    return _RUNTIME.physics_command(request)
+
+
+def physics_status_payload():
+    return _RUNTIME.physics_status()
 
 
 def status_payload() -> dict[str, Any]:

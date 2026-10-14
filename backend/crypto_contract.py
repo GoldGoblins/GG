@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import math
 import re
@@ -7,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-STATE_DIR = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/crypto")
+STATE_DIR = Path(str(STATE_ROOT / 'crypto'))
 LEDGER_NAME = "ledger.jsonl"
 WALLET_NAME = "wallet.json"
 ACCOUNTS_NAME = "accounts.json"

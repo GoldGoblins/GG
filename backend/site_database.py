@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import os
 import re
 import socket
@@ -9,7 +11,7 @@ from pathlib import Path
 
 from backend.web_surface import SITE_ROOT
 
-STATE = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop")
+STATE = Path(str(STATE_ROOT))
 DATA_DIR = STATE / "mariadb"
 SOCK = Path("/run/user/1000/gg-site-mysql.sock")
 PID = Path("/run/user/1000/gg-site-mysql.pid")

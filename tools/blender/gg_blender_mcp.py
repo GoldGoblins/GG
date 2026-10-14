@@ -116,6 +116,10 @@ TOOLS = [
                 "name": {"type": "string", "description": "Optional mesh name. Empty frames every mesh."},
                 "directory": {"type": "string", "description": "PNG directory. Default /tmp/gg-blender-turn"},
                 "size": {"type": "integer", "description": "Square resolution from 256 to 1024. Default 640."},
+                "collection": {"type": "string", "description": "Only render meshes in this collection; hide unrelated objects temporarily."},
+                "framing": {"type": "object", "description": "Reuse returned center, distance and ortho_scale for comparable iterations."},
+                "style": {"type": "string", "enum": ["clay", "silhouette", "material", "appearance"]},
+                "orthographic": {"type": "boolean", "description": "True removes tilt from front/side/back reference views."},
             },
         },
     },
@@ -196,6 +200,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             name=str(args.get("name") or ""),
             directory=str(args.get("directory") or ""),
             size=int(args.get("size") or 640),
+            collection=str(args.get("collection") or ""),
+            framing=args.get("framing"),
+            style=str(args.get("style") or "clay"),
+            orthographic=bool(args.get("orthographic")),
         ))
     if wanted == "deform_rig":
         return _text(sidecar_call(

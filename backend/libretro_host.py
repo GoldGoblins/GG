@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from backend.application_paths import DATA_HOME
+
 import ctypes
 from ctypes import CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int16, c_size_t, c_uint, c_void_p
 from pathlib import Path
 from typing import Any
 
 
-CORE_DIR = Path("/home/GG/.local/share/goldgoblins/tools/emu/usr/lib64/libretro")
+CORE_DIR = Path(str(DATA_HOME / 'goldgoblins/tools/emu/usr/lib64/libretro'))
 CORE_FILES = {
     "nes": "nestopia_libretro.so",
     "snes": "bsnes_mercury_performance_libretro.so",

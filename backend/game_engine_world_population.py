@@ -110,6 +110,7 @@ class WorldPopulation:
     def tick(self,t):
         if t-self.last_tick<.5:return
         self.last_tick=t
+        if not self.regions:return
         region=sorted(self.regions)[self.lane%len(self.regions)];self.lane+=1
         ids=self.regions[region];positions={}
         for identity in ids:

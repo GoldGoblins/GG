@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import PROJECT_ROOT, resource_path
+
 import copy
 import hashlib
 import json
@@ -22,9 +24,7 @@ MAX_PACKAGE_CHARS = 8000
 MIN_PACKAGE_CHARS = 512
 
 REGISTRY_PATH = Path(
-    "/home/GG/GoldGoblins/"
-    "orchestrator/registry/"
-    "participant-registry-v1.0.json"
+    str(resource_path('orchestrator/registry/participant-registry-v1.0.json'))
 )
 
 EXPECTED_INVENTORY_SHA256 = {
@@ -220,6 +220,8 @@ def _package_inventory(
             maximum=4096,
         )
     )
+    if not root.is_absolute():
+        root = PROJECT_ROOT / root
 
     if root.is_symlink() or not root.is_dir():
         raise ParticipantTaskError(

@@ -17,6 +17,8 @@ bounded and secrets are scrubbed before persistence.
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 from contextlib import contextmanager
 import hashlib
 import json
@@ -44,7 +46,7 @@ MAX_SQL = 64_000
 ROOT = Path(
     os.environ.get(
         "GG_RESEARCH_DESK_ROOT",
-        "/home/GG/.local/state/goldgoblins/gg-ai-desktop/research-desk",
+        str(STATE_ROOT / 'research-desk'),
     )
 )
 DB_NAME = "research-desk.sqlite3"

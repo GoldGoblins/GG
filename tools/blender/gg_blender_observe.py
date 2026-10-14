@@ -8,6 +8,7 @@ and an explicit clean pass. Clean does nothing unless apply is true.
 from __future__ import annotations
 
 from pathlib import Path
+import math
 
 import bmesh
 import bpy
@@ -263,9 +264,19 @@ def _place_camera(cam: bpy.types.Object, center: Vector, offset: Vector, distanc
     cam.rotation_euler = (center - cam.location).to_track_quat("-Z", "Y").to_euler()
 
 
-def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
+def render_turnaround(directory: str, size: int = 640, name: str = "", *,
+                      collection: str = "", framing: dict | None = None,
+                      style: str = "clay", orthographic: bool = False) -> dict:
     _object_mode()
+    scene = bpy.context.scene
     meshes = _meshes(name)
+    if collection:
+        group = bpy.data.collections.get(collection)
+        if group is None:
+            return _err("BLENDER_COLLECTION_MISSING", name=collection)
+        meshes = [obj for obj in group.all_objects if obj.type == "MESH"]
+        meshes = [obj for obj in meshes if not obj.hide_render]
+    meshes = [obj for obj in meshes if obj.name in scene.objects]
     if name and not meshes:
         return _err("BLENDER_MESH_MISSING", name=name)
     bounds = _world_bounds(meshes)
@@ -276,10 +287,22 @@ def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
     span = high - low
     distance = max(span.length, 0.2) * 1.7
     ortho = max(span.x, span.y, span.z, 0.2) * 1.45
+    if style not in {"clay", "silhouette", "material", "appearance"}:
+        return _err("BLENDER_TURNAROUND_STYLE")
+    if framing is not None:
+        try:
+            values = [float(value) for value in framing["center"]]
+            distance = float(framing["distance"])
+            ortho = float(framing["ortho_scale"])
+            if (len(values) != 3 or not all(math.isfinite(v) for v in values + [distance, ortho])
+                    or distance <= 0 or ortho <= 0):
+                raise ValueError("invalid framing")
+            center = Vector(values)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return _err("BLENDER_TURNAROUND_FRAMING")
     folder = Path(directory or "/tmp/gg-blender-turn").expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     pixels = max(256, min(int(size or 640), 1024))
-    scene = bpy.context.scene
     camera_data = bpy.data.cameras.new("GG_Observe_Cam")
     camera = bpy.data.objects.new("GG_Observe_Cam", camera_data)
     scene.collection.objects.link(camera)
@@ -293,7 +316,15 @@ def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
     previous_path = scene.render.filepath
     previous_format = scene.render.image_settings.file_format
     shading = scene.display.shading
-    previous_shading = shading.type
+    shade_fields = ("type", "color_type", "single_color", "light", "background_type", "background_color",
+                    "show_shadows", "show_cavity", "show_specular_highlight")
+    previous_shading = {key: (tuple(getattr(shading, key)) if key.endswith("color")
+                              else getattr(shading, key)) for key in shade_fields}
+    visibility = [(obj, obj.hide_render) for obj in scene.objects]
+    previous_transparent = scene.render.film_transparent
+    previous_world = scene.world
+    preview_world = None
+    preview_lights = []
     scene.camera = camera
     scene.render.engine = "BLENDER_WORKBENCH"
     scene.render.resolution_x = pixels
@@ -306,28 +337,70 @@ def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
         "back": Vector((0.0, 1.0, 0.15)),
         "three_quarter": Vector((0.72, -0.72, 0.38)),
     }
+    if orthographic:
+        for view in ("front", "side", "back"):
+            offsets[view].z = 0.0
     paths: dict[str, str] = {}
     wire_error = ""
     try:
+        targets = set(meshes)
+        for obj, _hidden in visibility:
+            obj.hide_render = obj not in targets
+        scene.render.film_transparent = False
         shading.type = "SOLID"
+        shading.light = "FLAT" if style == "silhouette" else "STUDIO"
+        shading.color_type = "MATERIAL" if style == "material" else "SINGLE"
+        shading.single_color = (0.0, 0.0, 0.0) if style == "silhouette" else (0.65, 0.65, 0.65)
+        shading.background_type = "VIEWPORT"
+        shading.background_color = (1.0, 1.0, 1.0)
+        shading.show_shadows = False
+        shading.show_cavity = style != "silhouette"
+        shading.show_specular_highlight = style != "silhouette"
+        if style == "appearance":
+            scene.render.engine = "BLENDER_EEVEE"
+            preview_world = bpy.data.worlds.new("GG_Observe_World")
+            preview_world.use_nodes = True
+            preview_world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.18, 0.18, 0.18, 1)
+            preview_world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.5
+            scene.world = preview_world
+            for index, offset in enumerate((Vector((3, -4, 5)), Vector((-4, -2, 2)), Vector((0, 4, 4)))):
+                data = bpy.data.lights.new("GG_Observe_Light", "AREA")
+                light = bpy.data.objects.new(data.name, data)
+                scene.collection.objects.link(light)
+                light.location = center + offset.normalized() * distance * 1.4
+                light.rotation_euler = (center - light.location).to_track_quat("-Z", "Y").to_euler()
+                data.energy = (1200, 700, 1000)[index] * (ortho / 4) ** 2
+                data.shape = "DISK"
+                data.size = ortho
+                preview_lights.append((light, data))
         for view in TURNAROUND_VIEWS:
             _place_camera(camera, center, offsets[view], distance)
             target = folder / f"{view}.png"
             scene.render.filepath = str(target)
             bpy.ops.render.render(write_still=True)
             paths[view] = str(target)
-        try:
-            shading.type = "WIREFRAME"
-            _place_camera(camera, center, offsets["front"], distance)
-            wire = folder / "front_wire.png"
-            scene.render.filepath = str(wire)
-            bpy.ops.render.render(write_still=True)
-            paths["front_wire"] = str(wire)
-        except Exception as exc:
-            wire_error = type(exc).__name__
+        if style == "clay":
+            try:
+                shading.type = "WIREFRAME"
+                _place_camera(camera, center, offsets["front"], distance)
+                wire = folder / "front_wire.png"
+                scene.render.filepath = str(wire)
+                bpy.ops.render.render(write_still=True)
+                paths["front_wire"] = str(wire)
+            except Exception as exc:
+                wire_error = type(exc).__name__
     except Exception as exc:
         return _err("BLENDER_TURNAROUND_FAILED", detail=type(exc).__name__, message=str(exc)[:400])
     finally:
+        for obj, hidden in visibility:
+            obj.hide_render = hidden
+        scene.render.film_transparent = previous_transparent
+        scene.world = previous_world
+        for light, data in preview_lights:
+            bpy.data.objects.remove(light, do_unlink=True)
+            bpy.data.lights.remove(data)
+        if preview_world:
+            bpy.data.worlds.remove(preview_world)
         scene.camera = previous_camera
         scene.render.engine = previous_engine
         scene.render.resolution_x = previous_x
@@ -336,7 +409,8 @@ def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
         scene.render.filepath = previous_path
         scene.render.image_settings.file_format = previous_format
         try:
-            shading.type = previous_shading
+            for key, value in previous_shading.items():
+                setattr(shading, key, value)
         except Exception:
             pass
         bpy.data.objects.remove(camera, do_unlink=True)
@@ -347,6 +421,12 @@ def render_turnaround(directory: str, size: int = 640, name: str = "") -> dict:
         return _err("BLENDER_TURNAROUND_MISSING", views=missing)
     return _ok(
         directory=str(folder),
+        framing={"center": list(center), "distance": distance, "ortho_scale": ortho},
+        style=style,
+        orthographic=orthographic,
+        targets=[obj.name for obj in meshes],
+        color_limit=("EEVEE material preview in controlled lighting; not an engine playback test."
+                     if style == "appearance" else "Workbench geometry/base-color view."),
         wire_error=wire_error,
         views={view: {"path": path, "bytes": Path(path).stat().st_size} for view, path in paths.items()},
     )
@@ -513,6 +593,10 @@ def dispatch(cmd: str, request: dict) -> dict:
             str(request.get("directory") or ""),
             int(request.get("size") or 640),
             name,
+            collection=str(request.get("collection") or ""),
+            framing=request.get("framing"),
+            style=str(request.get("style") or "clay"),
+            orthographic=bool(request.get("orthographic")),
         )
     if cmd == "deform_rig":
         return apply_deform_rig(name, bool(request.get("replace")))

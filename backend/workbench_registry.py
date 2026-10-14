@@ -14,6 +14,8 @@ presentation availability.
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import copy
 from contextlib import contextmanager
 import json
@@ -29,7 +31,7 @@ except ImportError:  # pragma: no cover - desktop target is POSIX
     fcntl = None
 
 
-STATE = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop")
+STATE = Path(str(STATE_ROOT))
 REGISTRY_PATH = STATE / "workbench-registry-v1.json"
 SCHEMA = "gg.ai-desktop.workbench-registry.v1"
 

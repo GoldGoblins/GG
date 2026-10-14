@@ -1,18 +1,18 @@
-# Original Benilla formats in GG
+# Upstream formats in GG
 
 The eight original reader crates, original TGA decoder and the **entire**
-`benilla-formats` library are copied unchanged. Original protocol and SRP crates
+`engine-formats-core` library are copied unchanged. Original protocol and SRP crates
 are also preserved: the 470-file inventory (283 reader files and 187 protocol/SRP
 files) is in `upstream-provenance.json`. GG's C ABIs and runtimes live in separate
 crates. Original licenses and notices for 64 resolved Linux build/test dependencies
 (131 license texts) are included. No game installation data is redistributed.
 
-Build with `python3 -B tools/world/build_benilla_assets.py`. This uses the
+Build with `python3 -B tools/world/build_engine_formats.py`. This uses the
 existing isolated Rust toolchain and locked dependencies. Compiler and build
 caches are excluded from the player package. Both native libraries have checked
 source/binary build receipts; nothing compiles during game startup.
 
-`build_benilla_client.py` builds the separate original-protocol adapter. Its C ABI
+`build_engine_client.py` builds the separate original-protocol adapter. Its C ABI
 exposes all 256 original outbound commands and 166 typed protocol records. GUIDs
 keep all 64 bits through decimal strings. Finite encrypted loopback fixtures
 exercise login, queue, roster, character actions, world entry, logout/re-entry,
@@ -280,9 +280,9 @@ obstacles and planet curvature are disabled for that map. NPC navigation and
 content remain GG gameplay, rather than a complete original game server.
 
 Use **DEMO WORLD** in GAME ENGINE for the own two-tile/three-room map,
-**LOAD WORLD** for a scoped `gg.benilla-world.v1` JSON manifest, and **GG WORLD**
+**LOAD WORLD** for a scoped `gg.engine-world.v1` JSON manifest, and **GG WORLD**
 to restore the prior position/provider. The standalone client also accepts
-`--benilla-world game/worlds/benilla-demo/world.json`. An explicit optional
+`--engine-world game/worlds/engine-demo/world.json`. An explicit optional
 `archive_directory` uses the existing original archive-chain reader; no
 installation directories are scanned and no installation data is bundled.
 
@@ -338,7 +338,7 @@ ZoneIntroMusicTable readers select background-prepared zone/Lua/ambience streams
 Day/night beds, ghost/underwater/weather priority, interior overrides, intro
 cooldowns, natural-end silence, 4 s outgoing music fades and 5 s ambience
 crossfades are exercised through the real mixer. SoundProviderPreferences uses
-the original Benilla EAX-to-Freeverb projection; it does not emulate legacy FMOD.
+the upstream EAX-to-Freeverb projection; it does not emulate legacy FMOD.
 Short effects reuse inactive clip slots and stop only their own voice generations.
 The separate protocol/session adapter is available for original wire behavior;
 normal local play uses the GG simulation. Archive tracks up to 8 MiB use the
@@ -353,18 +353,18 @@ and unit room election, complete original gameplay/audio host, weapon
 timed sheath/private bag-quiver/spell visuals, exact original mip LOD/anisotropy,
 terrain/liquid/weather authored mips, and pane/transport
 rebasing of world-space effects. M2 stage-zero shading preserves the original
-benilla-formats batch builder's limit; it is not complete WoW multi-combiner support.
+engine-formats-core batch builder's limit; it is not complete WoW multi-combiner support.
 Qt's material API does not expose independent depth-test disable.
 Encrypted/single-unit/PTCH MPQs retain the
 original reader's unsupported status. The original BLP mip-chain formula stops
 before a stored 1x1 level; that behavior is preserved.
 
 Verification uses independently authored binary fixtures. Evidence:
-`docs/benilla-world-objects-2026-10-09/verification.json`. Tests requiring an original
+`docs/engine-world-objects-2026-10-09/verification.json`. Tests requiring an original
 game installation can return early in the upstream suite; they are not evidence
 of real installation compatibility. Run the GG format/model/archive/short-audio
 regression tests and the finite GPU/client probes for the checked integration.
 The comprehensive source/module inventory and current verification artifacts are
-in `docs/benilla-full-audit-2026-10-09/`. Its source-integrity gate covers 791 original
+in `docs/engine-full-audit-2026-10-09/`. Its source-integrity gate covers 791 original
 files; the world/app inventory covers 64/152 root modules. These counts are not a
 percentage-complete estimate and do not prove original installation compatibility.

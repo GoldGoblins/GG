@@ -4,6 +4,8 @@ import copy
 import hashlib
 import importlib.util
 from pathlib import Path
+
+from backend.application_paths import SUPPORT_ROOT, WORKSPACE_ROOT
 from types import ModuleType
 from typing import Any
 
@@ -26,7 +28,7 @@ def _repo_root() -> Path:
     path = Path(__file__).resolve()
     if len(path.parents) < 4:
         raise OrchestratorMandateAdapterError("ADAPTER_PATH_DEPTH_INVALID")
-    return path.parents[3]
+    return SUPPORT_ROOT if SUPPORT_ROOT.is_dir() else WORKSPACE_ROOT
 
 
 def _sha256(path: Path) -> str:

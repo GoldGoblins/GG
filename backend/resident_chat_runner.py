@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import HOME
+
 import codecs
 import hashlib
 import json
@@ -16,7 +18,7 @@ from pathlib import Path
 from backend import local_ai_contract as contract
 
 EVENT_SCHEMA = "gg.workbench.resident-chat-event.v1"
-MODEL_DIR = Path("/home/GG/models/qwen25-coder-7b-instruct-q4_k_m")
+MODEL_DIR = Path(str(HOME / 'models/qwen25-coder-7b-instruct-q4_k_m'))
 MODEL_PATH = MODEL_DIR / "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 MODEL_SHA256 = (
     "1664fccab734674a50763490a8c6931b70e3f2f8ec10031b54806d30e5f956b6"

@@ -50,7 +50,7 @@ def main():
     item.add_argument("--limit", type=int, default=32)
     item = sub.add_parser("inspect")
     item.add_argument("path")
-    item.add_argument("--native", action="store_true", help="Use the installed version-specific Benilla reader")
+    item.add_argument("--native", action="store_true", help="Use the installed version-specific native engine reader")
     item = sub.add_parser("annotate")
     item.add_argument("key")
     item.add_argument("--tags", required=True)

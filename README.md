@@ -4,6 +4,24 @@
 
 Public repo: [github.com/GoldGoblins/GG](https://github.com/GoldGoblins/GG)
 
+## Installation and application files
+
+The complete application lives in this directory. It includes `AGENTS.md`,
+all seven GG GPT knowledge packages, the four GG skills and their shared
+support modules. [FILE-LAYOUT.md](FILE-LAYOUT.md) describes the directories,
+installation and provider dependencies. `FILE-CATALOG.json` inventories the
+current distributable sources.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python gg-setup --prepare
+PYTHON="$PWD/.venv/bin/python" ./run-gg-ai-desktop.sh
+```
+
+Install and sign in to Codex for GPT TUI or Grok Build for GROK TUI. External
+provider plugins are cataloged in `config/dependencies.json` and installed
+through their respective provider clients.
 
 ## Patch notes · 2026-10-12 · GG AI Desktop updates since 2026-09-24
 
@@ -37,17 +55,263 @@ are updated. Live visual observation is available through the desktop tools.
 Update with `git pull` and restart GG AI Desktop to load the new backend.
 
 
-## Patch notes · 2026-09-24 · settings, OSINT scale and GAME ENGINE world systems
+## Patch notes · 2026-10-10 · local asset workflow improvements
 
-This release collects the desktop work since the 2026-09-10 patch, through session 62.
+The [implemented priorities and verification](docs/local-asset-improvements-2026-10-10/REPORT.txt)
+extend the earlier corpus study. The editor and runtime now use one local
+resource policy for shared buffers; editor metadata/image caches also observe
+external buffer/image changes. Scout reads bounded OBJ topology, DAE skin and
+id/name/sid aliases, SMD pose samples and checked GGFLORA1 vertices/indices.
+Document, buffer, image and material-library identities form a dependency graph;
+annotations bind to that complete identity. Incomplete references stay visible
+as incomplete, and changed dependencies exclude stale matches.
 
-**Settings and CODE.** SETTINGS now opens as a modular popup with search and visual controls for named profiles, surfaces and layout editing. CODE adds a command palette and an in-workspace runner/live-aid entry. The workspace also fixes a duplicate QML host-change handler that could stop startup loading.
+The app's catalog contains 25,930 entries from 24 collections, built in 225
+bounded batches. Twelve oversized authoring files, nine incomplete reference
+models and one unreadable existing image are explicitly reported. Source
+stamps stayed unchanged. A keyed FTS row mapping avoids scanning the entire
+catalog for each update; refreshing all search rows took about 2.3 seconds in the
+recorded run. Collections commit only after all batches and source checks pass.
 
-**OSINT map.** Dense location feeds are reduced into zoom-aware grid buckets before they reach the map, keeping marker work bounded as the view changes. OSINT remains a separate surface from GAME ENGINE; the bundled camera-location pins are sample map data, not live video.
+RESEARCH → GAMES adds collection planning, batch continuation/discard, dependency
+links, **Rig trial** and **Scene profile**. Rig trial creates a separate GLB
+with explicit caller FPS/basis, preserved corner normals/UVs/material groups,
+raw weights and coincident faces. Qwark matched 92 joint aliases and retained
+3,190 triangles across bind/first/middle/last Blender samples. Helga's two
+inconsistent bind matrices produce a diagnostic failure before conversion.
+Neither name matching nor a successful preview automatically retargets a GG rig.
 
-**GAME ENGINE.** The local simulation now carries individual NPC identity, progression and gear alongside quest/dialogue, faction, social and world-event state. Item, equipment, crafting and trade changes are recorded with the local event journal. Terrain and render LOD limit visible work, and the presentation-only DOS view can continue showing the same simulation state when rich 3D is unavailable. This is a bounded local game slice; it does not claim an online MMO server.
+Scene profile prepares an admitted model/LOD plan; **MEASURE QT** runs a finite
+separate View3D window through the supervised worker. A three-model OpenGL
+sample measured 16 draw calls in FULL, 11 in VISIBILITY, and 16 in LOD. GPU
+timing was unavailable and remains explicit; source triangle/material counts
+are kept separate from measured counters. Original native readers, animation
+clocks and game-reference files retain their existing behavior and bytes.
 
-**Original Blender assets.** The included pipeline builds original low-poly hero, NPC and world-prop assets and loads them through the bounded asset contract, with native geometry available as fallback. Third-party game meshes and textures used only as private design references are not part of this release.
+```bash
+python3 gg-game-workflows scout-collections qml/assets
+python3 gg-game-workflows scout-search rigg --game 'GG local library' --kind model
+python3 gg-game-workflows scout-batch qml/assets/authored/flora --game GG
+python3 gg-game-workflows asset-profile qml/assets/authored/characters/gg-crew-briarstride-articulated.glb --lod qml/assets/authored/characters/gg-crew-briarstride-compact.glb
+```
+
+Batch results carry a continuation cursor for the next CLI call; GAMES retains
+it internally. A collection plan specifies recursive/shallow and hash-partition
+parameters for large flat directories. Rig trials require `--fps` and `--basis`;
+neither is guessed from an undeclared SMD. The Blender reviewer is
+`tools/blender/verify_game_rig_trial.py`; scene plans also run with
+`tools/research/profile_game_asset_scene.py`. Updated desktop sources must be
+loaded for the new controls; the command line works immediately.
+
+## Patch notes · 2026-10-10 · game independent asset and analysis workflows
+
+RESEARCH → GAMES now shares four workflows between the desktop, GPT/Grok tools
+and Blender: discover assets, assemble function context, review a candidate,
+and author routes. The original requirement is to reuse the working steps across
+PS2, RenderWare, WoW, Jak, Ratchet, Vexx, Sly and other games. A game label records
+provenance; the file format and its version select the reader.
+
+These are GG implementations of the workflows reviewed in
+[GTA Scout](https://github.com/Dryxio/gta-scout),
+[Ghidra Bridge](https://github.com/Dryxio/ghidra-bridge),
+[Reagent](https://github.com/Dryxio/reagent) and
+[GTA Flow](https://github.com/Dryxio/gta-flow).
+The upstream packages are not installed or vendored by this change. No game
+assets or model weights are bundled. Existing GG Ghidra jobs, GgEngine readers,
+asset validation and Blender authoring remain the integration points.
+
+| Workflow | Implemented behavior | Practical scope |
+| --- | --- | --- |
+| Scout | Incremental SQLite/FTS5 catalog, Swedish/English lexical hints, game/kind filters, source-bound annotations, stale-file exclusion, distinct duplicate locations, pixel contact sheets | Metadata and evidence retrieval; semantic embeddings and automatic model rendering are not installed |
+| Function context | Reuses completed local function/decompile/xref jobs; accepts exact-name/address offline JSON exports; carries available dependencies, types, P-code, CFG and assembly | Address spaces and 64-bit addresses are preserved; imported exports retain unverified provenance |
+| Candidate review | Stores a separate candidate packet, checks simple source structure and representable integer returns, optionally compiles C11 syntax inside network-isolated bubblewrap | Behavior remains UNKNOWN without an independent test; no automatic source patch or acceptance |
+| Route authoring | Stable node/edge/route IDs, explicit units and axes, directed traversal, 3D paths, loops, ping-pong and dwell steps, deterministic compilation and an independent serialized-graph checker | GG world/settlement adapters preserve stop metadata and authoring scale; proprietary game route tables require their own adapter |
+
+The initial format adapters inspect glTF/GLB document metadata, image headers,
+RenderWare chunk structure, M2/BLP headers and ELF architecture/entry identity.
+The optional WoW reader uses the installed, verified GgEngine implementation for
+its supported versions. RenderWare native PS2 geometry/raster plugins, later WoW
+variants and title-specific Jak/Ratchet/Vexx/Sly archives are not silently decoded
+through a GTA reader. Extracted common-format assets use the same workflow;
+unrecognized files remain explicitly opaque. A MIPS ELF header identifies an
+architecture, not a verified PS2 runtime.
+
+A [local asset and GgEngine study](docs/local-asset-study-2026-10-10/REPORT.txt)
+now measures 25,942 existing asset files, exported rigs and separate animation
+resources. Its [geometry comparison](docs/local-asset-study-2026-10-10/mesh-study.png)
+and saved evidence identify shared-resource editor rejection, layered faces and
+the missing OBJ/DAE/GG mesh catalog metadata. These are measured findings and
+priorities; the later implementation above addresses them while the original
+study remains a record of the earlier state.
+
+The new surface is available when the desktop loads the updated sources. The
+shared command line is usable immediately from the workspace root:
+
+```bash
+python3 gg-game-workflows tools
+python3 gg-game-workflows scout-index qml/assets/authored/props --game GG
+python3 gg-game-workflows scout-search grapple --game GG
+python3 gg-game-workflows flow-import qml/assets/authored/world/world-places.json --game GG
+python3 gg-game-workflows --help
+```
+
+GAMES → Function context can collect the last completed function analysis from
+REVERSE. For an offline export, select its function JSON or a bounded export
+directory, select the original artifact, and supply the exact name or address.
+Function files accept `name`/`full_name`, `address`, `pseudocode`/`decompiled`/
+`decompiled_code`/`code`, and optional `callers`, `callees`, `strings`, `globals`,
+`types`, `pcode`, `cfg` and `asm` fields. Selection attaches an unbound external
+export to the chosen artifact; it does not verify that export's producer.
+
+Use the saved context packet in Candidate review and select one proposed C/C++
+function. The optional compiler gate checks C11 syntax only. Its result does not
+test linking, game ABI, MIPS/vector-unit behavior or memory effects. Candidate
+commands return a nonzero exit code while acceptance is UNKNOWN or REJECTED so
+automation cannot treat structural consistency as successful reconstruction.
+
+Generic route files use `gg.game-workflows.flow.v1`, with explicit `coordinates`
+(`up` Y/Z, `handedness` right/left, `meters_per_unit`), `nodes`, `edges` and
+`routes`. Node positions have three components. Edges name their `from` and `to`
+node IDs and can include a polyline, `directed`, `width_m` and an arbitrary agent
+label. Widths use world metres; input positions use the declared scale. Left
+handed input mirrors X before axis conversion. Crossings never imply junctions.
+Coincident activity stops use explicit DWELL transitions; zero-length MOVE
+segments are rejected. The checker verifies graph structure and traversal,
+not collision or game-engine behavior.
+
+In Blender, [gg_game_workflow_routes.py](tools/blender/gg_game_workflow_routes.py)
+imports a flow packet into a new collection of tagged nodes and editable POLY
+curves. `export_flow(collection)` previews and validates; `apply=True` saves a
+new workflow packet. Renaming an object preserves its ID. Shared endpoint edits
+must agree. A changed source requires reimport. GG map export writes a separate
+candidate and rejects edits that its 2D map schema cannot preserve. It never
+replaces the live map; applying a reviewed candidate uses the established map
+authoring/build pipeline.
+
+Workers admit one job at a time, have a 60-second wall limit and retain eight
+job records. Each scan is limited to 2,048 files, 256 MiB total and 32 MiB per
+file; the catalog holds up to 8,192 occurrences. Oversized files are reported as
+skipped. A scan that exceeds its file/byte/time budget preserves the previous
+catalog. Evidence packets are limited to 512 files/64 MiB and fail explicitly
+when full instead of silently deleting saved evidence. Source bytes are checked
+again before retrieval, annotation, context reuse and visual evidence creation.
+
+Validation covers cross-format fixtures, changed files, export ambiguity,
+RenderWare length errors, actual GgEngine BLP/M2 decoding, isolated compiler
+syntax, independent route-output corruption, real GG map round trips, actual
+QML buttons/workers, actual Blender curves and local Ghidra context creation:
+
+```bash
+python3 -B -m unittest discover -s tests -p test_game_workflows.py
+python3 -B tests/test_game_workflows_ui.py
+python3 -B tests/test_game_workflows_engine.py
+# Run with the installed Blender executable:
+blender --background --factory-startup --python-exit-code 1 --python tests/test_game_workflows_blender.py
+```
+
+## Patch notes · 2026-10-01 · own position, NAV guidance and nearby radios
+
+OSINT now offers an explicit POS switch, an own-position marker with reported
+accuracy, and FOLLOW in NAV. Planned road maneuvers, remaining distance and
+arrival use the existing OSRM route. Approximate, stale and off-route positions
+are distinguished. Manual panning releases camera following.
+
+Overview position uses lower accuracy and throttled marker updates. NAV routes
+or zoom 15 and above enable detailed position mode; hiding the globe disposes
+the location watcher. Optional NEARBY reads existing NetworkManager/BlueZ cache
+on a worker only in those detailed views, with unknown cache age shown. It does
+not estimate other devices' locations or identify trackers. See the
+[Fieldwatch reference and implementation checks](docs/OSINT_NAV_POSITION_NEARBY.md).
+
+## Patch notes · 2026-10-01 · OSINT globe and Swedish news
+
+The existing MapLibre globe now has optional elevation terrain with hillshade
+and 3D buildings. Terrain is fetched only when enabled and zoomed in; building
+volumes use the existing basemap. Map updates coalesce and avoid unchanged
+source uploads, and the optional basemap loads alongside the local globe.
+Feed results appear progressively instead of waiting for the slowest source.
+
+The intelligence panel now separates news from signals and offers a Swedish
+filter. SVT, SR Ekot and BBC World retain publisher, publication time and
+per-feed cache status. Headlines wrap, panels remain readable over detailed
+maps, and source health exposes each news feed. See the
+[Osiris comparison and verification](docs/OSINT_GLOBE_COMPARISON.md).
+
+## Patch notes · 2026-10-01 · OSINT, Research and QIP
+
+OSINT now contains Research and QIP subpages using the existing components.
+Selected feed observations can be saved to Research with source, collection
+time, event time and location precision preserved. Reference locations stay
+references; observations await independent corroboration. Repeated saves of
+the same record do not create duplicate evidence cards.
+
+Source health distinguishes fetch attempts from successful retrievals, ages
+cached records, and reports partial camera failures. ADS-B fallback records
+retain their actual provider. Analysis pages preserve their local drafts and
+file selection while navigating inside OSINT and do not refresh public feeds.
+The map engine pauses while those analysis pages are visible. Research now
+exposes its imported source library. Existing standalone tabs remain available.
+
+The [research and implementation note](docs/OSINT_RESEARCH_INTEGRATION.md)
+explains the derivation from existing code and the assessment of NSA projects,
+including Ghidra, LemonGraph, DataWave, Emissary and QGIS plugins.
+
+## Patch notes · 2026-09-26 · grapple swing and authored locomotion
+
+Q launches a visible grappling hook toward a clear anchor. The hook travels
+before it attaches; pressing Q again releases the rope. Its 428-triangle head
+is authored and exported through Blender. A fixed-step pendulum keeps swing
+momentum, allows directional pumping and resolves against the island's ground
+height. Space supports a second air-jump impulse with its own short
+Blender-authored somersault. The nine original GG character exports now carry
+the shared 90-bone rig and eleven Blender-authored motion clips. No proprietary
+game assets are included.
+
+## Patch notes · 2026-09-26 · first Sandover exploration route
+
+The separate game client now offers quests from the nearby character who gives
+them and keeps the current objective, progress and distance in a field journal.
+Two starting expeditions let the player choose the west windmill ridge or the
+south cove; the cove route continues past its waterwheel to a new Blender-built
+tide beacon. Visit triggers use the same world coordinates and ground movement
+as the shared terrain and navigation; the beacon also has a simulation
+collision. No screenshot is included.
+
+## Patch notes · 2026-09-26 · trailing camera and freer movement
+
+The third-person camera now follows the player's heading and stays behind the
+character by default; right-mouse orbit remains available around the player.
+W/S move forward and backward while A/D always rotate the character, whether
+standing or moving. E interacts with the world; Q fires or releases the
+grappling hook. Jumps support a short input buffer, a small ledge grace window,
+variable height while Space is held, and a second jump in mid-air. No new
+image asset is included in this patch.
+
+## Patch notes · 2026-09-25 · cove village and island terrain
+
+The GAME ENGINE's first island now has a distinct sheltered cove, low village
+green, raised windmill headland and an uneven coastline. One continuous height
+field still drives the rendered ground, movement, navigation and water depth.
+Near terrain blends beach, grass and exposed rock with per-vertex colors; far
+HLOD tiles keep their small shared biome palette.
+
+The original 32-prop scene now uses four roof silhouettes and colors across
+the enterable stilt huts, a market stall, fish rack, skiff, connected boardwalk
+and pier, stone steps, a shrine, barrel, rock outcrops, palms and mangroves.
+Existing house deck, doorway, collision and prop-pool limits stay intact. The
+village layout is informed by reachable landmarks and readable routes in classic
+adventure worlds; it uses original GG geometry and does not copy game assets.
+No screenshot or new image asset is included in this patch.
+
+## Patch notes · 2026-09-24 · shared sequential FLOW TUI
+
+**FLOW TUI.** GROK TUI and GPTUI share one task ledger in the same chat and
+take distinct turns: GROK scopes and assigns the work, GPTUI completes that
+assignment, and GROK reviews it. If review finds a gap, FLOW allows one GPTUI
+repair pass and one final GROK review. Missing handoffs, timeouts, and truncated
+responses stay explicitly incomplete. Each turn receives the original request,
+the prior handoff and work, recent FLOW context, and matching shared-memory
+lessons. Only one motor is active at a time.
 
 ## Patch notes · 2026-09-10 · wallet box, CRYPTO desk, FLOW TUI, house chrome
 
@@ -187,7 +451,7 @@ gameplay-first engines while remaining original code; no source code or
 assets from those projects are bundled.
 
 Physics stays at a deterministic 60 Hz. The visible QML surface consumes a
-bounded 30 Hz render snapshot (20 Hz in stress mode), pauses the local runtime
+bounded 60 Hz render snapshot (20 Hz in stress mode), pauses the local runtime
 when the surface is hidden, and uses QtQuick3D's native `Repeater3D` with a
 compact primitive scale. OSINT is a separate read-only surface and is not a
 Game Engine data or rendering dependency.
@@ -276,11 +540,12 @@ walk tiles inherit the terrain height/normal contract, reject excessive slopes
 and steps, and expose deterministic four-connected A* over the currently
 streamed cells. Tile construction is cached until the cell set, movement mode
   or terrain-edit revision changes. The player now has a separate WoW-style
-  third-person controller with W/S character-facing movement, A/D turning,
-  Q/E strafe, normalized diagonals, sprint, grounded jump and fixed-step
-  vertical contact. NPC decisions now consume short bounded A* routes
-over the same loaded heightfield when possible, with bounded direct steering as
-fallback; schedules, dialogue, combat and crowd avoidance remain later layers.
+  third-person controller with a trailing camera, W/S character-facing
+  movement, A/D turning, E interaction, Q grappling, sprint and buffered
+  variable-height jumps. NPC decisions now consume short
+  bounded A* routes over the same loaded heightfield when possible, with
+  bounded direct steering as fallback; schedules, dialogue, combat and crowd
+  avoidance remain later layers.
 
 ## Patch notes · 2026-09-13 · low-cost locomotion pose seam
 
@@ -292,6 +557,23 @@ body draw path, so walking and sprinting read as motion without a skeleton,
 texture set or per-limb render fan-out. A future skinned asset can reuse the
 same state and phase.
 
+## Patch notes · 2026-10-07 · shared crew character resources
+
+The nine crew characters each retain one rig with 58 animation clips. Changing
+clips reuses the imported model; it does not load a new character mesh. Their
+36 appearance choices now reference shared animation, skinning, topology and
+texture resources under `qml/assets/authored/characters/shared/`. Only shape
+data that actually differs between appearances is stored separately. The
+compact rig for distant NPCs remains available.
+
+Existing runtime GLB paths still work. Historical `animated` paths alias the
+articulated assets instead of keeping a third export bank. Source `.blend`
+files and original appearance meshes are preserved. The articulated exporter,
+grip refinement and variant compiler all finish by packing shared resources,
+so future animation changes update the appearances without retaining copied
+banks. GLB descriptors include a small BIN stub for Qt import compatibility;
+on Btrfs their common metadata blocks also share disk storage.
+
 ## Patch notes · 2026-09-14 · authored/skinned asset import
 
 The preview now has a bounded local glTF 2.0/GLB asset seam. A backend
@@ -302,11 +584,12 @@ instance rank. QtQuick3D `RuntimeLoader` can take over the first eight slots;
 the existing pose mesh remains visible until loading succeeds or if loading
 fails.
 
-The canonical player asset is the original Blender-generated
-`qml/assets/authored/gg-clay-hero-a.glb`: a bounded skinned low-poly clay
-character with 18 joints, 32 skinned mesh parts, six equipment sockets and
-`Idle`, `Walk`, `Sprint` and `Air` clips. Movement, camera orbit, terrain
-physics and render cadence are unchanged. The historical
+The player and NPCs now use the original rigged GG Codex characters from the
+Blender scene, exported as bounded skinned GLBs under
+`qml/assets/authored/characters/`. They include the Blender `Idle`, `Walk`,
+`Sprint` and `Air` clips, and the player has six equipment sockets. Named
+roles get their own Blender variants; the regular crowd cycles seven variants
+within the existing eight-character RuntimeLoader budget. The historical
 `qml/assets/gg-authored-hero.gltf` path is a temporary compatibility alias for
 already-running desktop hosts and does not create a second character body.
 
@@ -425,12 +708,12 @@ created.
 
 ## Patch notes · 2026-09-13 · WoW input and OSINT addon overlay
 
-Ground control now follows the requested classic WoW grammar: `W/S` move
-forward/back, `A/D` rotate in place, `Q/E` strafe, right mouse orbits the
-camera, `Space` jumps and `Shift` sprints. The camera no longer changes the
-player's movement vector behind the user's back. A bounded keybinding registry
-exposes the same action names to QML, replay data and the future in-game
-editor; the UI page can capture a new key and restore defaults.
+At the time of this patch, ground control used the classic WoW grammar:
+`W/S` moved forward/back, `A/D` rotated in place and `Q/E` strafed. The later
+2026-09-26 control update freed those keys for `Q` grappling and `E`
+interaction. A bounded keybinding registry exposes the same action names to
+QML, replay data and the future in-game editor; the UI page can capture a new
+key and restore defaults.
 This project pins that classic behavior deliberately; current live WoW
 defaults can change independently of the documented classic layout.
 
@@ -649,6 +932,15 @@ chat catalog and laser-Merkle knowledge tree. GPTUI resumes Codex sessions,
 shares the memory commands (`/flush`, `/dream`, `/memory`, `/remember`), and
 keeps the existing approval and workspace boundaries.
 
+**GPTUI image storage (2026-10-07).** Durable session logs keep image metadata
+instead of inline bitmaps, including copies in compaction history. Original
+image files and live model input are left intact. Reopening an old image
+requires its original file to still exist. A worker attached to the desktop
+checks changed logs every 30 seconds, off the Qt event loop. Closed logs are
+replaced atomically under Codex's session lock. Open append-only legacy logs
+keep their inode; a brief writer pause, recovery journal and independent
+watchdog protect the commit. Recovery runs before opening an interrupted log.
+
 **Chat and terminal handling are steadier.** QML reloads rebind the terminal
 hosts cleanly, terminal scroll metrics are exposed to the custom scrollbar,
 and streaming output no longer pulls the reader back to the newest message
@@ -697,10 +989,10 @@ task; a waiting task still accepts only `ja`/`nej`.
 Drive it from Grok TUI:
 
 ```text
-python3 projects/gg-ai-desktop/gg-desk snapshot
-python3 projects/gg-ai-desktop/gg-desk click --name workspaceKindWEB
-python3 projects/gg-ai-desktop/gg-web snapshot
-python3 projects/gg-ai-desktop/gg-web click "text=RINGAR"
+python3 gg-desk snapshot
+python3 gg-desk click --name workspaceKindWEB
+python3 gg-web snapshot
+python3 gg-web click "text=RINGAR"
 ```
 
 `stage` still loads a local rehearsal page. Live `goldgoblins.se` OPEN is RED
@@ -841,7 +1133,7 @@ candidate engine:
 ```
 
 `/bootstrap` may change only the runtime candidate for
-`projects/gg-ai-desktop/main.py`. The model cannot select a path, executable,
+`main.py`. The model cannot select a path, executable,
 command, environment, network target, authority or approval. Its semantic
 grammar is finitely bounded to prevent an unclosed WHY field from consuming the
 entire prediction budget. Persistent apply requires the exact task id,
@@ -1054,3 +1346,22 @@ loot, quest objectives/rewards, faction reputation and occupation schedules.
 Rich 3D and DOS mode consume the same state, including SAVE/LOAD of the
 simulation clock; the next layers are richer dialogue, population-scale
 crowds and more authored assets/content.
+
+## Standalone game client and launcher
+
+GAME ENGINE and EXT remain the creation tools. The separate Gold Goblins
+player window loads the same world and Blender-exported runtime assets, then
+shows its own HUD, ability bar, pause menu, graphics settings, interface
+options and built-in addon toggles. It does not show the workbench navigation,
+diagnostics or authoring inspector.
+
+Run `packaging/game/run-gg-game.sh` to open the launcher from the current
+workspace. In development mode it always uses the current local source. Run
+`packaging/game/install-gg-game-desktop.sh` to add its icon and desktop shortcut.
+For another Linux x86-64 computer, build
+`python3 tools/package_gg_game_release.py --version v0.1.0`, attach the
+resulting `gg-game-linux-x86_64.tar.gz` to a stable GitHub Release, and install
+that archive. Installed launchers check releases at startup, download the
+matching package, verify its SHA-256 digest, and keep versioned local copies.
+Remote changes are available only after a game package is published; the local
+development launcher never writes over the editor checkout.

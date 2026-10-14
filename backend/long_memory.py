@@ -16,6 +16,8 @@ This never grants action authority or promotes canonical policy.
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import hashlib
 import json
 import os
@@ -47,7 +49,7 @@ MODEL_INFERENCE = False
 NETWORK = "NONE"
 
 TREE_ROOT = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/knowledge-tree"
+    str(STATE_ROOT / 'knowledge-tree')
 )
 INDEX_NAME = "memory-index.json"
 WORKING_NAME = "WORKING.md"

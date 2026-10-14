@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import os
 import tempfile
@@ -15,13 +17,15 @@ except ImportError:  # pragma: no cover - the desktop target is POSIX
 from backend.grok_worker_contract import ENGINE_GROK_TUI, GROK_CWD
 
 CATALOG_PATH = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/chat-sessions.json"
+    str(STATE_ROOT / 'chat-sessions.json')
 )
 SCHEMA = "gg.ai-desktop.chat-sessions.v1"
 MEMORY = "GoldGoblins"
 
 # Long GoldGoblins work chat (Konsole) — same memory, openable from CHATS.
-PROJECT_SESSIONS = ()
+PROJECT_SESSIONS = (
+    ("01a01c8b-5b86-7150-bd01-be262a34eb0d", "GROK_TUI"),
+)
 
 ENGINE_LABEL = {
     "GROK_TUI": "GROK TUI",

@@ -1,5 +1,9 @@
 import json,os,sys,time,tempfile
 os.environ['QT_QPA_PLATFORM']='offscreen'
+# All spawned CLI fixtures and bitmap guards must use test-owned homes.
+_TEST_HOME=tempfile.TemporaryDirectory(prefix='gg-gpt-tui-test-')
+os.environ['GG_DESKTOP_STATE_ROOT']=os.path.join(_TEST_HOME.name,'state')
+os.environ['GG_USER_CODEX_HOME']=os.path.join(_TEST_HOME.name,'user-codex')
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
 from pathlib import Path
 from unittest.mock import patch
@@ -251,6 +255,7 @@ with tempfile.TemporaryDirectory() as d:
  resume_host=ChatSurfaceHost();resume_host._gpt_grid=Grid();resume_host._gpt_size=(80,24)
  resume_host._gpt_session_id=sid
  with patch.object(resume_host,'_gpt_session_location',return_value=(shared_home,shared_root)), \
+      patch('backend.chat_surface_host.prepare_codex_resume',return_value={'status':'unchanged'}), \
       patch('backend.chat_surface_host.shutil.which',return_value=str(resume_exe)):
   assert resume_host._start_gpt_tui()
   assert resume_host._gpt_capture_roots == (shared_root,)

@@ -7,6 +7,8 @@ memory on its own.
 
 from __future__ import annotations
 
+from backend.application_paths import HOME, USER_CODEX_HOME, WORKSPACE_ROOT, STATE_ROOT, private_runtime_path
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -23,8 +25,8 @@ from backend.codex_wallet import (
 
 # Keep the shared notes in the workspace so both TUI motors can read them and
 # the desktop remains usable under the managed filesystem policy.
-ROOT = Path("/home/GG/GoldGoblins/.grok/shared-memory")
-GROK_WORKSPACE_MEMORY = Path("/home/GG/.grok/memory/gg-6b4ad9a5")
+ROOT = Path(str(WORKSPACE_ROOT / '.grok/shared-memory'))
+GROK_WORKSPACE_MEMORY = private_runtime_path("grok_workspace_memory", STATE_ROOT / "shared-memory")
 
 
 def _session_path() -> Path | None:
@@ -230,7 +232,7 @@ def run(command: str) -> str:
         return f"[GPT memory] /dream consolidated {len(headings)} session files"
     if name == "/skills":
         names: set[str] = set()
-        for root in (Path("/home/GG/GoldGoblins/.grok/skills"), Path("/home/GG/.grok/skills"), Path("/home/GG/.codex/skills")):
+        for root in (Path(str(WORKSPACE_ROOT / '.grok/skills')), Path(str(HOME / '.grok/skills')), Path(str(USER_CODEX_HOME / 'skills'))):
             try:
                 names.update(path.parent.name for path in root.glob("*/SKILL.md"))
             except OSError:
@@ -238,7 +240,7 @@ def run(command: str) -> str:
         return "[GPT skills] " + (", ".join(sorted(names)) or "none")
     if name == "/plugins":
         names: set[str] = set()
-        for root in (Path("/home/GG/GoldGoblins/.grok/plugins"), Path("/home/GG/.grok/plugins"), Path("/home/GG/.codex/plugins")):
+        for root in (Path(str(WORKSPACE_ROOT / '.grok/plugins')), Path(str(HOME / '.grok/plugins')), Path(str(USER_CODEX_HOME / 'plugins'))):
             try:
                 names.update(path.name for path in root.iterdir() if path.is_dir())
             except OSError:
@@ -246,7 +248,7 @@ def run(command: str) -> str:
         return "[GPT plugins] " + (", ".join(sorted(names)) or "none")
     if name == "/hooks-list":
         hooks: list[str] = []
-        for root in (Path("/home/GG/GoldGoblins/.grok/hooks"), Path("/home/GG/.grok/hooks")):
+        for root in (Path(str(WORKSPACE_ROOT / '.grok/hooks')), Path(str(HOME / '.grok/hooks'))):
             try:
                 hooks.extend(str(path) for path in sorted(root.glob("*.json")))
             except OSError:

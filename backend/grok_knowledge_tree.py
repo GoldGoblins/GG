@@ -10,6 +10,8 @@ Tree growth is append-only FactStore observations bound to exact hashes.
 
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import argparse
 import ast
 import hashlib
@@ -61,7 +63,7 @@ NETWORK = "NONE"
 DESKTOP_PROJECT = Path(__file__).resolve().parents[1]
 REPO_ROOT = DESKTOP_PROJECT.parents[1]
 TREE_ROOT = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/knowledge-tree"
+    str(STATE_ROOT / 'knowledge-tree')
 )
 HEAD_SNAPSHOT = "HEAD.json"
 RECORD_KINDS = frozenset({"thought", "action", "code", "session"})

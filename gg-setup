@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Inspect an installation or expose its GG skills to the local CLI clients."""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import shutil
+import sys
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+
+def inspect_installation() -> dict:
+    from backend.application_paths import GPT_KNOWLEDGE_ROOT, bundled_skills
+    from backend.omni_gpt_profiles import discover_profiles
+    dependencies = json.loads((ROOT / "config/dependencies.json").read_text())
+    modules = {name: importlib.util.find_spec(name) is not None for name in ("PySide6", "PIL", "numpy", "duckdb")}
+    return {
+        "application": "GG AI DESKTOP",
+        "gpt_packages": len(discover_profiles()),
+        "bundled_gpt_sources": GPT_KNOWLEDGE_ROOT.is_relative_to(ROOT),
+        "gg_skills": [p.name for p in bundled_skills()],
+        "python_modules": modules,
+        "cli_dependencies": {item["name"]: shutil.which(item["name"]) is not None for item in dependencies["cli"]},
+        "external_plugins": [{"name": p["name"], "delivery": p["delivery"], "bundled": p["bundled"]} for p in dependencies["external_plugins"]],
+    }
+
+
+def prepare_clients() -> None:
+    from backend.application_paths import STATE_ROOT, bundled_skills, prepare_codex_skills
+    prepare_codex_skills(STATE_ROOT / "codex-gpt-tui")
+    grok = STATE_ROOT / "grok-home/skills"
+    grok.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for source in bundled_skills():
+        target = grok / source.name
+        if not target.exists() and not target.is_symlink():
+            target.symlink_to(source, target_is_directory=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare", action="store_true", help="register bundled GG skills in this user's CLI homes")
+    parser.add_argument("--check", action="store_true", help="inspect dependencies without changing settings")
+    args = parser.parse_args()
+    if args.prepare:
+        prepare_clients()
+    result = inspect_installation()
+    result["prepared"] = args.prepare
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["gpt_packages"] == 7 and result["python_modules"]["PySide6"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

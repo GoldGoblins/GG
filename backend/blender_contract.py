@@ -8,6 +8,8 @@ standing write authority.
 
 from __future__ import annotations
 
+from backend.application_paths import HOME
+
 import json
 import os
 import socket
@@ -32,7 +34,7 @@ SCENE_BLEND = CONFIG_DIR / "gg-village-kit.blend"
 WAYLAND_BLOCK = "gg-no-wayland"
 
 CANDIDATE_BINS = (
-    Path("/home/GG/blender-5.2.2-linux-x64/blender"),
+    Path(str(HOME / 'blender-5.2.2-linux-x64/blender')),
     Path(os.environ.get("GG_BLENDER") or ""),
     Path("/usr/bin/blender"),
     Path("/usr/local/bin/blender"),

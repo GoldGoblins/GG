@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import os
 import re
@@ -10,7 +12,7 @@ from typing import Any
 from backend.grok_worker_contract import DEV_GROK_HOME, GROK_CWD
 
 WALLET_INDEX = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/grok-tui-wallet-sessions.json"
+    str(STATE_ROOT / 'grok-tui-wallet-sessions.json')
 )
 
 _CTX_RE = re.compile(

@@ -1,5 +1,21 @@
 # GG GAME ENGINE · ten-layer foundation
 
+## Native 3D physics — 2026-10-13
+
+The engine now owns a general Box3D physics scene with static, kinematic and
+dynamic bodies, eight collider families, nine joint families, continuous
+collision, queries, contact/sensor events, sleep and native recording
+verification. The complete pinned C17 core is attributed and unmodified;
+GG's C ABI and Python adapter handle validation, lifetime and bounded output.
+
+The existing 60 Hz runtime advances configured physics once per tick, clears
+it on reset and releases it on shutdown. Native positions/quaternions reach
+explicitly registered Qt physics nodes through the render stream. The finite
+desktop command interface supplies geometry and controls without selecting
+game content. Build receipts verify the native source and binary before load.
+See [GAME_ENGINE_PHYSICS.md](docs/GAME_ENGINE_PHYSICS.md) for the API, build,
+tested capabilities, limits and recording semantics.
+
 ## Authored caricature variants — 2026-10-05
 
 The approved bent palm, scooped cottage roof and grass-capped rock establish

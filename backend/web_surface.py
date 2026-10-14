@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.application_paths import STATE_ROOT
+
 import json
 import os
 import shutil
@@ -11,10 +13,10 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-SITE_ROOT = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site")
-IMPORT_DROP = Path("/home/GG/.local/state/goldgoblins/gg-ai-desktop/site-import")
+SITE_ROOT = Path(str(STATE_ROOT / 'site'))
+IMPORT_DROP = Path(str(STATE_ROOT / 'site-import'))
 PROFILE_ROOT = Path(
-    "/home/GG/.local/state/goldgoblins/gg-ai-desktop/web-profile"
+    str(STATE_ROOT / 'web-profile')
 )
 SKIP_IMPORT_NAMES = {
     "wp-config.php",

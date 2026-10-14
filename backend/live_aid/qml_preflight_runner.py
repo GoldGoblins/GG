@@ -11,8 +11,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from backend.application_paths import HOME, SUPPORT_ROOT, WORKSPACE_ROOT
+
 PROJECT = Path(__file__).resolve().parents[2]
-REPO_ROOT = PROJECT.parents[1]
+REPO_ROOT = SUPPORT_ROOT if SUPPORT_ROOT.is_dir() else WORKSPACE_ROOT
 QML_GATE = REPO_ROOT / "infrastructure/scripts/gg-code-gate-qml"
 
 REQUEST_SCHEMA = "gg.live-aid.qml-preflight-request.v1"
@@ -601,7 +603,7 @@ def run_request(
         env.update(
             {
                 "LC_ALL": "C.UTF-8",
-                "PATH": "/usr/bin:/bin:/home/GG/.local/bin",
+                "PATH": "/usr/bin:/bin:" + str(HOME / ".local/bin"),
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONNOUSERSITE": "1",
                 "XDG_STATE_HOME": str(state),

@@ -1,6 +1,6 @@
 # GG OmniGPT – gemensam lokal profilkatalog
 
-GG AI Desktop använder GPT-profilerna i `/home/GG/GG-KNOWLEDGE/web-gpts` som
+GG AI Desktop använder de medföljande GPT-profilerna i `knowledge/web-gpts` som
 ett gemensamt kunskaps- och beteendelager för både GROK och GPT. `GG-idekompassen`
 är alltid den första tolkningslinsen. Övriga profiler väljs internt efter
 uppgift; användaren behöver inte byta GPT eller motor.
@@ -23,8 +23,8 @@ Profilerna som ingår:
   lokal-först webbdrift.
 
 Runtime-routing och bounded context finns i
-`backend/omni_gpt_profiles.py`. Källpaketen lämnas på sin gemensamma plats så
-att uppdateringar syns för båda motorerna. Modulen läser Idékompassens kärna
+`backend/omni_gpt_profiles.py`. Källpaketen ingår i programkatalogen och läses
+av båda motorerna från samma plats. Modulen läser Idékompassens kärna
 varje relevant tur och hämtar därefter begränsade, uppgiftsrelevanta utdrag;
 den stora Webmaster-källan dumpas inte blint in i varje prompt.
 

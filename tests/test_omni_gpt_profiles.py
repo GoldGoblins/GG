@@ -51,6 +51,17 @@ def main() -> int:
         assert "selected_for_this_turn=idekompassen" in compact
         assert "[SAME_TASK_DESK]" in compact
         assert "parallel_agent_brain=FORBIDDEN" in compact
+        modeling = build_context("Modellera en figur från en bild i Blender EXT", root=root, max_chars=8000)
+        assert "[GG BLENDER WORKFLOW]" in modeling
+        assert "gg-blender-reference-workflow/SKILL.md" in modeling
+        assert len(modeling) <= 8000
+        modeling_compact = build_context("Modellera från en bild", root=root, max_chars=2200,
+                                         include_registry=False)
+        assert "[GG BLENDER WORKFLOW]" in modeling_compact
+        assert "[PROFILE idekompassen" in modeling_compact
+        assert len(modeling_compact) <= 2200
+        unrelated = build_context("OSINT anomalier och blockchain", root=root, max_chars=8000)
+        assert "[GG BLENDER WORKFLOW]" not in unrelated
 
     import main
     from backend.grok_worker_contract import ENGINE_GPT_TUI, ENGINE_LOCAL_QWEN
